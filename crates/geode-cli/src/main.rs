@@ -10,13 +10,14 @@
 //! `Error::NotImplemented` (exit 1 usage) until fullstack G1b wires the
 //! real `cmd::keyring` module.
 //!
-//! v0.2.1 G2c: `agent` subcommand is registered (clap help chrome,
-//! frontend-owned) so `geode agent --help` documents the agent plane verbs
-//! (06-agent-plane: serve, token issue/inspect, read/write/list). The
-//! dispatch stubs to `Error::NotImplemented` (exit 1 usage) until fullstack
-//! wires `cmd::agent`. `--token`/`GEODE_TOKEN` is scoped to the agent verbs,
-//! NOT a global clap flag, so `geode tui` cannot gain a `--token` unlock
-//! path (14-tui §1.4: the TUI is a human surface).
+//! v0.2.2 G2c: `agent` subcommand help chrome is frontend-owned (clap
+//! shapes in this file) so `geode agent --help` documents the agent plane
+//! verbs (06-agent-plane: serve, token issue/inspect, read/write/list).
+//! Fullstack G1 (PR #20) wired `cmd::agent::run` for serve/read/write/list;
+//! the chrome here MUST stay in sync with the shipped verbs. `--token`/
+//! `GEODE_TOKEN` is scoped to the agent verbs, NOT a global clap flag, so
+//! `geode tui` cannot gain a `--token` unlock path (14-tui §1.4: the TUI is
+//! a human surface).
 //!
 //! Exit-code discipline (05-cli 3): clap's default error exit is 2, which
 //! collides with the auth/integrity family. We intercept clap errors and
@@ -97,9 +98,8 @@ enum Commands {
     Keyring(KeyringArgs),
     /// Agent plane (06-agent-plane): serve MCP over stdio/socket, issue and
     /// inspect scoped tokens, and run the read/write/list tool verbs under a
-    /// token. Chrome-only in v0.2.1 G2c — `--help` documents the verbs; the
-    /// dispatch stubs to `Error::NotImplemented` (exit 1 usage) until
-    /// fullstack wires `cmd::agent`.
+    /// token. Help chrome is frontend-owned (G2c); dispatch is wired by
+    /// fullstack G1 (PR #20) to `cmd::agent::run`.
     Agent(AgentArgs),
     /// Ratatui operator surface (14-tui). With the `tui` feature off
     /// (core-profile build) this prints "not available" and exits 1.
@@ -167,10 +167,10 @@ pub enum KeyringCmd {
 }
 
 /// `geode agent` — agent plane verbs (05-cli 2.6, 06-agent-plane). Frontend
-/// registers the subcommand shape so `geode agent --help` documents the
-/// verbs; fullstack wires the real `cmd::agent` module. Until then the
-/// dispatch stubs to `Error::NotImplemented` (exit 1 usage). No key bytes
-/// are printed by this chrome — see `output.rs` (public ids only).
+/// owns the clap help chrome (G2c) so `geode agent --help` documents the
+/// verbs; fullstack G1 (PR #20) wired `cmd::agent::run` for serve/read/
+/// write/list. No key bytes are printed by this chrome — see `output.rs`
+/// (public ids only).
 ///
 /// `--token`/`GEODE_TOKEN` is the agent identity path (05-cli 1). It is
 /// scoped to the agent verbs below, NOT a global clap flag, so it cannot
