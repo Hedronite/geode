@@ -1,7 +1,7 @@
 //! `geode keyring` — named identity keys (05-cli 2.1), a thin CLI over
 //! `geode_grotto::keyring` (G1a). The index is `keyring.json`
-//! (`schemas/keyring.schema.json`): paths/labels/key_ids only, never secret
-//! material. The first added key becomes the keyring `default` when none is
+//! (`schemas/keyring.schema.json`): labels, paths, and key ids only —
+//! never secret material. The first added key becomes the keyring `default` when none is
 //! set (and we say so when it happens).
 
 use std::path::Path;

@@ -155,8 +155,8 @@ pub fn require_key(global: &crate::GlobalArgs) -> Result<PathBuf> {
     }
     if let Some(index) = geode_grotto::keyring::default_keyring_path() {
         if let Ok(kr) = geode_grotto::keyring::load_keyring(&index) {
-            if let Some(dk) = kr.default.and_then(|id| kr.find(&id)) {
-                return Ok(PathBuf::from(&dk.path));
+            if let Some(path) = kr.default.as_deref().and_then(|id| kr.find(id)).map(|k| PathBuf::from(&k.path)) {
+                return Ok(path);
             }
         }
     }
