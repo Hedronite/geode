@@ -5,6 +5,11 @@
 //! chrome stay frontend-owned (G0c/G4). `geode tui` is a stub that exits 1
 //! on a `core`-profile build (no `tui` feature) per 05-cli 2.9 / 14-tui 2.3.
 //!
+//! v0.2.0 G1c: `keyring` subcommand is registered (clap help chrome,
+//! frontend-owned) so `--help` lists it. The dispatch stubs to
+//! `Error::NotImplemented` (exit 1 usage) until fullstack G1b wires the
+//! real `cmd::keyring` module.
+//!
 //! Exit-code discipline (05-cli 3): clap's default error exit is 2, which
 //! collides with the auth/integrity family. We intercept clap errors and
 //! force usage/IO/config errors to exit **1** so scripts can distinguish
@@ -67,6 +72,8 @@ enum Commands {
     List(cmd::list::ListArgs),
     /// Print one object to stdout.
     Cat(cmd::list::CatArgs),
+    /// Manage the keyring (named identity keys, 05-cli 2.1).
+    Keyring(KeyringArgs),
     /// Ratatui operator surface (not in this build — profile `core`).
     Tui,
 }
@@ -81,9 +88,35 @@ impl Commands {
             Self::Verify(_) => "verify",
             Self::List(_) => "list",
             Self::Cat(_) => "cat",
+            Self::Keyring(_) => "keyring",
             Self::Tui => "tui",
         }
     }
+}
+
+/// `geode keyring` — keyring management (05-cli 2.1). Frontend registers the
+/// subcommand shape so `--help` lists it; fullstack G1b wires the real
+/// `cmd::keyring` module. Until then the dispatch stubs to
+/// `Error::NotImplemented` (exit 1 usage).
+#[derive(Args, Debug)]
+pub struct KeyringArgs {
+    #[command(subcommand)]
+    pub cmd: KeyringCmd,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum KeyringCmd {
+    /// List registered identity keys.
+    List,
+    /// Add a key file to the keyring with a label.
+    Add {
+        /// Path to the key file.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        /// Label for the key.
+        #[arg(long, value_name = "NAME")]
+        label: String,
+    },
 }
 
 fn main() {
@@ -125,6 +158,7 @@ fn main() {
         Commands::Verify(a) => cmd::verify::run(a, &cli.global, out),
         Commands::List(a) => cmd::list::run(a, &cli.global, out),
         Commands::Cat(a) => cmd::list::cat(a, &cli.global, out),
+        Commands::Keyring(a) => cmd::keyring::run(a, out),
         // `geode tui` on a build without the `tui` feature: exit 1, not 2.
         Commands::Tui => output::tui_unavailable(),
     };

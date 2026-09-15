@@ -14,11 +14,13 @@
 //!
 //! Reference: SPEC-v010 G2, CHECKLIST-v010 G2a-G2c, 02-cryptography, 03-format.
 //!
-//! # v0.2.0 / G0b
+//! # v0.2.0 / G1a
 //!
-//! Default key path ( via XDG) and
-//! refusal of group/world-readable key files (02-cryptography 6.1). Package
-//! rename to  is G1, not here.
+//! Package renamed to `geode-grotto` (Rust import `geode_grotto`); the
+//! directory stays `crates/geode-core`. OS keyring storage for ISK / wrap
+//! passphrase via the `keyring` crate (Keychain / Credential Manager /
+//! Secret Service), with a 0600 file fallback. `keyring.json` is an index
+//! of paths/labels only — never ISK (02-cryptography 6.2).
 
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
@@ -30,6 +32,7 @@ pub mod aead;
 pub mod chunk;
 pub mod kdf;
 pub mod keyfile;
+pub mod keyring;
 pub mod manifest;
 pub mod name;
 pub mod object;

@@ -13,7 +13,7 @@ name = "geode"
 path = "src/main.rs"
 
 [dependencies]
-geode-core = { path = "../geode-core" }
+geode-grotto = { path = "../geode-core" }
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 getrandom = "0.3"

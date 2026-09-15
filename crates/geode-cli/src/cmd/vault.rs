@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Subcommand};
-use geode_core::kdf::{self, Epoch};
-use geode_core::recipients::{self, Recipients};
-use geode_core::{Error, Result};
+use geode_grotto::kdf::{self, Epoch};
+use geode_grotto::recipients::{self, Recipients};
+use geode_grotto::{Error, Result};
 
 use crate::{cmd, GlobalArgs, OutMode};
 
@@ -56,12 +56,12 @@ fn init(args: &InitArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     let key_path = cmd::require_key(global)?;
     let isk = cmd::load_isk(&key_path)?;
 
-    let vault_id = geode_core::vault::new_vault_id()?;
+    let vault_id = geode_grotto::vault::new_vault_id()?;
     let epoch = Epoch(1);
     let key_id = kdf::derive_key_id(&isk)?;
     let ek = kdf::derive_epoch_key(&isk, vault_id, epoch, "")?;
 
-    geode_core::vault::init_vault_dir(&args.dir, vault_id, epoch)?;
+    geode_grotto::vault::init_vault_dir(&args.dir, vault_id, epoch)?;
 
     // recipients.json: symmetric wrap of EK for this identity (02 7.1).
     let recipient = recipients::wrap_symmetric(&ek, &isk, vault_id, epoch, key_id)?;
@@ -72,17 +72,17 @@ fn init(args: &InitArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     };
     let recs_text = serde_json::to_string_pretty(&recs)
         .map_err(|e| Error::Format(format!("recipients serialize: {e}")))?;
-    geode_core::vault::write_atomic(&args.dir.join("recipients.json"), recs_text.as_bytes())?;
+    geode_grotto::vault::write_atomic(&args.dir.join("recipients.json"), recs_text.as_bytes())?;
 
     // header.json: JSON twin of the VaultHeader fields (03-format 3), MAC'd.
     let mk = kdf::derive_manifest_key(&ek, vault_id, epoch);
     let mut header = serde_json::json!({
         "version": 1,
-        "suite": geode_core::SUITE_0X01,
+        "suite": geode_grotto::SUITE_0X01,
         "flags": 0,
         "vault_id": cmd::hex(&vault_id.0),
         "epoch": epoch.0,
-        "chunk_size_default": geode_core::chunk::DEFAULT_CHUNK_SIZE,
+        "chunk_size_default": geode_grotto::chunk::DEFAULT_CHUNK_SIZE,
         "creator_key_id": cmd::hex(&key_id.0),
         "created_unix_ms": now_ms(),
     });
@@ -92,14 +92,14 @@ fn init(args: &InitArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     cmd::write_header(&args.dir, header, &mk)?;
 
     // Empty manifest with a valid MAC (04-vault 1).
-    let manifest = geode_core::manifest::Manifest {
+    let manifest = geode_grotto::manifest::Manifest {
         vault_id,
         epoch,
-        suite: geode_core::SUITE_0X01,
+        suite: geode_grotto::SUITE_0X01,
         flags: 0,
         generated_at: now_ms() / 1000,
         generator: format!("geode {}", env!("CARGO_PKG_VERSION")),
-        root: geode_core::manifest::entries_root(&[]),
+        root: geode_grotto::manifest::entries_root(&[]),
         entry_count: 0,
         total_plain_bytes: 0,
         total_cipher_bytes: 0,

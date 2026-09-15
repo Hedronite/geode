@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::Args;
-use geode_core::{object, vault as corevault, Error, Result};
+use geode_grotto::{object, vault as corevault, Error, Result};
 
 use crate::{cmd, GlobalArgs, OutMode};
 
