@@ -7,6 +7,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod agent;
 pub mod key;
 pub mod keyring;
 pub mod list;

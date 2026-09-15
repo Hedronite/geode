@@ -238,8 +238,8 @@ pub enum TokenCmd {
         /// Principal id (`agent:…`, `h3s:…`, `ci:…`).
         #[arg(long, value_name = "ID")]
         principal: String,
-        /// Token lifetime (e.g. `15m`).
-        #[arg(long, value_name = "DURATION")]
+        /// Token lifetime (e.g. `15m`; default 15m, max 12h).
+        #[arg(long, value_name = "DURATION", default_value = "15m")]
         ttl: String,
         /// Allowed operation set (comma list: `list,read,write,…`).
         #[arg(long, value_name = "OPS")]
@@ -253,8 +253,15 @@ pub enum TokenCmd {
     },
     /// Inspect a sealed token: principal, ops, prefixes, ttl, expiry.
     /// Read-only — the TUI mirrors this view (14-tui §6.10); issuance is
-    /// CLI-only.
-    Inspect,
+    /// CLI-only. Token source: PATH, else `$GEODE_TOKEN`, else stdin.
+    Inspect {
+        /// Sealed token file to inspect.
+        #[arg(value_name = "TOKEN")]
+        token: Option<PathBuf>,
+        /// Vault the token was issued for (needed to verify the MAC).
+        #[arg(long, value_name = "DIR")]
+        vault: PathBuf,
+    },
 }
 
 fn main() {
@@ -299,10 +306,7 @@ fn main() {
         Commands::Snapshot(a) => cmd::snapshot::run(a, &cli.global, out),
         Commands::Gc(a) => cmd::snapshot::gc(a, &cli.global, out),
         Commands::Keyring(a) => cmd::keyring::run(a, out),
-        // G2c (v0.2.1): agent plane chrome. `--help` documents the verbs
-        // (06-agent-plane); behavior is fullstack's later gate. Stub to
-        // `Error::NotImplemented`, which `cmd::fail` maps to exit 1 (usage).
-        Commands::Agent(_) => Err(geode_grotto::Error::NotImplemented),
+        Commands::Agent(a) => cmd::agent::run(a, &cli.global, out),
         // Feature on: the TUI starts (14-tui 2), wired with the vault path
         // and the global `--key` / `GEODE_KEY_FILE` identity path (G5). The
         // TUI unlocks in-process via `geode-grotto` (14-tui 3); the CLI stays
