@@ -47,8 +47,10 @@ impl ChunkAd {
 /// `          || object_id || le64(i) || le32(epoch))`
 ///
 /// No nonce is stored; reuse is forbidden by construction provided
-/// `object_id` is unique per EK.
-fn derive_nonce(ek: &EpochKey, object_id: &ObjectId, i: u64, epoch: Epoch) -> Nonce {
+/// `object_id` is unique per EK. Exposed publicly so vector generators and
+/// adapters can reproduce the nonce bound into the AEAD without re-deriving.
+#[must_use]
+pub fn derive_chunk_nonce(ek: &EpochKey, object_id: &ObjectId, i: u64, epoch: Epoch) -> [u8; 32] {
     let mut h = blake3::Hasher::new_keyed(ek.as_bytes());
     h.update(domains::CHUNK_NONCE.as_bytes());
     h.update(&object_id.0);
@@ -58,6 +60,10 @@ fn derive_nonce(ek: &EpochKey, object_id: &ObjectId, i: u64, epoch: Epoch) -> No
     let mut nonce = [0u8; 32];
     nonce.copy_from_slice(out.as_bytes());
     nonce
+}
+
+fn derive_nonce(ek: &EpochKey, object_id: &ObjectId, i: u64, epoch: Epoch) -> Nonce {
+    derive_chunk_nonce(ek, object_id, i, epoch)
 }
 
 fn ek_to_key(ek: &EpochKey) -> Key {
