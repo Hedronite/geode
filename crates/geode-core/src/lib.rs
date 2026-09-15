@@ -40,6 +40,18 @@
 //! by a synthetic clock. No `ratatui` / `crossterm` in `geode-grotto`.
 
 //!
+//! # v0.2.1 / G2a
+//!
+//! `token` module (02-cryptography 9; 06-agent-plane 2): real
+//! issue/inspect of scoped TTL unwrap tokens. `TokenKey = BLAKE3-KDF(EK,
+//! "geode/v1/token", token_id)`; tokens are **not the ISK** and never carry key
+//! material. Sealed wire format
+//! `GTOK(4) || suite(1) || token_id(16) || tag(16) || ciphertext` under
+//! AEGIS-256-X2 with AD `geode/v1/token`. `inspect` verifies the tag and rejects
+//! expired / not-yet-valid tokens with `Error::TokenInvalid`; `issue` fails closed
+//! when no `EpochKey` is supplied (locked session has no EK). TTL clamped to
+//! `[0, MAX_TTL_SECS]` (15m default / 12h max).
+//!
 //! # v0.2.1 / G1a
 //!
 //! `snapshot` module (04-vault 7): create/list/restore of authenticated
