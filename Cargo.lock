@@ -837,9 +837,14 @@ dependencies = [
 name = "geode-tui"
 version = "0.1.1"
 dependencies = [
+ "blake3",
  "crossterm",
  "geode-grotto",
  "ratatui",
+ "rpassword",
+ "serde_json",
+ "tempfile",
+ "zeroize",
 ]
 
 [[package]]
