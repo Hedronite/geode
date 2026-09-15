@@ -85,12 +85,15 @@ pub fn run(args: &OpenArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     let mut plain_bytes = 0u64;
 
     for e in &ctx.manifest.entries {
+        // Operator-facing path: open sealed names (02-cryptography 5); the
+        // user prefix and the extraction tree are plaintext.
+        let plain = cmd::seal::display_path(&ctx, e)?;
         if let Some(p) = &prefix {
-            if !e.path.starts_with(p.as_str()) && e.path != p.trim_end_matches('/') {
+            if !plain.starts_with(p.as_str()) && plain != p.trim_end_matches('/') {
                 continue;
             }
         }
-        let target = args.dst.join(safe_rel(&e.path)?);
+        let target = args.dst.join(safe_rel(&plain)?);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(Error::Io)?;
         }
