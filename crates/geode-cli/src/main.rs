@@ -22,7 +22,7 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     name = "geode",
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (GDE1 suite 0x01)"),
     about = "Geode — Hedronite file custody (GDE1, suite 0x01)"
 )]
 struct Cli {
@@ -87,6 +87,10 @@ impl Commands {
 }
 
 fn main() {
+    // G4b: warn if GEODE_PASSPHRASE is set (SPEC 5.5, 05-cli 1) - once per
+    // invocation, before any passphrase prompt or verb dispatch.
+    crate::output::warn_passphrase_env();
+
     // clap's default Error::exit() uses code 2, which is the auth/integrity
     // family in Geode (05-cli 3). Intercept: --help/--version are successful
     // displays (exit 0); all other clap errors are usage conditions (exit 1).

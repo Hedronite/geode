@@ -311,7 +311,7 @@ pub fn fail(out: OutMode, verb: &str, err: &Error) -> ! {
                 })
             );
         }
-        OutMode::Text => eprintln!("geode: {verb}: {err}"),
+        OutMode::Text => eprintln!("{}", crate::output::human_error(verb, err)),
     }
     std::process::exit(code_exit);
 }

@@ -20,6 +20,7 @@ getrandom = "0.3"
 serde_json = "1"
 walkdir = "2"
 zeroize = "1"
+rpassword = "7"
 
 
 [lints]

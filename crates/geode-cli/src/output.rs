@@ -1,20 +1,23 @@
 //! Human-facing CLI output — text and error chrome for `geode`.
 //!
-//! Owner: frontend-geode (G0c, G4). `geode-cli` calls these helpers; they
-//! never print secret material (ISK/FEK/passphrase/token/wrap bytes). The
-//! JSON event path (`--output json`) lands in G3 with the verb modules; this
+//! Owner: frontend-geode (G0c, G4, G5c). `geode-cli` calls these helpers.
+//! This module NEVER prints secret material (ISK/FEK/passphrase/token/wrap
+//! bytes). It prints only public identifiers (`vault_id`, `key_id`, `epoch`,
+//! manifest hash, `object_id` prefix, paths, counts, sizes) and human error
+//! text. The JSON event path (`--output json`) lives in `cmd` (G3); this
 //! module owns the *human* text surface and the exit-code family (05-cli §3).
 //!
-//! G0c ships the exit-code table and the `tui` stub. The usage/auth error
-//! printers, footer line, and `GEODE_PASSPHRASE` warning land in G4 with the
-//! passphrase and error chrome, wired from the G3 verb modules — kept out
-//! here until they have callers so `clippy -D warnings` stays green.
+//! G4 ships: exit-code table, `tui` stub (G0c), `GEODE_PASSPHRASE` warning,
+//! no-echo passphrase prompt, and the human error formatter that names the
+//! exit family (2 vs 1).
 
 use std::io::Write;
 
+use geode_core::Error;
+
 /// Exit codes — 05-cli §3. Scripts MUST distinguish 2 from 1.
-/// `USAGE` is live in G0c (the `tui` stub); the rest are used by G3/G4 verb
-/// modules and are `#[allow(dead_code)]` until those land.
+/// `LOCKED` (5) has no mapping in v0.1.0 (no mount/lock path) and is
+/// `#[allow(dead_code)]` until a verb produces it.
 #[allow(dead_code)]
 pub mod exit {
     pub const OK: i32 = 0;
@@ -38,6 +41,67 @@ pub fn tui_unavailable() -> ! {
     std::process::exit(exit::USAGE);
 }
 
+/// `GEODE_PASSPHRASE` warning (SPEC §5.5, 05-cli §1). Printed to stderr once
+/// when the env var is set. The env var is a CI/script escape hatch, not the
+/// happy path — it may be visible in process listings.
+pub fn warn_passphrase_env() {
+    if std::env::var_os("GEODE_PASSPHRASE").is_some() {
+        let mut err = std::io::stderr().lock();
+        let _ = writeln!(
+            err,
+            "geode: warning: GEODE_PASSPHRASE is set. Passphrase-from-env is a \
+             CI/script escape hatch and may be visible in process listings; \
+             prefer `--passphrase-fd` or the no-echo prompt."
+        );
+    }
+}
+
+/// Read a passphrase from the terminal with no echo (G4b, 05-cli §1).
+///
+/// Uses `rpassword` so we avoid `unsafe` (forbidden workspace-wide). The
+/// returned buffer is `Zeroizing` so it is wiped on drop. On a TTY-less
+/// host (CI) this returns an error; callers SHOULD then fall back to
+/// `--passphrase-fd` or surface the failure — they MUST NOT echo the
+/// passphrase. The prompt label is printed to stderr first.
+pub fn prompt_passphrase(label: &str) -> std::io::Result<zeroize::Zeroizing<String>> {
+    let mut err = std::io::stderr().lock();
+    let _ = write!(err, "{label}");
+    let _ = err.flush();
+    let pass = rpassword::read_password()
+        .map(zeroize::Zeroizing::new)
+        .map_err(std::io::Error::other)?;
+    let _ = writeln!(err);
+    Ok(pass)
+}
+
+/// Human error text for a failed verb (G4c, 05-cli §3). Names the exit
+/// family so an operator can tell "you typed it wrong" (1) from "the vault
+/// is compromised" (2). Never includes key bytes — `Error` variants carry
+/// only public context (paths, messages, io errors), never ISK/FEK.
+#[must_use]
+pub fn human_error(verb: &str, err: &Error) -> String {
+    let (family, code) = exit_family(err);
+    format!("geode {verb}: {err} (exit {code} — {family})")
+}
+
+/// Map a `geode-core::Error` to its exit family label + code (05-cli §3).
+/// Mirrors `cmd::map_error` but returns the human label too.
+#[must_use]
+pub fn exit_family(err: &Error) -> (&'static str, i32) {
+    match err {
+        Error::AuthFail => ("authentication/integrity failure", exit::AUTH),
+        Error::Io(e) if e.kind() == std::io::ErrorKind::NotFound => ("not found", exit::USAGE),
+        Error::Io(_) => ("io/usage", exit::USAGE),
+        Error::Format(m) if m.contains("unknown cipher suite") => {
+            ("unsupported suite", exit::AUTH)
+        }
+        Error::Format(m) if m.contains("unknown magic") => ("authentication/integrity failure", exit::AUTH),
+        Error::Format(_) | Error::Crypto(_) | Error::NotImplemented => ("usage", exit::USAGE),
+        Error::PolicyDeny => ("policy deny", exit::POLICY),
+        Error::TokenInvalid => ("token invalid", exit::TOKEN),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,5 +114,34 @@ mod tests {
         assert_eq!(exit::POLICY, 3);
         assert_eq!(exit::TOKEN, 4);
         assert_eq!(exit::LOCKED, 5);
+    }
+
+    #[test]
+    fn auth_fail_is_exit_2() {
+        let (label, code) = exit_family(&Error::AuthFail);
+        assert_eq!(code, 2);
+        assert!(label.contains("authentication"));
+    }
+
+    #[test]
+    fn format_usage_is_exit_1() {
+        let (label, code) = exit_family(&Error::Format("bad hex".into()));
+        assert_eq!(code, 1);
+        assert_eq!(label, "usage");
+    }
+
+    #[test]
+    fn policy_deny_is_exit_3() {
+        let (_, code) = exit_family(&Error::PolicyDeny);
+        assert_eq!(code, 3);
+    }
+
+    #[test]
+    fn human_error_names_family() {
+        let s = human_error("verify", &Error::AuthFail);
+        assert!(s.contains("exit 2"));
+        assert!(s.contains("authentication"));
+        // No key bytes are ever present in Error variants.
+        assert!(!s.contains("ISK"));
     }
 }

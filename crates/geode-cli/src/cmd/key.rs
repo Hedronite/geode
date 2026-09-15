@@ -25,6 +25,12 @@ pub struct KeygenArgs {
 
 pub fn run(args: &KeygenArgs, out: OutMode) -> Result<()> {
     if args.password || args.cheap {
+        // G4b: exercise the no-echo prompt path, then surface the tracked
+        // wrap-API gap. The passphrase is dropped (zeroized) — wrap needs a
+        // geode-core keyfile API (crate-private Secret32).
+        if args.password {
+            let _ = crate::output::prompt_passphrase("passphrase: ");
+        }
         return Err(Error::Format(
             "--password wrap is not in v0.1.0 (geode-core keyfile API gap; tracked for backend)"
                 .into(),
