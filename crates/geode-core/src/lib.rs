@@ -13,6 +13,12 @@
 //! stubbed (G3/agent plane).
 //!
 //! Reference: SPEC-v010 G2, CHECKLIST-v010 G2a-G2c, 02-cryptography, 03-format.
+//!
+//! # v0.2.0 / G0b
+//!
+//! Default key path ( via XDG) and
+//! refusal of group/world-readable key files (02-cryptography 6.1). Package
+//! rename to  is G1, not here.
 
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
@@ -23,6 +29,7 @@
 pub mod aead;
 pub mod chunk;
 pub mod kdf;
+pub mod keyfile;
 pub mod manifest;
 pub mod name;
 pub mod object;
