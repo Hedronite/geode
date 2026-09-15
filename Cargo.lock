@@ -267,6 +267,7 @@ dependencies = [
  "getrandom 0.3.4",
  "rpassword",
  "serde_json",
+ "tempfile",
  "walkdir",
  "zeroize",
 ]
