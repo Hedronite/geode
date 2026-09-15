@@ -21,6 +21,14 @@
 //! passphrase via the `keyring` crate (Keychain / Credential Manager /
 //! Secret Service), with a 0600 file fallback. `keyring.json` is an index
 //! of paths/labels only — never ISK (02-cryptography 6.2).
+//!
+//! # v0.2.0 / G4
+//!
+//! `session` types (06 §2; 14-tui §3): unlock loads ISK, derives EK, and
+//! **zeroizes ISK** before returning; the session holds only EK plus public
+//! ids. `lock` drops EK (zeroized on drop). Idle lock (default 15 min, `0` =
+//! never) is polled by the host. No TUI crate lives in `geode-grotto` —
+//! `ratatui` / `crossterm` stay out of core so this module is testable headless.
 
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
@@ -38,6 +46,7 @@ pub mod name;
 pub mod object;
 pub mod policy;
 pub mod recipients;
+pub mod session;
 pub mod token;
 pub mod vault;
 pub mod wrap;
@@ -64,6 +73,10 @@ pub enum Error {
 
     #[error("geode-core: token expired or invalid")]
     TokenInvalid,
+
+    /// Session is locked: EK has been dropped (06 §2; 14-tui §3).
+    #[error("geode-core: session is locked (EK dropped)")]
+    Locked,
 
     #[error("geode-core: crypto: {0}")]
     Crypto(String),
