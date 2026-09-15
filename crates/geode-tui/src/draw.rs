@@ -23,7 +23,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, Pane, VerifyState, View, VERB_TABS};
+use crate::app::{App, Pane, SnapshotUi, VerifyState, View, VERB_TABS};
 use crate::theme::Palette;
 use crate::vault;
 
@@ -54,6 +54,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if app.verify_overlay() {
         render_verify(frame, frame.area(), app, palette);
+    }
+    if app.snapshot_overlay() {
+        render_snapshots(frame, frame.area(), app, palette);
     }
     if app.help() {
         render_help(frame, frame.area(), app, palette);
@@ -718,6 +721,10 @@ fn help_lines(palette: Palette) -> Vec<Line<'static>> {
             "  p                  preview (explicit, capped 64 KiB; Esc closes)",
             Style::default().fg(palette.muted),
         )),
+        Line::from(Span::styled(
+            "  s                  snapshots (list / n create / r restore)",
+            Style::default().fg(palette.muted),
+        )),
         Line::from(""),
         Line::from(Span::styled(
             "picker",
@@ -755,6 +762,106 @@ fn help_lines(palette: Palette) -> Vec<Line<'static>> {
             Style::default().fg(palette.gold),
         )),
     ]
+}
+
+fn render_snapshots(frame: &mut Frame, area: Rect, app: &App, palette: Palette) {
+    let rect = overlay_rect(area, 64, 14);
+    let inner = paint_opaque_panel(frame, rect, palette, " snapshots — `s` to close ");
+    let mut lines = match app.snapshot_ui() {
+        SnapshotUi::Name { buf } => vec![
+            Line::from(Span::styled(
+                "create named snapshot (core envelope)",
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("name: {buf}_"),
+                Style::default().fg(palette.fg),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Enter create · Esc cancel · 1–64 [A-Za-z0-9._-]",
+                Style::default().fg(palette.muted),
+            )),
+        ],
+        SnapshotUi::ConfirmRestore { name, epoch } => vec![
+            Line::from(Span::styled(
+                "restore snapshot — manifest pointer move",
+                Style::default()
+                    .fg(palette.gold)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("restore `{name}` epoch {epoch}?"),
+                Style::default().fg(palette.fg).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "y restore · n / Esc cancel",
+                Style::default().fg(palette.muted),
+            )),
+        ],
+        SnapshotUi::List | SnapshotUi::Closed => {
+            if app.snapshot_rows().is_empty() {
+                vec![
+                    Line::from(Span::styled(
+                        "no snapshots — `s` to name one",
+                        Style::default().fg(palette.muted),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "`n` create · Esc close",
+                        Style::default().fg(palette.muted),
+                    )),
+                ]
+            } else {
+                let mut rows = vec![Line::from(Span::styled(
+                    "name                     epoch  entries  created_at",
+                    Style::default().fg(palette.muted),
+                ))];
+                for (i, snap) in app.snapshot_rows().iter().enumerate() {
+                    let mark = if i == app.snapshot_focus() {
+                        "▸ "
+                    } else {
+                        "  "
+                    };
+                    let style = if i == app.snapshot_focus() {
+                        Style::default()
+                            .fg(palette.bg)
+                            .bg(palette.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(palette.fg)
+                    };
+                    rows.push(Line::from(Span::styled(
+                        format!(
+                            "{mark}{:<22} {:>5}  {:>7}  {}",
+                            snap.name, snap.epoch, snap.entries, snap.created_at
+                        ),
+                        style,
+                    )));
+                }
+                rows.push(Line::from(""));
+                rows.push(Line::from(Span::styled(
+                    "j/k move · n create · r/Enter restore · Esc close",
+                    Style::default().fg(palette.muted),
+                )));
+                rows
+            }
+        }
+    };
+    if lines.len() < 3 {
+        lines.push(Line::from(""));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(palette.bg).fg(palette.fg))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
 }
 
 fn render_help(frame: &mut Frame, area: Rect, app: &App, palette: Palette) {

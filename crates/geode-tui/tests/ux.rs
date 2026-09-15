@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use geode_tui::app::{App, Pane, VerifyState, View};
+use geode_tui::app::{App, Pane, SnapshotUi, VerifyState, View};
 use geode_tui::keys::handle_key;
 use geode_tui::theme::{Appearance, Palette};
 use geode_tui::RunOptions;
@@ -377,5 +377,101 @@ fn splash_header_is_0_2_0_not_0_1_1() {
             && rendered.contains("keyring default")
             && rendered.contains("exit 0"),
         "splash missing brandmark footer: {rendered}"
+    );
+}
+
+#[test]
+fn snapshot_pane_lists_creates_confirms_restore_on_core_types() {
+    let fx = Fixture::new();
+    fx.build();
+    let mut app = open_app(&fx, Appearance::Graphite);
+    press_char(&mut app, 's');
+    assert!(app.snapshot_overlay(), "s opens snapshot overlay");
+    assert!(app.snapshot_rows().is_empty(), "new vault has no snapshots");
+
+    press_char(&mut app, 'n');
+    assert!(
+        matches!(app.snapshot_ui(), SnapshotUi::Name { .. }),
+        "n starts name entry"
+    );
+    for c in "pre-edit".chars() {
+        press_char(&mut app, c);
+    }
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(app.snapshot_rows().len(), 1, "create lands a core snapshot");
+    assert_eq!(app.snapshot_rows()[0].name, "pre-edit");
+    assert_eq!(app.snapshot_rows()[0].epoch, 1);
+
+    press_char(&mut app, 'r');
+    match app.snapshot_ui() {
+        SnapshotUi::ConfirmRestore { name, epoch } => {
+            assert_eq!(name, "pre-edit");
+            assert_eq!(*epoch, 1, "confirm MUST name snapshot and epoch");
+        }
+        other => panic!("expected confirm restore, got {other:?}"),
+    }
+    press_char(&mut app, 'y');
+    assert!(
+        matches!(app.snapshot_ui(), SnapshotUi::List),
+        "y restores and returns to list"
+    );
+    assert!(!app.picker(), "restore keeps the vault open");
+
+    let (rendered, buf) = draw(&app, 80, 28);
+    assert!(
+        rendered.contains("pre-edit"),
+        "snapshot pane paints the core name: {rendered}"
+    );
+    assert!(
+        !rendered.contains("snapshot_mac"),
+        "must not paint snapshot_mac: {rendered}"
+    );
+    let want_bg = Palette::graphite().bg;
+    let mut opaque = 0u32;
+    let area = buf.area();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if buf[(x, y)].bg == want_bg {
+                opaque += 1;
+            }
+        }
+    }
+    assert!(
+        opaque > 40,
+        "snapshot overlay must be opaque, opaque={opaque}"
+    );
+}
+
+#[test]
+fn help_stays_opaque_over_snapshot_pane() {
+    let fx = Fixture::new();
+    fx.build();
+    let mut app = open_app(&fx, Appearance::Porcelain);
+    press_char(&mut app, 's');
+    press_char(&mut app, '?');
+    assert!(app.help());
+    let (rendered, buf) = draw(&app, 80, 36);
+    assert!(rendered.contains("Geode TUI"));
+    let want_bg = Palette::porcelain().bg;
+    let mut overlay = String::new();
+    let mut opaque = 0u32;
+    let area = buf.area();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &buf[(x, y)];
+            if cell.bg == want_bg {
+                opaque += 1;
+                overlay.push_str(cell.symbol());
+            }
+        }
+        overlay.push('\n');
+    }
+    assert!(
+        opaque > 80,
+        "help still opaque over snapshots, opaque={opaque}"
+    );
+    assert!(
+        !overlay.contains("hello.txt"),
+        "tree leaked through help+snapshot: {overlay}"
     );
 }

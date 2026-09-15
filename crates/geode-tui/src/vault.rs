@@ -21,7 +21,9 @@
 use std::path::{Path, PathBuf};
 
 use geode_grotto::aead::{self, ChunkAd};
-use geode_grotto::kdf::{self, derive_manifest_key, Epoch, EpochKey, IdentitySecret, KeyId, VaultId};
+use geode_grotto::kdf::{
+    self, derive_manifest_key, Epoch, EpochKey, IdentitySecret, KeyId, VaultId,
+};
 use geode_grotto::manifest::{self, Manifest};
 use geode_grotto::object::{self, ObjectHeader};
 use geode_grotto::session::{Session, DEFAULT_IDLE_LOCK};
@@ -120,7 +122,10 @@ fn load_isk(path: &Path) -> Result<IdentitySecret> {
     magic.copy_from_slice(&raw[0..4]);
     geode_grotto::assert_magic(&magic, geode_grotto::MAGIC_GKEY)?;
     if raw[4] != GKEY_VERSION {
-        return Err(Error::Format(format!("unsupported GKEY version {}", raw[4])));
+        return Err(Error::Format(format!(
+            "unsupported GKEY version {}",
+            raw[4]
+        )));
     }
     match raw[5] {
         GKEY_KIND_RAW => {
@@ -190,13 +195,19 @@ fn json_u64(value: &serde_json::Value, field: &str) -> Result<u64> {
 /// Path of the manifest for an epoch (03-format 2).
 #[must_use]
 fn manifest_path(root: &Path, epoch: Epoch) -> PathBuf {
-    root.join("epochs").join(format!("{:08}", epoch.0)).join("manifest.json")
+    root.join("epochs")
+        .join(format!("{:08}", epoch.0))
+        .join("manifest.json")
 }
 
 /// Verify `mac_field` (hex) over the JCS-canonicalized JSON minus that
 /// field. The MAC itself is computed by `geode-grotto::manifest`; this is
 /// orchestration only.
-fn verify_json_mac(manifest_key: &[u8; 32], value: &serde_json::Value, mac_field: &str) -> Result<()> {
+fn verify_json_mac(
+    manifest_key: &[u8; 32],
+    value: &serde_json::Value,
+    mac_field: &str,
+) -> Result<()> {
     let mac_hex = json_str(value, mac_field).map_err(|_| Error::AuthFail)?;
     let mut want = [0u8; 16];
     unhex(mac_hex, &mut want).map_err(|_| Error::AuthFail)?;
@@ -299,14 +310,16 @@ impl VaultCtx {
 /// `key` is `--key` / `GEODE_KEY_FILE`; `None` falls back to the XDG
 /// default when it exists. `vault` is the on-disk vault directory.
 pub fn open(vault: &Path, key: Option<&Path>) -> Result<VaultCtx> {
-
     let key_path = resolve_key_path(key)?;
     let isk = load_isk(&key_path)?;
 
     // Sentinel: cheap "is this even a geode vault" check (03-format 11).
     let sentinel = std::fs::read(vault.join("GEODE")).map_err(Error::Io)?;
     if !sentinel.starts_with(b"GDE1 vault") {
-        return Err(Error::Format(format!("{} is not a geode vault", vault.display())));
+        return Err(Error::Format(format!(
+            "{} is not a geode vault",
+            vault.display()
+        )));
     }
 
     // header.json is read unauthenticated here; the MAC check below
@@ -364,7 +377,9 @@ fn check_chunk(
         let this_plain = cs.min(header.plain_len - u64::from(j) * cs);
         let rec_len = 16 + usize::try_from(this_plain).unwrap_or(usize::MAX);
         if j == index {
-            let rec = chunks.get(offset..offset + rec_len).ok_or(Error::AuthFail)?;
+            let rec = chunks
+                .get(offset..offset + rec_len)
+                .ok_or(Error::AuthFail)?;
             let ad = ChunkAd {
                 suite: header.suite,
                 vault_id: header.vault_id,
@@ -474,7 +489,11 @@ pub fn preview(ctx: &VaultCtx, path: &str, max_bytes: u64) -> Result<Preview> {
         })?;
 
     let raw = corevault::read_object(ctx.root(), ctx.epoch(), &entry.object_id)?;
-    let bind: &[u8] = if entry.bind { entry.path.as_bytes() } else { b"" };
+    let bind: &[u8] = if entry.bind {
+        entry.path.as_bytes()
+    } else {
+        b""
+    };
     let (_hdr, data) = object::open_object(
         ek,
         &raw[..object::HEADER_SIZE],
@@ -499,4 +518,61 @@ pub fn preview(ctx: &VaultCtx, path: &str, max_bytes: u64) -> Result<Preview> {
         truncated,
         hash,
     })
+}
+
+/// Public snapshot row for the TUI pane (14-tui §6.6 / 04-vault 7).
+/// Names, epoch, timestamps, and entry counts only — never `snapshot_mac`
+/// bytes or embedded manifest bodies.
+#[derive(Debug, Clone)]
+pub struct SnapshotInfo {
+    pub name: String,
+    pub epoch: u32,
+    pub created_at: i64,
+    pub entries: u64,
+}
+
+fn manifest_key(ctx: &VaultCtx) -> Result<[u8; 32]> {
+    Ok(derive_manifest_key(ctx.ek()?, ctx.vault_id(), ctx.epoch()))
+}
+
+/// List + MAC-verify named snapshots via `geode-grotto::snapshot` (no TUI
+/// envelope format). Empty dir → empty vec (pane shows the §7.4 hint).
+pub fn list_snapshots(ctx: &VaultCtx) -> Result<Vec<SnapshotInfo>> {
+    let mk = manifest_key(ctx)?;
+    let names = geode_grotto::snapshot::list_snapshots(ctx.root(), ctx.epoch())?;
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        let env = geode_grotto::snapshot::read_snapshot(ctx.root(), ctx.epoch(), &name, &mk)?;
+        let entries = env
+            .manifest
+            .get("entry_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        out.push(SnapshotInfo {
+            name: env.name,
+            epoch: env.epoch,
+            created_at: env.created_at,
+            entries,
+        });
+    }
+    Ok(out)
+}
+
+/// Create a named snapshot of the current manifest (core envelope).
+pub fn create_snapshot(ctx: &VaultCtx, name: &str, created_at: i64) -> Result<PathBuf> {
+    let mk = manifest_key(ctx)?;
+    geode_grotto::snapshot::create_snapshot(ctx.root(), ctx.epoch(), name, &mk, created_at)
+}
+
+/// Restore a named snapshot: verified body is written back to
+/// `manifest.json`. Caller must re-open the vault so the tree matches.
+pub fn restore_snapshot(ctx: &VaultCtx, name: &str) -> Result<()> {
+    let mk = manifest_key(ctx)?;
+    let body = geode_grotto::snapshot::restore_snapshot_body(ctx.root(), ctx.epoch(), name, &mk)?;
+    let dest = ctx
+        .root()
+        .join("epochs")
+        .join(format!("{:08}", ctx.epoch().0))
+        .join("manifest.json");
+    corevault::write_atomic(&dest, &body)
 }

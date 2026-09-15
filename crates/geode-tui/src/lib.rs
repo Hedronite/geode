@@ -22,6 +22,10 @@
 //! Preview is explicit and bounded (64 KiB); `L` locks; `?` help; the
 //! footer carries only public ids.
 //!
+//! G1c (v0.2.1): snapshot overlay (`s`) lists/creates/restores via
+//! `geode_grotto::snapshot` core types — no TUI-only envelope. Help stays
+//! opaque.
+//!
 //! `ratatui`/`crossterm` are feature-gated behind `tui` so a `core`-profile
 //! build (no `tui` feature) links no TUI deps — `geode-grotto` itself never
 //! depends on ratatui. No `unsafe` (forbidden workspace-wide). No plaintext
