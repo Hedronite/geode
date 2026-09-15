@@ -28,6 +28,9 @@ pub enum Message {
 pub struct App {
     /// The vault the TUI opened on, if any. `None` = picker.
     vault: Option<PathBuf>,
+    /// Identity key path from `--key` / `GEODE_KEY_FILE` (G5 wire). A public
+    /// filesystem path, never key bytes; G5a's unlock session consumes it.
+    key: Option<PathBuf>,
     /// Set by `keys::handle_key` when the operator quits.
     quit: bool,
     /// Last key label, for the footer indicator (G5c chrome). Public chrome.
@@ -35,16 +38,24 @@ pub struct App {
 }
 
 impl App {
-    /// New app for a vault (or `None` for the picker).
+    /// New app for a vault (or `None` for the picker) and an optional
+    /// identity key path.
     #[must_use]
-    pub fn new(vault: Option<PathBuf>) -> Self {
-        Self { vault, quit: false, last_key: None }
+    pub fn new(vault: Option<PathBuf>, key: Option<PathBuf>) -> Self {
+        Self { vault, key, quit: false, last_key: None }
     }
 
     /// The vault path, if any.
     #[must_use]
     pub fn vault(&self) -> Option<&Path> {
         self.vault.as_deref()
+    }
+
+    /// The identity key path (`--key` / `GEODE_KEY_FILE`), if any. Public
+    /// path, never key bytes.
+    #[must_use]
+    pub fn key(&self) -> Option<&Path> {
+        self.key.as_deref()
     }
 
     /// Whether the operator has asked to quit.
@@ -79,9 +90,9 @@ impl App {
 
 /// Run the TUI event loop. Restores the terminal on return.
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
-pub fn run(vault: Option<PathBuf>) -> io::Result<()> {
+pub fn run(vault: Option<PathBuf>, key: Option<PathBuf>) -> io::Result<()> {
     let mut term = ratatui::init();
-    let result = event_loop(&mut term, App::new(vault));
+    let result = event_loop(&mut term, App::new(vault, key));
     ratatui::restore();
     result
 }

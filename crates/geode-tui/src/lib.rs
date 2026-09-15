@@ -39,6 +39,10 @@ use std::path::Path;
 /// If `vault` is `None`, the TUI opens on the vault picker. On a first run
 /// with no recent vaults the picker shows the empty state.
 ///
+/// `key` is the identity key path from `--key` / `GEODE_KEY_FILE` (G5 wire).
+/// It is a public filesystem path, never key bytes; the G5a unlock session
+/// consumes it and zeroizes secret material per 14-tui section 3.
+///
 /// This G4b scaffold does not yet unlock or paint vault contents; it only
 /// proves the crate wires, the event loop runs, the picker renders, and
 /// `q`/`Esc`/`Ctrl+C` quit cleanly with the terminal restored.
@@ -48,18 +52,22 @@ use std::path::Path;
 /// entered/restored or the event loop fails. The no-`tui` branch is
 /// infallible.
 #[cfg_attr(not(feature = "tui"), allow(unused_variables))]
-pub fn run(vault: Option<&Path>) -> geode_grotto::Result<()> {
+pub fn run(vault: Option<&Path>, key: Option<&Path>) -> geode_grotto::Result<()> {
     #[cfg(not(feature = "tui"))]
     {
         // A `core`-profile build (no `tui` feature) links no ratatui. The CLI
         // dispatches to `output::tui_unavailable()` (exit 1) before reaching
         // here, so this branch is unreachable from the CLI. It exists so
         // `geode-tui` compiles without ratatui.
-        let _ = vault;
+        let _ = (vault, key);
         Ok(())
     }
     #[cfg(feature = "tui")]
     {
-        app::run(vault.map(std::path::PathBuf::from)).map_err(geode_grotto::Error::from)
+        app::run(
+            vault.map(std::path::PathBuf::from),
+            key.map(std::path::PathBuf::from),
+        )
+        .map_err(geode_grotto::Error::from)
     }
 }

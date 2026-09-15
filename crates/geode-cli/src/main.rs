@@ -164,10 +164,15 @@ fn main() {
         Commands::List(a) => cmd::list::run(a, &cli.global, out),
         Commands::Cat(a) => cmd::list::cat(a, &cli.global, out),
         Commands::Keyring(a) => cmd::keyring::run(a, out),
-        // Feature on: the TUI starts (14-tui 2). Feature off (core-profile
-        // build): exit 1, not 2 — 2 is the auth/integrity family.
+        // Feature on: the TUI starts (14-tui 2), wired with the vault path
+        // and the global `--key` / `GEODE_KEY_FILE` identity path (G5). The
+        // TUI unlocks in-process via `geode-grotto` (14-tui 3); the CLI stays
+        // a thin adapter. Feature off (core-profile build): exit 1, not 2 —
+        // 2 is the auth/integrity family.
         #[cfg(feature = "tui")]
-        Commands::Tui { vault } => geode_tui::run(vault.as_deref()),
+        Commands::Tui { vault } => {
+            geode_tui::run(vault.as_deref(), cli.global.key.as_deref())
+        }
         #[cfg(not(feature = "tui"))]
         Commands::Tui { .. } => output::tui_unavailable(),
     };
