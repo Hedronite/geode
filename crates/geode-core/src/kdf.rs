@@ -1,11 +1,11 @@
 //! Key derivation and domain separation (02-cryptography 2, 3).
 //!
-//! G0b: defines the exact domain strings (normative, see 13-implementation-
-//! sketch "Domain-string test table") and the key hierarchy *types*. All
-//! derivation returns [`Error::NotImplemented`]; no BLAKE3 is called yet.
+//! G1: real BLAKE3 KDF. Domain strings are the exact normative prefixes from
+//! 13-implementation-sketch. EK is `blake3::derive_key`; the per-chunk nonce
+//! is keyed-BLAKE3 XOF (see [`crate::aead`]); `key_id` is plain `blake3::hash`.
 
 use crate::zero::Secret32;
-use crate::{Error, Result};
+use crate::Result;
 
 /// Exact domain-string prefixes (02-cryptography 2, 13-implementation-sketch).
 ///
@@ -47,14 +47,21 @@ pub struct ObjectId(pub [u8; 16]);
 pub struct KeyId(pub [u8; 16]);
 
 /// Identity Secret Key (32 bytes) - the root of the hierarchy.
-#[allow(dead_code)] // G0b: inner bytes consumed by G1 KDF / wrap.
-pub struct IdentitySecret(pub(crate) Secret32);
+pub struct IdentitySecret(Secret32);
 
 impl IdentitySecret {
-    /// G0b stub. Real construction (from `GKEY` file, raw or passphrase-wrapped)
-    /// lands in G1 / G2.
-    pub fn from_bytes(_: [u8; 32]) -> Result<Self> {
-        Err(Error::NotImplemented)
+    /// Wrap raw 32 bytes as the ISK. Caller is responsible for sourcing them
+    /// (key file unwrap in G2, or `getrandom` for `keygen`). The bytes are
+    /// copied into a zeroizing buffer.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Secret32::new_unchecked(bytes))
+    }
+
+    /// Borrow the raw ISK bytes. Crate-private: no leak across the API.
+    #[must_use]
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
     }
 }
 
@@ -64,9 +71,16 @@ impl std::fmt::Debug for IdentitySecret {
     }
 }
 
-/// Epoch Key (`EK`) - 32 bytes, one per (`vault_id`, `epoch`, `context_label`).
-#[allow(dead_code)] // G0b: inner bytes consumed by G1 seal/open/wrap.
-pub struct EpochKey(pub(crate) Secret32);
+/// Epoch Key (EK) - 32 bytes, one per (`vault_id`, `epoch`, `context_label`).
+pub struct EpochKey(Secret32);
+
+impl EpochKey {
+    /// Borrow the raw EK bytes. Crate-private: consumed by AEAD / wrap / nonce.
+    #[must_use]
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        self.0.as_bytes()
+    }
+}
 
 impl std::fmt::Debug for EpochKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -76,24 +90,118 @@ impl std::fmt::Debug for EpochKey {
 
 /// Derive `EK` from `ISK` + `vault_id` + `epoch` + `context_label` (02-cryptography 3).
 ///
-/// G0b stub. G1 will implement:
-/// `EK = BLAKE3-KDF(key=ISK, ctx="geode/v1/epoch-fek",`
-/// `              data = vault_id || le32(epoch) || utf8(context_label))`
+/// `EK = BLAKE3-KDF(ctx="geode/v1/epoch-fek",`
+/// `              key_material = ISK || vault_id || le32(epoch) || context_label)`
 ///
-/// Two contexts with the same `ISK` + `vault_id` + `epoch` MUST yield different `EK`.
+/// Two contexts with the same `ISK` + `vault_id` + `epoch` MUST yield different `EK`
+/// because `context_label` is bound into the key material.
 pub fn derive_epoch_key(
-    _isk: &IdentitySecret,
-    _vault_id: VaultId,
-    _epoch: Epoch,
-    _context_label: &str,
+    isk: &IdentitySecret,
+    vault_id: VaultId,
+    epoch: Epoch,
+    context_label: &str,
 ) -> Result<EpochKey> {
-    Err(Error::NotImplemented)
+    let mut km = Vec::with_capacity(32 + 16 + 4 + context_label.len());
+    km.extend_from_slice(isk.as_bytes());
+    km.extend_from_slice(&vault_id.0);
+    km.extend_from_slice(&epoch.0.to_le_bytes());
+    km.extend_from_slice(context_label.as_bytes());
+    let ek = blake3::derive_key(domains::EPOCH_FEK, &km);
+    Ok(EpochKey(Secret32::new_unchecked(ek)))
+}
+
+/// Derive a child key of `EK` under `domain` over `extra` binding data
+/// (02-cryptography 3: `NameKey` / `MetaKey` / `ManifestKey`).
+fn derive_child(ek: &EpochKey, domain: &str, extra: &[u8]) -> [u8; 32] {
+    let mut km = Vec::with_capacity(32 + extra.len());
+    km.extend_from_slice(ek.as_bytes());
+    km.extend_from_slice(extra);
+    blake3::derive_key(domain, &km)
+}
+
+/// `NameKey = BLAKE3-KDF(EK, "geode/v1/name-key", vault_id || le32(epoch))`
+#[must_use]
+pub fn derive_name_key(ek: &EpochKey, vault_id: VaultId, epoch: Epoch) -> [u8; 32] {
+    let mut extra = Vec::with_capacity(20);
+    extra.extend_from_slice(&vault_id.0);
+    extra.extend_from_slice(&epoch.0.to_le_bytes());
+    derive_child(ek, domains::NAME_KEY, &extra)
+}
+
+/// `MetaKey = BLAKE3-KDF(EK, "geode/v1/meta-key", vault_id || le32(epoch))`
+#[must_use]
+pub fn derive_meta_key(ek: &EpochKey, vault_id: VaultId, epoch: Epoch) -> [u8; 32] {
+    let mut extra = Vec::with_capacity(20);
+    extra.extend_from_slice(&vault_id.0);
+    extra.extend_from_slice(&epoch.0.to_le_bytes());
+    derive_child(ek, domains::META_KEY, &extra)
+}
+
+/// `ManifestKey = BLAKE3-KDF(EK, "geode/v1/manifest", vault_id || le32(epoch))`
+#[must_use]
+pub fn derive_manifest_key(ek: &EpochKey, vault_id: VaultId, epoch: Epoch) -> [u8; 32] {
+    let mut extra = Vec::with_capacity(20);
+    extra.extend_from_slice(&vault_id.0);
+    extra.extend_from_slice(&epoch.0.to_le_bytes());
+    derive_child(ek, domains::MANIFEST, &extra)
 }
 
 /// Derive the public `key_id` from ISK (02-cryptography 6.3).
 ///
-/// G0b stub. G1 will implement
-/// `key_id = BLAKE3("geode/v1/keyid" || ISK)[0..16]`.
-pub fn derive_key_id(_isk: &IdentitySecret) -> Result<KeyId> {
-    Err(Error::NotImplemented)
+/// `key_id = BLAKE3("geode/v1/keyid" || ISK)[0..16]`. Safe to print and log.
+pub fn derive_key_id(isk: &IdentitySecret) -> Result<KeyId> {
+    let mut h = Vec::with_capacity(domains::KEYID.len() + 32);
+    h.extend_from_slice(domains::KEYID.as_bytes());
+    h.extend_from_slice(isk.as_bytes());
+    let full = blake3::hash(&h);
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&full.as_bytes()[..16]);
+    Ok(KeyId(id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn isk() -> IdentitySecret {
+        IdentitySecret::from_bytes([0x42; 32])
+    }
+
+    #[test]
+    fn two_contexts_yield_different_ek() {
+        let v = VaultId([0x11; 16]);
+        let e = Epoch(1);
+        let ek_a = derive_epoch_key(&isk(), v, e, "alpha").unwrap();
+        let ek_b = derive_epoch_key(&isk(), v, e, "beta").unwrap();
+        assert_ne!(
+            ek_a.as_bytes(),
+            ek_b.as_bytes(),
+            "context_label MUST bind EK"
+        );
+    }
+
+    #[test]
+    fn same_context_is_stable() {
+        let v = VaultId([0x11; 16]);
+        let e = Epoch(1);
+        let ek_a = derive_epoch_key(&isk(), v, e, "alpha").unwrap();
+        let ek_b = derive_epoch_key(&isk(), v, e, "alpha").unwrap();
+        assert_eq!(ek_a.as_bytes(), ek_b.as_bytes());
+    }
+
+    #[test]
+    fn different_epoch_yields_different_ek() {
+        let v = VaultId([0x11; 16]);
+        let ek1 = derive_epoch_key(&isk(), v, Epoch(1), "").unwrap();
+        let ek2 = derive_epoch_key(&isk(), v, Epoch(2), "").unwrap();
+        assert_ne!(ek1.as_bytes(), ek2.as_bytes());
+    }
+
+    #[test]
+    fn key_id_is_stable_and_public_size() {
+        let id = derive_key_id(&isk()).unwrap();
+        let id2 = derive_key_id(&isk()).unwrap();
+        assert_eq!(id.0, id2.0);
+        assert_eq!(id.0.len(), 16);
+    }
 }

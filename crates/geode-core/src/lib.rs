@@ -4,21 +4,18 @@
 //! the `core` profile of the GDE1 spec 2: format, crypto, vault init,
 //! seal/open/verify/list, key files.
 //!
-//! # G0b status
+//! # G1 status
 //!
-//! Module files exist per the implementation sketch (13). All crypto and I/O
-//! paths are **stubs that fail closed** - they return [`Error::NotImplemented`]
-//! rather than performing or pretending any cryptography. No XOR wrap. No
-//! hardcoded salt. No fake AEAD. Real implementations land in G1 (crypto) and
-//! G2 (format + vault).
+//! Suite `0x01` (AEGIS-256-X2 + BLAKE3 + Argon2id + HCTR2-256) is real for
+//! KDF, AEAD seal/open, and passphrase wrap. HCTR2 name-seal stays stubbed
+//! until G2 (the suite identifier and unknown-suite abort are real now).
+//! Vault directory / object I/O is G2.
 //!
-//! Reference: SPEC-v010 G0b, CHECKLIST-v010 G0b.
+//! Reference: SPEC-v010 G1, CHECKLIST-v010 G1a-G1c, 02-cryptography.
 
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
-// G0b stubs: silence pedantic doc-lints that would otherwise force premature
-// `# Errors` / `# Panics` sections on fail-closed stubs. G1 will tighten these
-// when the stubs become real implementations.
+// G1: silence pedantic doc-lints on thin crypto wrappers. Tighten in G2.
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
@@ -38,11 +35,12 @@ pub mod zero;
 ///
 /// Exit-code mapping (05-cli 3) is owned by the CLI adapter; the library only
 /// classifies. `AuthFail` is the integrity / authentication failure family
-/// (CLI exit 2). `NotImplemented` is the G0b stub state and MUST NOT be
-/// returned once G1 lands.
+/// (CLI exit 2).
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("geode-core: not implemented (G0b stub - no crypto performed)")]
+    /// Still-stubbed paths (HCTR2 name seal, manifest MAC, recipient wrap,
+    /// token issue) until G2. Removed once each lands.
+    #[error("geode-core: not implemented yet (stub)")]
     NotImplemented,
 
     #[error("geode-core: authentication / integrity failure")]
@@ -59,6 +57,9 @@ pub enum Error {
 
     #[error("geode-core: token expired or invalid")]
     TokenInvalid,
+
+    #[error("geode-core: crypto: {0}")]
+    Crypto(String),
 }
 
 /// Crate-wide result.
@@ -72,3 +73,55 @@ pub const MAGIC_GDE1: &[u8; 4] = b"GDE1";
 pub const MAGIC_GKEY: &[u8; 4] = b"GKEY";
 pub const MAGIC_GTOK: &[u8; 4] = b"GTOK";
 pub const MAGIC_GMFT: &[u8; 4] = b"GMFT";
+
+/// Abort on unknown suite (02-cryptography 1.1; SPEC 4.2).
+///
+/// v0.1 only knows suite `0x01`. Any other value is a hard failure, never a
+/// silent fallback.
+pub fn assert_suite(suite: u8) -> Result<()> {
+    if suite == SUITE_0X01 {
+        Ok(())
+    } else {
+        Err(Error::Format(format!(
+            "unknown cipher suite 0x{suite:02x}; only 0x01 is defined"
+        )))
+    }
+}
+
+/// Abort on unknown magic (03-format 1; SPEC 4.2).
+pub fn assert_magic(actual: &[u8; 4], expected: &[u8; 4]) -> Result<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(Error::Format(format!(
+            "unknown magic {actual:?}; expected {expected:?}"
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suite_0x01_accepted() {
+        assert!(assert_suite(SUITE_0X01).is_ok());
+    }
+
+    #[test]
+    fn unknown_suite_aborts() {
+        assert!(assert_suite(0x02).is_err());
+        assert!(assert_suite(0xff).is_err());
+    }
+
+    #[test]
+    fn magic_match_accepted() {
+        assert!(assert_magic(b"GDE1", MAGIC_GDE1).is_ok());
+    }
+
+    #[test]
+    fn unknown_magic_aborts() {
+        assert!(assert_magic(b"XXXX", MAGIC_GDE1).is_err());
+        assert!(assert_magic(b"GDE2", MAGIC_GDE1).is_err());
+    }
+}
