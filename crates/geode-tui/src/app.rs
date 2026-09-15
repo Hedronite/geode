@@ -35,7 +35,8 @@ use geode_grotto::Result;
 use crate::splash::Splash;
 use crate::theme::{Appearance, Palette};
 use crate::tree::{self, TreeRow};
-use crate::vault::{self, Preview, SnapshotInfo, VaultCtx, VerifyReport};
+use crate::vault::{self, Preview, VaultCtx, VerifyReport};
+use geode_grotto::snapshot::{GcReport, SnapshotEnvelope};
 
 /// Shipped verb tabs (14-tui §1.2). `geode` is the brand/home tab.
 /// **No `mount`** — mount is optional chrome (14-tui §9). `keyring` ships
@@ -67,14 +68,16 @@ pub enum View {
     List,
 }
 
-/// Snapshot pane (14-tui §6.6 / §7.1 `s`). Renders core
-/// [`SnapshotInfo`] rows only — no TUI-only envelope.
+/// Snapshot pane (14-tui §6.6 / §7.1 `s`). Holds core
+/// [`SnapshotEnvelope`] / [`GcReport`] — no TUI-only snapshot type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotUi {
     Closed,
     List,
     Name { buf: String },
     ConfirmRestore { name: String, epoch: u32 },
+    ConfirmGc,
+    GcDone { report: GcReport },
 }
 
 /// Last verify outcome for the footer / verify pane.
@@ -151,7 +154,7 @@ pub struct App {
     picker_items: Vec<PickerItem>,
     picker_focus: usize,
     snapshot: SnapshotUi,
-    snapshot_rows: Vec<SnapshotInfo>,
+    snapshot_rows: Vec<SnapshotEnvelope>,
     snapshot_focus: usize,
 }
 
@@ -352,9 +355,9 @@ impl App {
         !matches!(self.snapshot, SnapshotUi::Closed)
     }
 
-    /// Public snapshot rows (core types).
+    /// Core snapshot envelopes (14-tui §3).
     #[must_use]
-    pub fn snapshot_rows(&self) -> &[SnapshotInfo] {
+    pub fn snapshot_rows(&self) -> &[SnapshotEnvelope] {
         &self.snapshot_rows
     }
 
@@ -869,6 +872,29 @@ impl App {
                 self.refresh_snapshots();
             }
             Err(e) => self.error = Some(format!("snapshot restore: {e}")),
+        }
+    }
+
+    /// Confirm before `gc` — core has no `--dry-run` preview API.
+    pub(crate) fn snapshot_begin_gc(&mut self) {
+        if self.ctx.is_none() {
+            return;
+        }
+        self.snapshot = SnapshotUi::ConfirmGc;
+    }
+
+    /// Run core `gc` and show the [`GcReport`].
+    pub(crate) fn snapshot_commit_gc(&mut self) {
+        let result = match &self.ctx {
+            Some(ctx) => vault::gc(ctx),
+            None => return,
+        };
+        match result {
+            Ok(report) => self.snapshot = SnapshotUi::GcDone { report },
+            Err(e) => {
+                self.snapshot = SnapshotUi::List;
+                self.error = Some(format!("gc: {e}"));
+            }
         }
     }
 

@@ -417,15 +417,44 @@ fn snapshot_pane_lists_creates_confirms_restore_on_core_types() {
     );
     assert!(!app.picker(), "restore keeps the vault open");
 
-    let (rendered, buf) = draw(&app, 80, 28);
+    let env = &app.snapshot_rows()[0];
+    assert!(!env.vault_id.is_empty(), "core envelope has vault_id");
+    assert!(
+        !env.snapshot_mac.is_empty(),
+        "core envelope has snapshot_mac"
+    );
+    assert!(env.manifest.is_object(), "core envelope carries manifest");
+
+    let (rendered, buf) = draw(&app, 80, 32);
     assert!(
         rendered.contains("pre-edit"),
         "snapshot pane paints the core name: {rendered}"
     );
     assert!(
-        !rendered.contains("snapshot_mac"),
-        "must not paint snapshot_mac: {rendered}"
+        rendered.contains("snapshot_mac") && rendered.contains(&env.snapshot_mac),
+        "must paint core snapshot_mac: {rendered}"
     );
+    assert!(
+        rendered.contains("vault_id") && rendered.contains(&env.vault_id),
+        "must paint core vault_id: {rendered}"
+    );
+    assert!(
+        rendered.contains("manifest"),
+        "must paint core manifest summary: {rendered}"
+    );
+
+    press_char(&mut app, 'g');
+    assert!(
+        matches!(app.snapshot_ui(), SnapshotUi::ConfirmGc),
+        "g confirms gc (no dry-run in core)"
+    );
+    press_char(&mut app, 'y');
+    match app.snapshot_ui() {
+        SnapshotUi::GcDone { report } => {
+            assert!(report.kept >= 1 || report.dropped == 0);
+        }
+        other => panic!("expected GcReport overlay, got {other:?}"),
+    }
     let want_bg = Palette::graphite().bg;
     let mut opaque = 0u32;
     let area = buf.area();

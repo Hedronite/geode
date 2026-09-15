@@ -520,40 +520,24 @@ pub fn preview(ctx: &VaultCtx, path: &str, max_bytes: u64) -> Result<Preview> {
     })
 }
 
-/// Public snapshot row for the TUI pane (14-tui §6.6 / 04-vault 7).
-/// Names, epoch, timestamps, and entry counts only — never `snapshot_mac`
-/// bytes or embedded manifest bodies.
-#[derive(Debug, Clone)]
-pub struct SnapshotInfo {
-    pub name: String,
-    pub epoch: u32,
-    pub created_at: i64,
-    pub entries: u64,
-}
-
 fn manifest_key(ctx: &VaultCtx) -> Result<[u8; 32]> {
     Ok(derive_manifest_key(ctx.ek()?, ctx.vault_id(), ctx.epoch()))
 }
 
-/// List + MAC-verify named snapshots via `geode-grotto::snapshot` (no TUI
-/// envelope format). Empty dir → empty vec (pane shows the §7.4 hint).
-pub fn list_snapshots(ctx: &VaultCtx) -> Result<Vec<SnapshotInfo>> {
+/// List + MAC-verify named snapshots. Returns core
+/// [`geode_grotto::snapshot::SnapshotEnvelope`] values (14-tui §3: no
+/// TUI-only snapshot type). Empty dir → empty vec (§7.4 hint).
+pub fn list_snapshots(ctx: &VaultCtx) -> Result<Vec<geode_grotto::snapshot::SnapshotEnvelope>> {
     let mk = manifest_key(ctx)?;
     let names = geode_grotto::snapshot::list_snapshots(ctx.root(), ctx.epoch())?;
     let mut out = Vec::with_capacity(names.len());
     for name in names {
-        let env = geode_grotto::snapshot::read_snapshot(ctx.root(), ctx.epoch(), &name, &mk)?;
-        let entries = env
-            .manifest
-            .get("entry_count")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        out.push(SnapshotInfo {
-            name: env.name,
-            epoch: env.epoch,
-            created_at: env.created_at,
-            entries,
-        });
+        out.push(geode_grotto::snapshot::read_snapshot(
+            ctx.root(),
+            ctx.epoch(),
+            &name,
+            &mk,
+        )?);
     }
     Ok(out)
 }
@@ -575,4 +559,11 @@ pub fn restore_snapshot(ctx: &VaultCtx, name: &str) -> Result<()> {
         .join(format!("{:08}", ctx.epoch().0))
         .join("manifest.json");
     corevault::write_atomic(&dest, &body)
+}
+
+/// Run core `gc`. There is **no dry-run** in `geode-grotto` yet — the TUI
+/// confirms, then deletes. Flag to backend if a preview API is needed.
+pub fn gc(ctx: &VaultCtx) -> Result<geode_grotto::snapshot::GcReport> {
+    let mk = manifest_key(ctx)?;
+    geode_grotto::snapshot::gc(ctx.root(), ctx.epoch(), &mk)
 }

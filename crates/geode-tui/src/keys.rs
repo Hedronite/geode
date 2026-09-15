@@ -111,7 +111,10 @@ fn handle_esc(app: &mut App) -> Option<Message> {
     }
     if app.snapshot_overlay() {
         match app.snapshot_ui() {
-            SnapshotUi::Name { .. } | SnapshotUi::ConfirmRestore { .. } => {
+            SnapshotUi::Name { .. }
+            | SnapshotUi::ConfirmRestore { .. }
+            | SnapshotUi::ConfirmGc
+            | SnapshotUi::GcDone { .. } => {
                 app.snapshot_cancel_edit();
             }
             _ => app.close_snapshots(),
@@ -143,11 +146,21 @@ fn handle_snapshot(app: &mut App, code: KeyCode) {
             KeyCode::Char('n' | 'N') => app.snapshot_cancel_edit(),
             _ => {}
         },
+        SnapshotUi::ConfirmGc => match code {
+            KeyCode::Char('y' | 'Y') => app.snapshot_commit_gc(),
+            KeyCode::Char('n' | 'N') => app.snapshot_cancel_edit(),
+            _ => {}
+        },
+        SnapshotUi::GcDone { .. } => match code {
+            KeyCode::Enter | KeyCode::Char('s') => app.snapshot_cancel_edit(),
+            _ => {}
+        },
         SnapshotUi::List => match code {
             KeyCode::Char('j') | KeyCode::Down => app.move_snapshot(1),
             KeyCode::Char('k') | KeyCode::Up => app.move_snapshot(-1),
             KeyCode::Char('n') => app.snapshot_begin_create(),
             KeyCode::Char('r') | KeyCode::Enter => app.snapshot_begin_restore(),
+            KeyCode::Char('g') => app.snapshot_begin_gc(),
             KeyCode::Char('s') => app.close_snapshots(),
             KeyCode::Char('[') => app.cycle_verb(-1),
             KeyCode::Char(']') => app.cycle_verb(1),
