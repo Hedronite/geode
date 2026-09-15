@@ -12,8 +12,16 @@ publish = false
 name = "geode"
 path = "src/main.rs"
 
+[features]
+default = ["tui"]
+# 14-tui 2.2: default-on for release builds; a core-profile build
+# (--no-default-features) compiles with no ratatui and answers
+# `geode tui` with exit 1.
+tui = ["dep:geode-tui"]
+
 [dependencies]
 geode-grotto = { path = "../geode-core" }
+geode-tui = { path = "../geode-tui", optional = true }
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 getrandom = "0.3"
