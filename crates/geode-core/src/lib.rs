@@ -52,6 +52,18 @@
 //! when no `EpochKey` is supplied (locked session has no EK). TTL clamped to
 //! `[0, MAX_TTL_SECS]` (15m default / 12h max).
 //!
+//! # v0.2.2 / G0
+//!
+//! `agent_ops` module (06-agent-plane 3, 4, 6): token-gated list / read /
+//! write. The reference-monitor leg between an unsealed `GTOK` token and
+//! the existing `object` / `vault` / `manifest` primitives. Enforcement
+//! order: `token::inspect` (MAC + TTL) -> op in `allow_ops` -> strict path
+//! normalize (any `..` rejected before open) -> prefix cover -> symlink /
+//! escape guard before open. `--leak-denies` default off: outside-prefix is
+//! `Error::Io(NotFound)`. Oversize read returns truncated + SHA-256 of the
+//! full plaintext + UTF-8 preview. No new `Error` variant; errors never
+//! contain ISK.
+//!
 //! # v0.2.1 / G1a
 //!
 //! `snapshot` module (04-vault 7): create/list/restore of authenticated
@@ -69,6 +81,7 @@
 #![allow(clippy::missing_panics_doc)]
 
 pub mod aead;
+pub mod agent_ops;
 pub mod chunk;
 pub mod hctr2;
 pub mod kdf;
