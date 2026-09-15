@@ -56,6 +56,15 @@ pub enum OutMode {
     Json,
 }
 
+/// Built-in TUI palette selector for `geode tui --appearance` (14-tui §11).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum AppearanceArg {
+    /// Graphite Honey — dark (default).
+    Graphite,
+    /// Porcelain Honey — light.
+    Porcelain,
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Generate an identity key file (GKEY, raw form, 0600).
@@ -80,6 +89,12 @@ enum Commands {
         /// Vault to open; omit for the vault picker.
         #[arg(value_name = "VAULT")]
         vault: Option<PathBuf>,
+        /// Built-in palette (14-tui §11). Default: graphite.
+        #[arg(long, value_name = "NAME", env = "GEODE_APPEARANCE", default_value = "graphite")]
+        appearance: AppearanceArg,
+        /// Skip the opening splash (14-tui polish; env: `GEODE_TUI_NO_SPLASH=true`).
+        #[arg(long, env = "GEODE_TUI_NO_SPLASH")]
+        no_splash: bool,
     },
 }
 
@@ -170,8 +185,19 @@ fn main() {
         // a thin adapter. Feature off (core-profile build): exit 1, not 2 —
         // 2 is the auth/integrity family.
         #[cfg(feature = "tui")]
-        Commands::Tui { vault } => {
-            geode_tui::run(vault.as_deref(), cli.global.key.as_deref())
+        Commands::Tui {
+            vault,
+            appearance,
+            no_splash,
+        } => {
+            let options = geode_tui::RunOptions {
+                appearance: match appearance {
+                    AppearanceArg::Graphite => geode_tui::theme::Appearance::Graphite,
+                    AppearanceArg::Porcelain => geode_tui::theme::Appearance::Porcelain,
+                },
+                splash: !no_splash,
+            };
+            geode_tui::run(vault.as_deref(), cli.global.key.as_deref(), options)
         }
         #[cfg(not(feature = "tui"))]
         Commands::Tui { .. } => output::tui_unavailable(),

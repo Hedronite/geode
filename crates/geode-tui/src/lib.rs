@@ -64,22 +64,46 @@ use std::path::Path;
 /// Returns a `geode_grotto::Error` on unlock failure (auth → exit 2,
 /// usage/IO → exit 1) or terminal I/O failure. The no-`tui` branch is
 /// infallible.
-#[cfg_attr(not(feature = "tui"), allow(unused_variables))]
+/// Options for the operator surface (CLI glue: `geode tui --appearance` /
+/// `--no-splash`, 14-tui §2/§11). `Default` is Graphite Honey + splash on.
+#[cfg(feature = "tui")]
+#[derive(Debug, Clone, Copy)]
+pub struct RunOptions {
+    /// Built-in palette (14-tui §11). Default: Graphite Honey (dark).
+    pub appearance: theme::Appearance,
+    /// Paint the opening splash (polish B1). Default: `true`.
+    pub splash: bool,
+}
+
+#[cfg(feature = "tui")]
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            appearance: theme::Appearance::default(),
+            splash: true,
+        }
+    }
+}
+
+#[cfg(feature = "tui")]
+pub fn run(
+    vault: Option<&Path>,
+    key: Option<&Path>,
+    options: RunOptions,
+) -> geode_grotto::Result<()> {
+    app::run(
+        vault.map(std::path::PathBuf::from),
+        key.map(std::path::PathBuf::from),
+        options,
+    )
+}
+
+/// A `core`-profile build (no `tui` feature) links no ratatui. The CLI
+/// dispatches to `output::tui_unavailable()` (exit 1) before reaching
+/// here, so this branch is unreachable from the CLI. It exists so
+/// `geode-tui` compiles without ratatui.
+#[cfg(not(feature = "tui"))]
 pub fn run(vault: Option<&Path>, key: Option<&Path>) -> geode_grotto::Result<()> {
-    #[cfg(not(feature = "tui"))]
-    {
-        // A `core`-profile build (no `tui` feature) links no ratatui. The CLI
-        // dispatches to `output::tui_unavailable()` (exit 1) before reaching
-        // here, so this branch is unreachable from the CLI. It exists so
-        // `geode-tui` compiles without ratatui.
-        let _ = (vault, key);
-        Ok(())
-    }
-    #[cfg(feature = "tui")]
-    {
-        app::run(
-            vault.map(std::path::PathBuf::from),
-            key.map(std::path::PathBuf::from),
-        )
-    }
+    let _ = (vault, key);
+    Ok(())
 }

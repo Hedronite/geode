@@ -120,7 +120,20 @@ impl App {
         key: Option<PathBuf>,
         ctx: Option<VaultCtx>,
     ) -> Self {
-        let appearance = Appearance::default();
+        Self::with_options(vault, key, ctx, crate::RunOptions::default())
+    }
+
+    /// New app with explicit [`crate::RunOptions`] (CLI glue: `--appearance`
+    /// / `--no-splash`, 14-tui §2/§11). `splash: false` skips the opening
+    /// splash phase entirely.
+    #[must_use]
+    pub fn with_options(
+        vault: Option<PathBuf>,
+        key: Option<PathBuf>,
+        ctx: Option<VaultCtx>,
+        options: crate::RunOptions,
+    ) -> Self {
+        let appearance = options.appearance;
         Self {
             vault,
             key,
@@ -135,7 +148,7 @@ impl App {
             error: None,
             appearance,
             palette: Palette::for_appearance(appearance),
-            splash: Some(Splash::new(Instant::now())),
+            splash: options.splash.then(|| Splash::new(Instant::now())),
         }
     }
 
@@ -411,7 +424,11 @@ fn install_panic_hook() {
 /// Run the TUI. Unlocks in-process before entering the alternate screen;
 /// auth failure surfaces as `Error::AuthFail` (exit 2) with no tree
 /// painted. Restores the terminal on every return path.
-pub fn run(vault: Option<PathBuf>, key: Option<PathBuf>) -> Result<()> {
+pub fn run(
+    vault: Option<PathBuf>,
+    key: Option<PathBuf>,
+    options: crate::RunOptions,
+) -> Result<()> {
     install_panic_hook();
 
     // Unlock BEFORE the alternate screen so the no-echo passphrase prompt
@@ -422,7 +439,7 @@ pub fn run(vault: Option<PathBuf>, key: Option<PathBuf>) -> Result<()> {
     };
 
     let mut term = ratatui::try_init().map_err(geode_grotto::Error::Io)?;
-    let result = event_loop(&mut term, App::new(vault, key, ctx));
+    let result = event_loop(&mut term, App::with_options(vault, key, ctx, options));
     // Best-effort restore; ignore errors so the real result is preserved.
     let _ = ratatui::try_restore();
     result
