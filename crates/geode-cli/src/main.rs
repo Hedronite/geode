@@ -74,8 +74,13 @@ enum Commands {
     Cat(cmd::list::CatArgs),
     /// Manage the keyring (named identity keys, 05-cli 2.1).
     Keyring(KeyringArgs),
-    /// Ratatui operator surface (not in this build — profile `core`).
-    Tui,
+    /// Ratatui operator surface (14-tui). With the `tui` feature off
+    /// (core-profile build) this prints "not available" and exits 1.
+    Tui {
+        /// Vault to open; omit for the vault picker.
+        #[arg(value_name = "VAULT")]
+        vault: Option<PathBuf>,
+    },
 }
 
 impl Commands {
@@ -89,7 +94,7 @@ impl Commands {
             Self::List(_) => "list",
             Self::Cat(_) => "cat",
             Self::Keyring(_) => "keyring",
-            Self::Tui => "tui",
+            Self::Tui { .. } => "tui",
         }
     }
 }
@@ -159,8 +164,12 @@ fn main() {
         Commands::List(a) => cmd::list::run(a, &cli.global, out),
         Commands::Cat(a) => cmd::list::cat(a, &cli.global, out),
         Commands::Keyring(a) => cmd::keyring::run(a, out),
-        // `geode tui` on a build without the `tui` feature: exit 1, not 2.
-        Commands::Tui => output::tui_unavailable(),
+        // Feature on: the TUI starts (14-tui 2). Feature off (core-profile
+        // build): exit 1, not 2 — 2 is the auth/integrity family.
+        #[cfg(feature = "tui")]
+        Commands::Tui { vault } => geode_tui::run(vault.as_deref()),
+        #[cfg(not(feature = "tui"))]
+        Commands::Tui { .. } => output::tui_unavailable(),
     };
 
     if let Err(err) = result {

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/geode-core", "crates/geode-cli"]
+members = ["crates/geode-core", "crates/geode-cli", "crates/geode-tui"]
 
 [workspace.package]
 version = "0.1.1"

@@ -36,6 +36,7 @@ pub mod exit {
 /// `geode tui` on a build without the `tui` feature (05-cli §2.9, 14-tui §2.3).
 /// Prints to stderr and exits 1 — not 2, because 2 is the auth/integrity
 /// family and this is a "this build has no TUI" usage condition.
+#[cfg(not(feature = "tui"))]
 pub fn tui_unavailable() -> ! {
     let mut err = std::io::stderr().lock();
     let _ = writeln!(

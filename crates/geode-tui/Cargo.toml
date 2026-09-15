@@ -1,0 +1,17 @@
+[package]
+name = "geode-tui"
+description = "geode tui — Ratatui operator surface over geode-grotto (spec 14-tui)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+geode-grotto = { path = "../geode-core" }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = "0.29"
+
+[lints]
+workspace = true
