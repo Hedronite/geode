@@ -81,6 +81,10 @@ enum Commands {
     List(cmd::list::ListArgs),
     /// Print one object to stdout.
     Cat(cmd::list::CatArgs),
+    /// Named manifest snapshots (create/ls, 04-vault 7).
+    Snapshot(cmd::snapshot::SnapshotArgs),
+    /// Delete objects unreferenced by the manifest and all snapshots.
+    Gc(cmd::snapshot::GcArgs),
     /// Manage the keyring (named identity keys, 05-cli 2.1).
     Keyring(KeyringArgs),
     /// Ratatui operator surface (14-tui). With the `tui` feature off
@@ -108,6 +112,8 @@ impl Commands {
             Self::Verify(_) => "verify",
             Self::List(_) => "list",
             Self::Cat(_) => "cat",
+            Self::Snapshot(_) => "snapshot",
+            Self::Gc(_) => "gc",
             Self::Keyring(_) => "keyring",
             Self::Tui { .. } => "tui",
         }
@@ -178,6 +184,8 @@ fn main() {
         Commands::Verify(a) => cmd::verify::run(a, &cli.global, out),
         Commands::List(a) => cmd::list::run(a, &cli.global, out),
         Commands::Cat(a) => cmd::list::cat(a, &cli.global, out),
+        Commands::Snapshot(a) => cmd::snapshot::run(a, &cli.global, out),
+        Commands::Gc(a) => cmd::snapshot::gc(a, &cli.global, out),
         Commands::Keyring(a) => cmd::keyring::run(a, out),
         // Feature on: the TUI starts (14-tui 2), wired with the vault path
         // and the global `--key` / `GEODE_KEY_FILE` identity path (G5). The
