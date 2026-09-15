@@ -7,12 +7,14 @@
 //! (`vault_id`, `key_id`, `epoch`, manifest hash, paths, counts, sizes) and
 //! chrome text.
 //!
-//! v0.2.0 polish: an opening splash (14-tui aesthetic, `splash.rs`) and
-//! operator chrome matching the Hedronite mocks — hex+◆ mark, gold `geode`,
-//! grey verb tabs, gold dashed frame, two-row footer (`draw.rs`). Palette
-//! tokens live in `theme.rs` (Graphite Honey default / Porcelain Honey,
-//! 14-tui §11). Theme **files** do not gate 0.2 (14-tui §11.3): built-in
-//! palettes only; a loader is 0.3+ MAY.
+//! v0.2.0 polish + UX: opening splash sampled from the brandmark (stone
+//! ring, teal crystal, gold star; header `geode <version>` / `GDE1 · core`;
+//! footer `sealed · keyring default · exit 0`), operator chrome matching
+//! the Hedronite mocks, and a real operator loop — tree/list, verify
+//! overlay, bounded preview, lock-and-reopen — against an unlocked vault.
+//! Help overlay is opaque (`Clear` + block background). Palette tokens
+//! live in `theme.rs` (Graphite Honey default / Porcelain Honey, 14-tui
+//! §11). Theme **files** do not gate 0.2 (14-tui §11.3).
 //!
 //! G5b/G5c: the TUI unlocks a real vault in-process via `geode-grotto`
 //! (`Session::unlock` zeroizes ISK; header + manifest MACs verified), then
@@ -42,6 +44,8 @@ pub mod keys;
 pub mod splash;
 #[cfg(feature = "tui")]
 pub mod theme;
+#[cfg(feature = "tui")]
+pub mod tree;
 #[cfg(feature = "tui")]
 pub mod vault;
 
