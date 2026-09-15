@@ -1,0 +1,14 @@
+[package]
+name = "geode-core"
+description = "GDE1 format, crypto, vault, and policy evaluate — the Geode API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+
+[lints]
+workspace = true

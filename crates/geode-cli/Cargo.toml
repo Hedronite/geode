@@ -1,0 +1,20 @@
+[package]
+name = "geode-cli"
+description = "geode — Hedronite custody plane CLI (adapter over geode-core)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "geode"
+path = "src/main.rs"
+
+[dependencies]
+geode-core = { path = "../geode-core" }
+clap = { version = "4", features = ["derive", "env"] }
+
+[lints]
+workspace = true
