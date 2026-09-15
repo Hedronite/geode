@@ -46,6 +46,16 @@ const VERB_TABS: &[&str] = &[
 
 /// Top-level draw: header (mark + verb tabs), gold dashed frame around the
 /// middle (picker or tree|meta + preview), two-row footer, overlays.
+///
+/// Small-terminal story (R2-S3, contract for 0.3 — not gated in 0.2):
+/// the layout is header(1) + middle(Min 1) + footer(2). Below ~20 rows the
+/// fixed 10-row preview pane plus chrome clips silently. Degradation
+/// order for 0.3: (1) collapse the preview pane first (drop the 10-row
+/// block, keep tree|meta); (2) collapse meta, keep tree + footer; (3)
+/// below the chrome minimum (header 1 + tree 1 + footer 2 = 4 rows) paint
+/// a single  line and refuse verbs. 0.2 keeps the
+/// fixed layout and relies on  in the overlays so small
+/// terminals degrade without panics (`render_picker`/`render_help`).
 pub fn draw(frame: &mut Frame, app: &App) {
     let palette = *app.palette();
 
@@ -394,7 +404,7 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App, palette: Palette) {
     let width = 44u16.min(area.width);
     let centered = Rect::new(
         area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
         width,
         height,
     );

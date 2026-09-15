@@ -13,8 +13,9 @@
 //! alt screen is entered). No secret is painted on the splash —
 //! header/footer chrome only (14-tui §4).
 //!
-//! Version is **0.2.0** (refs README + 12-roadmap Phase 2); the mock says
-//! `0.1.1` but we ship the real version.
+//! Version is read from `env!("CARGO_PKG_VERSION")` so the splash tracks
+//! the crate tag (R2-S1: was a hardcoded `0.2.0` literal); refs README +
+//! 12-roadmap Phase 2 ship 0.2.0, the mock's `0.1.1` is stale.
 
 #![cfg_attr(not(feature = "tui"), allow(dead_code))]
 
@@ -106,7 +107,7 @@ fn render_header(frame: &mut Frame, area: Rect, palette: &Palette) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled("0.2.0", Style::default().fg(palette.fg)),
+        Span::styled(env!("CARGO_PKG_VERSION"), Style::default().fg(palette.fg)),
         Span::raw("  "),
         Span::styled("GDE1", Style::default().fg(palette.accent)),
         Span::raw("  "),
