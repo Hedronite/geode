@@ -865,10 +865,12 @@ fn snapshot_list_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
 fn gc_report_lines(
     report: &geode_grotto::snapshot::GcReport,
     palette: Palette,
+    title: &'static str,
+    footer: &'static str,
 ) -> Vec<Line<'static>> {
     let mut rows = vec![
         Line::from(Span::styled(
-            "GcReport",
+            title,
             Style::default()
                 .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
@@ -901,7 +903,7 @@ fn gc_report_lines(
     }
     rows.push(Line::from(""));
     rows.push(Line::from(Span::styled(
-        "Enter / Esc back to list",
+        footer,
         Style::default().fg(palette.muted),
     )));
     rows
@@ -945,24 +947,15 @@ fn snapshot_overlay_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
                 Style::default().fg(palette.muted),
             )),
         ],
-        SnapshotUi::ConfirmGc => vec![
-            Line::from(Span::styled(
-                "gc — drop unreferenced objects",
-                Style::default()
-                    .fg(palette.gold)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "core has no --dry-run preview API.",
-                Style::default().fg(palette.muted),
-            )),
-            Line::from(Span::styled(
-                "y runs gc now · n / Esc cancel",
-                Style::default().fg(palette.fg),
-            )),
-        ],
-        SnapshotUi::GcDone { report } => gc_report_lines(report, palette),
+        SnapshotUi::ConfirmGc { preview } => gc_report_lines(
+            preview,
+            palette,
+            "gc_preview — no mutation",
+            "y run gc · n / Esc cancel",
+        ),
+        SnapshotUi::GcDone { report } => {
+            gc_report_lines(report, palette, "GcReport", "Enter / Esc back to list")
+        }
         SnapshotUi::List | SnapshotUi::Closed => snapshot_list_lines(app, palette),
     }
 }

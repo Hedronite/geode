@@ -76,7 +76,7 @@ pub enum SnapshotUi {
     List,
     Name { buf: String },
     ConfirmRestore { name: String, epoch: u32 },
-    ConfirmGc,
+    ConfirmGc { preview: GcReport },
     GcDone { report: GcReport },
 }
 
@@ -875,12 +875,16 @@ impl App {
         }
     }
 
-    /// Confirm before `gc` — core has no `--dry-run` preview API.
+    /// `g`: call core `gc_preview` (no mutation) and show the report.
     pub(crate) fn snapshot_begin_gc(&mut self) {
-        if self.ctx.is_none() {
-            return;
+        let result = match &self.ctx {
+            Some(ctx) => vault::gc_preview(ctx),
+            None => return,
+        };
+        match result {
+            Ok(preview) => self.snapshot = SnapshotUi::ConfirmGc { preview },
+            Err(e) => self.error = Some(format!("gc preview: {e}")),
         }
-        self.snapshot = SnapshotUi::ConfirmGc;
     }
 
     /// Run core `gc` and show the [`GcReport`].

@@ -113,7 +113,7 @@ fn handle_esc(app: &mut App) -> Option<Message> {
         match app.snapshot_ui() {
             SnapshotUi::Name { .. }
             | SnapshotUi::ConfirmRestore { .. }
-            | SnapshotUi::ConfirmGc
+            | SnapshotUi::ConfirmGc { .. }
             | SnapshotUi::GcDone { .. } => {
                 app.snapshot_cancel_edit();
             }
@@ -146,7 +146,7 @@ fn handle_snapshot(app: &mut App, code: KeyCode) {
             KeyCode::Char('n' | 'N') => app.snapshot_cancel_edit(),
             _ => {}
         },
-        SnapshotUi::ConfirmGc => match code {
+        SnapshotUi::ConfirmGc { .. } => match code {
             KeyCode::Char('y' | 'Y') => app.snapshot_commit_gc(),
             KeyCode::Char('n' | 'N') => app.snapshot_cancel_edit(),
             _ => {}

@@ -561,8 +561,13 @@ pub fn restore_snapshot(ctx: &VaultCtx, name: &str) -> Result<()> {
     corevault::write_atomic(&dest, &body)
 }
 
-/// Run core `gc`. There is **no dry-run** in `geode-grotto` yet — the TUI
-/// confirms, then deletes. Flag to backend if a preview API is needed.
+/// Preview `gc` with no filesystem mutation (`gc_preview`).
+pub fn gc_preview(ctx: &VaultCtx) -> Result<geode_grotto::snapshot::GcReport> {
+    let mk = manifest_key(ctx)?;
+    geode_grotto::snapshot::gc_preview(ctx.root(), ctx.epoch(), &mk)
+}
+
+/// Run core `gc` (deletes unreferenced `.gobj` files).
 pub fn gc(ctx: &VaultCtx) -> Result<geode_grotto::snapshot::GcReport> {
     let mk = manifest_key(ctx)?;
     geode_grotto::snapshot::gc(ctx.root(), ctx.epoch(), &mk)

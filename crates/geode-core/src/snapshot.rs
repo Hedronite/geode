@@ -319,7 +319,17 @@ fn object_id_from_filename(stem: &str) -> Result<ObjectId> {
 /// empty shard directories. The current manifest and all snapshots are
 /// MAC-verified before any deletion, so an attacker cannot pin a target
 /// object by adding a fake entry. Live (referenced) objects are untouched.
-pub fn gc(vault_root: &Path, epoch: Epoch, manifest_key: &[u8; 32]) -> Result<GcReport> {
+/// Build the GC plan: a `GcReport` (with `dropped_paths` populated for every
+/// unreferenced `.gobj`) plus the list of shard directories that would become
+/// empty and be pruned. Performs **no** filesystem mutation. The current
+/// manifest and all named snapshots are MAC-verified up front (via
+/// `referenced_object_ids`), so a tampered manifest fails closed before the
+/// plan is returned.
+fn gc_plan(
+    vault_root: &Path,
+    epoch: Epoch,
+    manifest_key: &[u8; 32],
+) -> Result<(GcReport, Vec<PathBuf>)> {
     let mut report = GcReport::default();
     let referenced: std::collections::HashSet<[u8; 16]> =
         referenced_object_ids(vault_root, epoch, manifest_key)?
@@ -327,9 +337,10 @@ pub fn gc(vault_root: &Path, epoch: Epoch, manifest_key: &[u8; 32]) -> Result<Gc
             .map(|oid| oid.0)
             .collect();
 
+    let mut prune_shards: Vec<PathBuf> = Vec::new();
     let objects = epoch_dir(vault_root, epoch).join("objects");
     if !objects.is_dir() {
-        return Ok(report);
+        return Ok((report, prune_shards));
     }
     let mut shard_dirs: Vec<PathBuf> = Vec::new();
     for shard in std::fs::read_dir(&objects)? {
@@ -358,15 +369,49 @@ pub fn gc(vault_root: &Path, epoch: Epoch, manifest_key: &[u8; 32]) -> Result<Gc
                 report.kept += 1;
                 keep_in_shard += 1;
             } else {
-                std::fs::remove_file(&p)?;
                 report.dropped += 1;
                 report.dropped_paths.push(p);
             }
         }
         if keep_in_shard == 0 {
-            // Best-effort removal of the now-empty shard dir.
-            let _ = std::fs::remove_dir(&sp);
+            prune_shards.push(sp);
         }
+    }
+    Ok((report, prune_shards))
+}
+
+/// Preview garbage collection without deleting anything.
+///
+/// Returns the same `GcReport` that [`gc`] would produce, with `dropped_paths`
+/// listing every unreferenced `.gobj` that *would* be removed and `kept`
+/// counting the live objects. No files or directories are touched; the TUI
+/// can show this to the operator for confirmation before running [`gc`].
+///
+/// Like [`gc`], the current manifest and all named snapshots are MAC-verified
+/// before the plan is built, so a tampered manifest fails closed here too.
+#[must_use = "preview results should be shown to the operator"]
+pub fn gc_preview(vault_root: &Path, epoch: Epoch, manifest_key: &[u8; 32]) -> Result<GcReport> {
+    let (report, _prune) = gc_plan(vault_root, epoch, manifest_key)?;
+    Ok(report)
+}
+
+/// Garbage-collect unreferenced `.gobj` files for an epoch.
+///
+/// Walks `epochs/N/objects/**/*.gobj`, deletes any whose `object_id` is not
+/// referenced by the current manifest or any named snapshot, and removes
+/// empty shard directories. The current manifest and all snapshots are
+/// MAC-verified before any deletion, so an attacker cannot pin a target
+/// object by adding a fake entry. Live (referenced) objects are untouched.
+///
+/// For a no-mutation preview, use [`gc_preview`].
+pub fn gc(vault_root: &Path, epoch: Epoch, manifest_key: &[u8; 32]) -> Result<GcReport> {
+    let (report, prune_shards) = gc_plan(vault_root, epoch, manifest_key)?;
+    for p in &report.dropped_paths {
+        std::fs::remove_file(p)?;
+    }
+    // Best-effort removal of now-empty shard dirs.
+    for sp in prune_shards {
+        let _ = std::fs::remove_dir(&sp);
     }
     Ok(report)
 }
@@ -689,6 +734,52 @@ mod tests {
             "tampered manifest MUST fail gc"
         );
         // Nothing deleted because gc aborted before deletion.
+        assert!(vault::object_path(&root, epoch, &live).unwrap().exists());
+        assert!(vault::object_path(&root, epoch, &target).unwrap().exists());
+    }
+
+    #[test]
+    fn gc_preview_reports_but_deletes_nothing() {
+        let (_d, root, vid, epoch) = build_vault();
+        let live = seal_write(&root, vid, epoch, "live", b"live");
+        let dead = seal_write(&root, vid, epoch, "dead", b"dead");
+        write_manifest(&root, vid, epoch, vec![entry("live", live, 4, [0u8; 32])]);
+        let key = mk(vid, epoch);
+        let preview = gc_preview(&root, epoch, &key).unwrap();
+        // Same plan as gc would produce.
+        assert_eq!(preview.dropped, 1);
+        assert_eq!(preview.kept, 1);
+        assert_eq!(preview.dropped_paths.len(), 1);
+        // Nothing deleted: both objects still on disk.
+        assert!(vault::object_path(&root, epoch, &live).unwrap().exists());
+        assert!(vault::object_path(&root, epoch, &dead).unwrap().exists());
+        // A subsequent real gc drops exactly what preview flagged.
+        let report = gc(&root, epoch, &key).unwrap();
+        assert_eq!(report, preview);
+        assert!(!vault::object_path(&root, epoch, &dead).unwrap().exists());
+    }
+
+    #[test]
+    fn gc_preview_with_tampered_manifest_is_auth_fail_no_deletion() {
+        let (_d, root, vid, epoch) = build_vault();
+        let live = seal_write(&root, vid, epoch, "live", b"live");
+        let target = seal_write(&root, vid, epoch, "target", b"target");
+        write_manifest(&root, vid, epoch, vec![entry("live", live, 4, [0u8; 32])]);
+        let key = mk(vid, epoch);
+        let mpath = vault::manifest_path(&root, epoch);
+        let mut txt = std::fs::read_to_string(&mpath).unwrap();
+        let idx = txt.find("manifest_mac").unwrap();
+        let hex_idx = idx + "manifest_mac\": \"".len();
+        let ch = txt.as_bytes()[hex_idx];
+        let flipped = if ch == b'0' { b'1' } else { b'0' };
+        txt.replace_range(hex_idx..=hex_idx, std::str::from_utf8(&[flipped]).unwrap());
+        std::fs::write(&mpath, txt).unwrap();
+        let r = gc_preview(&root, epoch, &key);
+        assert!(
+            matches!(r, Err(Error::AuthFail)),
+            "tampered manifest MUST fail gc_preview"
+        );
+        // Preview mutates nothing.
         assert!(vault::object_path(&root, epoch, &live).unwrap().exists());
         assert!(vault::object_path(&root, epoch, &target).unwrap().exists());
     }
