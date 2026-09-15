@@ -444,16 +444,26 @@ fn snapshot_pane_lists_creates_confirms_restore_on_core_types() {
     );
 
     press_char(&mut app, 'g');
+    match app.snapshot_ui() {
+        SnapshotUi::ConfirmGc { preview } => {
+            assert!(
+                preview.kept >= 1 || preview.dropped == 0,
+                "gc_preview reports live objects"
+            );
+        }
+        other => panic!("g must call gc_preview, got {other:?}"),
+    }
+    let (preview_txt, _) = draw(&app, 80, 28);
     assert!(
-        matches!(app.snapshot_ui(), SnapshotUi::ConfirmGc),
-        "g confirms gc (no dry-run in core)"
+        preview_txt.contains("gc_preview") && preview_txt.contains("kept"),
+        "preview paints dropped/kept: {preview_txt}"
     );
     press_char(&mut app, 'y');
     match app.snapshot_ui() {
         SnapshotUi::GcDone { report } => {
             assert!(report.kept >= 1 || report.dropped == 0);
         }
-        other => panic!("expected GcReport overlay, got {other:?}"),
+        other => panic!("expected GcReport overlay after y, got {other:?}"),
     }
     let want_bg = Palette::graphite().bg;
     let mut opaque = 0u32;
