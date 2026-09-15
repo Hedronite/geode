@@ -23,6 +23,14 @@ pub struct SealArgs {
     /// Delete sources after the written objects verify (04-vault 2; default keep).
     #[arg(long)]
     pub consume: bool,
+    /// Seal filenames with HCTR2-256 (suite 0x01) so the manifest stores
+    /// ciphertext names instead of plaintext paths (02-cryptography 5).
+    /// Default keeps plaintext names. No key material is printed; output
+    /// carries only public identifiers (`vault_id`, `key_id`, `epoch`,
+    /// hashes).
+    #[arg(long)]
+    #[allow(dead_code)] // behavior wired in G0b (fullstack); G0c ships help chrome only
+    pub seal_names: bool,
 }
 
 /// Vault-relative path with forward slashes (03-format 5).
