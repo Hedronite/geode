@@ -1,69 +1,131 @@
 //! `geode` — Hedronite custody plane CLI.
 //!
-//! G0 scaffold stub: clap shell only. Verbs land in G3 (fullstack,
-//! `cmd/*.rs`); help/error chrome and `output.rs` are frontend (G0c/G4).
-//! Bare `geode` prints help. `geode tui` is a stub that exits 1 on a
-//! `core`-profile build (no `tui` feature) per 05-cli §2.9 / 14-tui §2.3.
+//! G3: data verbs wired (keygen, vault init, seal, open, verify, list, cat)
+//! as thin adapters over `geode-core`. `output.rs` and the human error/help
+//! chrome stay frontend-owned (G0c/G4). `geode tui` is a stub that exits 1
+//! on a `core`-profile build (no `tui` feature) per 05-cli 2.9 / 14-tui 2.3.
 //!
-//! Exit-code discipline (05-cli §3): clap's default error exit is 2, which
+//! Exit-code discipline (05-cli 3): clap's default error exit is 2, which
 //! collides with the auth/integrity family. We intercept clap errors and
 //! force usage/IO/config errors to exit **1** so scripts can distinguish
 //! "you typed it wrong" (1) from "the vault is compromised" (2).
 //! `--help` and `--version` are successful displays (exit 0), not errors.
 
+mod cmd;
 mod output;
 
-use clap::error::ErrorKind;
-use clap::{ArgAction, Command};
+use std::path::PathBuf;
 
-fn cli() -> Command {
-    Command::new("geode")
-        .version(env!("CARGO_PKG_VERSION"))
-        .about("Geode — Hedronite file custody (GDE1, suite 0x01)")
-        .arg(
-            clap::Arg::new("verbose")
-                .short('v')
-                .long("verbose")
-                .action(ArgAction::Count)
-                .global(true)
-                .help("Debug output; still redacts secrets"),
-        )
-        // G0c: `tui` is a stub on a `core`-profile build. The Ratatui
-        // surface is Phase 2 (14-tui); this build has no `tui` feature, so
-        // the verb prints "not available" and exits 1 (05-cli §2.9).
-        .subcommand(
-            Command::new("tui")
-                .about("Ratatui operator surface (not in this build — profile `core`)"),
-        )
-    // G3 (fullstack): subcommands keygen, vault, seal, open, verify, list, cat.
+use clap::error::ErrorKind;
+use clap::{Args, Parser, Subcommand};
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "geode",
+    version,
+    about = "Geode — Hedronite file custody (GDE1, suite 0x01)"
+)]
+struct Cli {
+    #[command(flatten)]
+    global: GlobalArgs,
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct GlobalArgs {
+    /// Identity key file.
+    #[arg(long, global = true, env = "GEODE_KEY_FILE", value_name = "PATH")]
+    pub key: Option<PathBuf>,
+    /// Output format.
+    #[arg(long, global = true, value_enum, default_value = "text")]
+    pub output: OutMode,
+    /// Debug output; still redacts secrets.
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutMode {
+    Text,
+    Json,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Generate an identity key file (GKEY, raw form, 0600).
+    Keygen(cmd::key::KeygenArgs),
+    /// Vault lifecycle (init).
+    Vault(cmd::vault::VaultArgs),
+    /// Seal a file or tree into a vault.
+    Seal(cmd::seal::SealArgs),
+    /// Open a vault out to a directory.
+    Open(cmd::open::OpenArgs),
+    /// Verify a vault (full / --cheap / --sample P).
+    Verify(cmd::verify::VerifyArgs),
+    /// List vault entries.
+    List(cmd::list::ListArgs),
+    /// Print one object to stdout.
+    Cat(cmd::list::CatArgs),
+    /// Ratatui operator surface (not in this build — profile `core`).
+    Tui,
+}
+
+impl Commands {
+    fn verb(&self) -> &'static str {
+        match self {
+            Self::Keygen(_) => "keygen",
+            Self::Vault(_) => "vault_init",
+            Self::Seal(_) => "seal",
+            Self::Open(_) => "open",
+            Self::Verify(_) => "verify",
+            Self::List(_) => "list",
+            Self::Cat(_) => "cat",
+            Self::Tui => "tui",
+        }
+    }
 }
 
 fn main() {
     // clap's default Error::exit() uses code 2, which is the auth/integrity
-    // family in Geode (05-cli §3). Intercept: --help/--version are successful
+    // family in Geode (05-cli 3). Intercept: --help/--version are successful
     // displays (exit 0); all other clap errors are usage conditions (exit 1).
-    let matches = match cli().try_get_matches() {
-        Ok(matches) => matches,
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
         Err(error) => {
             error.print().expect("error writes to stderr");
             let code = match error.kind() {
-                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => output::exit::OK,
+                ErrorKind::DisplayHelp
+                | ErrorKind::DisplayVersion
+                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => output::exit::OK,
                 _ => output::exit::USAGE,
             };
             std::process::exit(code);
         }
     };
 
-    match matches.subcommand() {
+    let out = cli.global.output;
+    let Some(command) = &cli.command else {
+        // Bare `geode` prints help (no TUI in v0.1.0).
+        use clap::CommandFactory;
+        Cli::command().print_help().expect("help writes to stdout");
+        println!();
+        return;
+    };
+
+    let result = match command {
+        Commands::Keygen(a) => cmd::key::run(a, out),
+        Commands::Vault(a) => cmd::vault::run(a, &cli.global, out),
+        Commands::Seal(a) => cmd::seal::run(a, &cli.global, out),
+        Commands::Open(a) => cmd::open::run(a, &cli.global, out),
+        Commands::Verify(a) => cmd::verify::run(a, &cli.global, out),
+        Commands::List(a) => cmd::list::run(a, &cli.global, out),
+        Commands::Cat(a) => cmd::list::cat(a, &cli.global, out),
         // `geode tui` on a build without the `tui` feature: exit 1, not 2.
-        Some(("tui", _)) => output::tui_unavailable(),
-        // No verb: print help. Bare `geode` stays CLI help (05-cli §2.9).
-        None => {
-            cli().print_help().expect("help writes to stdout");
-            println!();
-        }
-        // G3: dispatch to cmd modules. Unknown subcommands are caught by
-        // clap above (now exit 1, not 2, per 05-cli §3).
-        Some(_) => {}
+        Commands::Tui => output::tui_unavailable(),
+    };
+
+    if let Err(err) = result {
+        cmd::fail(out, command.verb(), &err);
     }
 }
