@@ -373,5 +373,6 @@ fn map_error(err: &Error) -> (&'static str, i32) {
         Error::Format(_) | Error::Crypto(_) | Error::NotImplemented => ("usage", exit::USAGE),
         Error::PolicyDeny => ("policy_deny", exit::POLICY),
         Error::TokenInvalid => ("token_invalid", exit::TOKEN),
+        Error::Locked => ("locked", exit::LOCKED),
     }
 }

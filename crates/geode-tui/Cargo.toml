@@ -8,10 +8,26 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[lib]
+name = "geode_tui"
+path = "src/lib.rs"
+
+[features]
+default = ["tui"]
+tui = ["dep:ratatui", "dep:crossterm"]
+
 [dependencies]
 geode-grotto = { path = "../geode-core" }
-ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
-crossterm = "0.29"
+
+[dependencies.ratatui]
+version = "0.30"
+default-features = false
+features = ["crossterm"]
+optional = true
+
+[dependencies.crossterm]
+version = "0.29"
+optional = true
 
 [lints]
 workspace = true

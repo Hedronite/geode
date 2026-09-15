@@ -126,6 +126,7 @@ pub fn exit_family(err: &Error) -> (&'static str, i32) {
         Error::Format(_) | Error::Crypto(_) | Error::NotImplemented => ("usage", exit::USAGE),
         Error::PolicyDeny => ("policy deny", exit::POLICY),
         Error::TokenInvalid => ("token invalid", exit::TOKEN),
+        Error::Locked => ("locked/contention", exit::LOCKED),
     }
 }
 
