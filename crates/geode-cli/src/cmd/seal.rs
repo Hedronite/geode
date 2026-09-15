@@ -8,7 +8,7 @@ use std::time::{Instant, UNIX_EPOCH};
 
 use clap::Args;
 use geode_grotto::manifest::{self, Entry, EntryKind};
-use geode_grotto::{chunk, object, vault as corevault, Error, Result};
+use geode_grotto::{chunk, kdf, name, object, vault as corevault, Error, Result};
 
 use crate::{cmd, GlobalArgs, OutMode};
 
@@ -23,6 +23,13 @@ pub struct SealArgs {
     /// Delete sources after the written objects verify (04-vault 2; default keep).
     #[arg(long)]
     pub consume: bool,
+    /// Seal filenames with HCTR2-256 (suite 0x01) so the manifest stores
+    /// ciphertext names instead of plaintext paths (02-cryptography 5).
+    /// Default keeps plaintext names. No key material is printed; output
+    /// carries only public identifiers (`vault_id`, `key_id`, `epoch`,
+    /// hashes).
+    #[arg(long)]
+    pub seal_names: bool,
 }
 
 /// Vault-relative path with forward slashes (03-format 5).
@@ -55,6 +62,74 @@ fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
         .ok()
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// `parent_id` for one path component (02-cryptography 5.3).
+///
+/// Root components use `0x00*16`. Directory objects do not exist yet, so a
+/// deeper component's `parent_id` is `BLAKE3(sealed parent path)[0..16]`.
+/// INTERIM (G0b): must match backend G0a `vectors/v1/name.json`; if the
+/// vectors pin a different derivation, change only this function.
+fn parent_id(sealed_parent: Option<&str>) -> [u8; 16] {
+    match sealed_parent {
+        None => [0u8; 16],
+        Some(p) => {
+            let digest = blake3::hash(p.as_bytes());
+            let mut id = [0u8; 16];
+            id.copy_from_slice(&digest.as_bytes()[..16]);
+            id
+        }
+    }
+}
+
+/// Name-sealing key: `NameKey` derived from `EK` (02-cryptography 3).
+fn name_key(ctx: &cmd::VaultCtx) -> [u8; 32] {
+    kdf::derive_name_key(&ctx.ek, ctx.vault_id, ctx.epoch)
+}
+
+/// Seal every component of a vault-relative plaintext path (02-cryptography
+/// 5). Components join with `/`; each is sealed under its parent's id.
+pub(crate) fn seal_rel_path(ctx: &cmd::VaultCtx, rel: &str) -> Result<String> {
+    let nk = name_key(ctx);
+    let mut sealed: Vec<String> = Vec::new();
+    for comp in rel.split('/') {
+        let pid = if sealed.is_empty() {
+            parent_id(None)
+        } else {
+            parent_id(Some(&sealed.join("/")))
+        };
+        sealed.push(name::seal_name(&nk, &ctx.vault_id, ctx.epoch, &pid, comp)?);
+    }
+    Ok(sealed.join("/"))
+}
+
+/// Open a sealed vault-relative path back to plaintext components (for
+/// `list` display and `open` extraction). Wrong key yields garbage names,
+/// not an error (02-cryptography 5).
+pub(crate) fn open_rel_path(ctx: &cmd::VaultCtx, sealed: &str) -> Result<String> {
+    let nk = name_key(ctx);
+    let mut plain: Vec<String> = Vec::new();
+    let mut sealed_comps: Vec<String> = Vec::new();
+    for comp in sealed.split('/') {
+        let pid = if sealed_comps.is_empty() {
+            parent_id(None)
+        } else {
+            parent_id(Some(&sealed_comps.join("/")))
+        };
+        plain.push(name::open_name(&nk, &ctx.vault_id, ctx.epoch, &pid, comp)?);
+        sealed_comps.push(comp.to_string());
+    }
+    Ok(plain.join("/"))
+}
+
+/// Operator-facing path for a manifest entry: opens sealed names, passes
+/// plaintext names through unchanged.
+pub(crate) fn display_path(ctx: &cmd::VaultCtx, entry: &Entry) -> Result<String> {
+    if entry.path_sealed {
+        open_rel_path(ctx, &entry.path)
+    } else {
+        Ok(entry.path.clone())
+    }
 }
 
 pub fn run(args: &SealArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
@@ -103,6 +178,18 @@ pub fn run(args: &SealArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         )));
     }
 
+    // Resolve stored (possibly sealed) paths BEFORE any object write, so an
+    // unsupported name-seal configuration fails closed without mutating the
+    // vault (02-cryptography 5; G0b).
+    let mut stored: Vec<String> = Vec::with_capacity(items.len());
+    for (_, rel) in &items {
+        stored.push(if args.seal_names {
+            seal_rel_path(&ctx, rel)?
+        } else {
+            rel.clone()
+        });
+    }
+
     let start = Instant::now();
     let mut files = 0u64;
     let mut plain_bytes = 0u64;
@@ -110,7 +197,7 @@ pub fn run(args: &SealArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     let mut new_entries: Vec<Entry> = Vec::new();
     let mut consumed: Vec<PathBuf> = Vec::new();
 
-    for (abs, rel) in &items {
+    for ((abs, _rel), stored_rel) in items.iter().zip(&stored) {
         let meta = std::fs::symlink_metadata(abs).map_err(Error::Io)?;
         let (kind, data) = if meta.file_type().is_symlink() {
             // Symlink target is sealed as content (01-threat-model 5).
@@ -138,8 +225,8 @@ pub fn run(args: &SealArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         plain_bytes += data.len() as u64;
         files += 1;
         new_entries.push(Entry {
-            path: rel.clone(),
-            path_sealed: false,
+            path: stored_rel.clone(),
+            path_sealed: args.seal_names,
             object_id: oid,
             kind,
             plain_len: data.len() as u64,
@@ -166,9 +253,10 @@ pub fn run(args: &SealArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     }
 
     // Merge: mutation allocates a new object_id; same-path entries replaced.
+    // Comparison is on the stored path (sealed form when `--seal-names`).
     ctx.manifest
         .entries
-        .retain(|e| !items.iter().any(|(_, r)| r == &e.path));
+        .retain(|e| !stored.iter().any(|r| r == &e.path));
     ctx.manifest.entries.extend(new_entries);
     ctx.manifest.entries.sort_by(|a, b| a.path.cmp(&b.path));
     ctx.manifest.root = manifest::entries_root(&ctx.manifest.entries);

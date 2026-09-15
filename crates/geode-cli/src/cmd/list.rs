@@ -27,20 +27,24 @@ pub fn run(args: &ListArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     let ctx = cmd::load_vault(&args.vault, &isk)?;
 
     let prefix = args.prefix.as_deref().map(cmd::open::normalize_prefix);
-    let shown: Vec<_> = ctx
-        .manifest
-        .entries
-        .iter()
-        .filter(|e| match &prefix {
+    // Operator-facing paths: sealed names are opened for display
+    // (02-cryptography 5); the user prefix is plaintext, so match after open.
+    let mut shown: Vec<(&geode_grotto::manifest::Entry, String)> = Vec::new();
+    for e in &ctx.manifest.entries {
+        let disp = cmd::seal::display_path(&ctx, e)?;
+        let matches = match &prefix {
             None => true,
-            Some(p) => e.path.starts_with(p.as_str()) || e.path == p.trim_end_matches('/'),
-        })
-        .collect();
+            Some(p) => disp.starts_with(p.as_str()) || disp == p.trim_end_matches('/'),
+        };
+        if matches {
+            shown.push((e, disp));
+        }
+    }
 
     match out {
         OutMode::Json => {
             // NDJSON: one schema-valid event per entry, then a summary event.
-            for e in &shown {
+            for (e, disp) in &shown {
                 println!(
                     "{}",
                     serde_json::json!({
@@ -50,7 +54,7 @@ pub fn run(args: &ListArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
                         "vault_id": cmd::hex(&ctx.vault_id.0),
                         "epoch": ctx.epoch.0,
                         "key_id": cmd::hex(&ctx.key_id.0),
-                        "path": e.path,
+                        "path": disp,
                         "plain_bytes": e.plain_len,
                         "content_root": cmd::hex(&e.content_root),
                     })
@@ -64,14 +68,14 @@ pub fn run(args: &ListArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
                     "epoch": ctx.epoch.0,
                     "key_id": cmd::hex(&ctx.key_id.0),
                     "files": shown.len(),
-                    "plain_bytes": shown.iter().map(|e| e.plain_len).sum::<u64>(),
+                    "plain_bytes": shown.iter().map(|(e, _)| e.plain_len).sum::<u64>(),
                 }),
                 "",
             );
         }
         OutMode::Text => {
-            for e in &shown {
-                println!("{:>12}  {:>5}  {}", e.plain_len, e.chunk_count, e.path);
+            for (e, disp) in &shown {
+                println!("{:>12}  {:>5}  {}", e.plain_len, e.chunk_count, disp);
             }
             eprintln!(
                 "{} entr(y/ies), vault {} epoch {}",
@@ -107,17 +111,23 @@ pub fn cat(args: &CatArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         .trim_start_matches("./")
         .trim_start_matches('/')
         .to_string();
-    let entry = ctx
-        .manifest
-        .entries
-        .iter()
-        .find(|e| e.path == want)
-        .ok_or_else(|| {
-            Error::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{} not in manifest", args.path),
-            ))
-        })?;
+    // `PATH` is operator-facing plaintext; match after opening sealed names.
+    let mut entry = None;
+    let mut entry_disp = String::new();
+    for e in &ctx.manifest.entries {
+        let disp = cmd::seal::display_path(&ctx, e)?;
+        if disp == want {
+            entry = Some(e);
+            entry_disp = disp;
+            break;
+        }
+    }
+    let entry = entry.ok_or_else(|| {
+        Error::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("{} not in manifest", args.path),
+        ))
+    })?;
 
     let start = Instant::now();
     let raw = corevault::read_object(&args.vault, ctx.epoch, &entry.object_id)?;
@@ -145,7 +155,7 @@ pub fn cat(args: &CatArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
                     "vault_id": cmd::hex(&ctx.vault_id.0),
                     "epoch": ctx.epoch.0,
                     "key_id": cmd::hex(&ctx.key_id.0),
-                    "path": entry.path,
+                    "path": entry_disp,
                     "truncated": truncated,
                     "plain_bytes": plain_len,
                     "content_root": cmd::hex(&entry.content_root),

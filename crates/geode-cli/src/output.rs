@@ -15,6 +15,14 @@
 //! frontend-owned copy in `output.rs`, naming the recommended path
 //! `~/.config/hedronite/geode/default.gkey`. `cmd/key.rs` keeps its inline
 //! `eprintln!` until fullstack wires the helper; the text matches.
+//!
+//! v0.2.1 G0c (chrome): `geode seal --seal-names` is documented in clap help
+//! (the arg lives on `SealArgs` in `cmd/seal.rs`; G0b/fullstack wires the
+//! HCTR2-256 sealing behavior). This module owns the help copy discipline:
+//! the `--seal-names` doc names the suite (0x01) and the default (plaintext
+//! names) and states that no key material is printed. The no-key-bytes
+//! guarantee below is unchanged — `human_error`/`exit_family` print only
+//! public context carried by `Error`, never ISK/FEK/passphrase/wrap bytes.
 
 use std::io::Write;
 

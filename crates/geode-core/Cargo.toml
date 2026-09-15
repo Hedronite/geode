@@ -26,6 +26,14 @@ argon2 = "0.6"
 getrandom = "0.3"
 subtle = "2"
 base64ct = { version = "1", features = ["alloc"] }
+# G0a (v0.2.1): HCTR2-256 length-preserving filename seal (02-cryptography 5).
+# HCTR2 mode is wired in `src/hctr2.rs` from `aes` + `polyval` (the published
+# `hctr2` crate needs nightly). `data-encoding` provides the
+# base32hex (RFC 4648, lowercase, no padding) name encoding.
+aes = "0.8"
+cipher = "0.4"
+polyval = "0.7"
+data-encoding = "2"
 # G1a (v0.2.0): OS keyring storage for ISK / wrap passphrase. Default v1
 # feature pulls the platform-native store (Keychain on macOS, Credential
 # Manager on Windows, Secret Service on Linux). When no store is available

@@ -47,6 +47,7 @@
 
 pub mod aead;
 pub mod chunk;
+pub mod hctr2;
 pub mod kdf;
 pub mod keyfile;
 pub mod keyring;
