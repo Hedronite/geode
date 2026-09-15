@@ -10,6 +10,11 @@
 //! G4 ships: exit-code table, `tui` stub (G0c), `GEODE_PASSPHRASE` warning,
 //! no-echo passphrase prompt, and the human error formatter that names the
 //! exit family (2 vs 1).
+//!
+//! v0.2.0 G0 chrome: the keygen default-path warning (05-cli §2.1) is now
+//! frontend-owned copy in `output.rs`, naming the recommended path
+//! `~/.config/hedronite/geode/default.gkey`. `cmd/key.rs` keeps its inline
+//! `eprintln!` until fullstack wires the helper; the text matches.
 
 use std::io::Write;
 
@@ -72,6 +77,27 @@ pub fn prompt_passphrase(label: &str) -> std::io::Result<zeroize::Zeroizing<Stri
         .map_err(std::io::Error::other)?;
     let _ = writeln!(err);
     Ok(pass)
+}
+
+/// The keygen default-path warning (05-cli §2.1). Frontend owns the copy.
+///
+/// When `geode keygen` is called without an explicit PATH, it writes
+/// `./secret.gkey` and warns the operator to move it to the recommended
+/// location `~/.config/hedronite/geode/default.gkey`. The warning text
+/// MUST name that path so a new operator knows where the key belongs. It
+/// never includes key bytes — it is a path recommendation only.
+#[must_use]
+pub fn keygen_default_path_warning() -> String {
+    "warning: writing ./secret.gkey — move it to ~/.config/hedronite/geode/default.gkey".into()
+}
+
+/// Print the keygen default-path warning to stderr (05-cli §2.1).
+///
+/// `cmd/key.rs` keeps an inline `eprintln!` with the same text until fullstack
+/// wires this helper; the copy is frontend-owned here either way.
+#[allow(dead_code)]
+pub fn print_keygen_default_path_warning() {
+    eprintln!("{}", keygen_default_path_warning());
 }
 
 /// Human error text for a failed verb (G4c, 05-cli §3). Names the exit
@@ -141,7 +167,16 @@ mod tests {
         let s = human_error("verify", &Error::AuthFail);
         assert!(s.contains("exit 2"));
         assert!(s.contains("authentication"));
-        // No key bytes are ever present in Error variants.
         assert!(!s.contains("ISK"));
+    }
+
+    #[test]
+    fn keygen_warning_names_recommended_path() {
+        let w = keygen_default_path_warning();
+        assert!(
+            w.contains("~/.config/hedronite/geode/default.gkey"),
+            "warning must name the recommended path: {w}",
+        );
+        assert!(!w.contains("ISK") && !w.contains("FEK"));
     }
 }
