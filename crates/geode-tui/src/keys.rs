@@ -15,7 +15,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::app::{App, Message};
+use crate::app::{App, Message, SnapshotUi};
 
 /// Dispatch a key event. Returns `Some(Message::Quit)` when the operator
 /// asks to quit; otherwise mutates `App` in place and returns `None`.
@@ -28,20 +28,7 @@ pub fn handle_key(app: &mut App, k: KeyEvent) -> Option<Message> {
     app.set_last_key(key_label(&k));
 
     if matches!(k.code, KeyCode::Esc) {
-        if app.help() {
-            app.toggle_help();
-            return None;
-        }
-        if app.verify_overlay() {
-            app.close_verify_overlay();
-            return None;
-        }
-        if app.preview().is_some() {
-            app.toggle_preview();
-            return None;
-        }
-        app.quit_now();
-        return Some(Message::Quit);
+        return handle_esc(app);
     }
 
     if matches!(k.code, KeyCode::Char('?')) {
@@ -69,6 +56,11 @@ pub fn handle_key(app: &mut App, k: KeyEvent) -> Option<Message> {
     if quit {
         app.quit_now();
         return Some(Message::Quit);
+    }
+
+    if app.snapshot_overlay() {
+        handle_snapshot(app, k.code);
+        return None;
     }
 
     if app.verify_overlay() {
@@ -104,11 +96,78 @@ pub fn handle_key(app: &mut App, k: KeyEvent) -> Option<Message> {
         KeyCode::Char('v') => app.verify(false),
         KeyCode::Char('V') => app.verify(true),
         KeyCode::Char('p') => app.toggle_preview(),
+        KeyCode::Char('s') => app.toggle_snapshots(),
         KeyCode::Char('[') => app.cycle_verb(-1),
         KeyCode::Char(']') => app.cycle_verb(1),
         _ => {}
     }
     None
+}
+
+fn handle_esc(app: &mut App) -> Option<Message> {
+    if app.help() {
+        app.toggle_help();
+        return None;
+    }
+    if app.snapshot_overlay() {
+        match app.snapshot_ui() {
+            SnapshotUi::Name { .. }
+            | SnapshotUi::ConfirmRestore { .. }
+            | SnapshotUi::ConfirmGc
+            | SnapshotUi::GcDone { .. } => {
+                app.snapshot_cancel_edit();
+            }
+            _ => app.close_snapshots(),
+        }
+        return None;
+    }
+    if app.verify_overlay() {
+        app.close_verify_overlay();
+        return None;
+    }
+    if app.preview().is_some() {
+        app.toggle_preview();
+        return None;
+    }
+    app.quit_now();
+    Some(Message::Quit)
+}
+
+fn handle_snapshot(app: &mut App, code: KeyCode) {
+    match app.snapshot_ui() {
+        SnapshotUi::Name { .. } => match code {
+            KeyCode::Enter => app.snapshot_commit_create(),
+            KeyCode::Backspace => app.snapshot_name_backspace(),
+            KeyCode::Char(c) => app.snapshot_name_char(c),
+            _ => {}
+        },
+        SnapshotUi::ConfirmRestore { .. } => match code {
+            KeyCode::Char('y' | 'Y') => app.snapshot_commit_restore(),
+            KeyCode::Char('n' | 'N') => app.snapshot_cancel_edit(),
+            _ => {}
+        },
+        SnapshotUi::ConfirmGc => match code {
+            KeyCode::Char('y' | 'Y') => app.snapshot_commit_gc(),
+            KeyCode::Char('n' | 'N') => app.snapshot_cancel_edit(),
+            _ => {}
+        },
+        SnapshotUi::GcDone { .. } => match code {
+            KeyCode::Enter | KeyCode::Char('s') => app.snapshot_cancel_edit(),
+            _ => {}
+        },
+        SnapshotUi::List => match code {
+            KeyCode::Char('j') | KeyCode::Down => app.move_snapshot(1),
+            KeyCode::Char('k') | KeyCode::Up => app.move_snapshot(-1),
+            KeyCode::Char('n') => app.snapshot_begin_create(),
+            KeyCode::Char('r') | KeyCode::Enter => app.snapshot_begin_restore(),
+            KeyCode::Char('g') => app.snapshot_begin_gc(),
+            KeyCode::Char('s') => app.close_snapshots(),
+            KeyCode::Char('[') => app.cycle_verb(-1),
+            KeyCode::Char(']') => app.cycle_verb(1),
+            _ => {}
+        },
+        SnapshotUi::Closed => {}
+    }
 }
 
 /// Short public label for the footer indicator. Never a secret.

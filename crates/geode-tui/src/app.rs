@@ -36,6 +36,7 @@ use crate::splash::Splash;
 use crate::theme::{Appearance, Palette};
 use crate::tree::{self, TreeRow};
 use crate::vault::{self, Preview, VaultCtx, VerifyReport};
+use geode_grotto::snapshot::{GcReport, SnapshotEnvelope};
 
 /// Shipped verb tabs (14-tui §1.2). `geode` is the brand/home tab.
 /// **No `mount`** — mount is optional chrome (14-tui §9). `keyring` ships
@@ -65,6 +66,18 @@ pub enum Pane {
 pub enum View {
     Tree,
     List,
+}
+
+/// Snapshot pane (14-tui §6.6 / §7.1 `s`). Holds core
+/// [`SnapshotEnvelope`] / [`GcReport`] — no TUI-only snapshot type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotUi {
+    Closed,
+    List,
+    Name { buf: String },
+    ConfirmRestore { name: String, epoch: u32 },
+    ConfirmGc,
+    GcDone { report: GcReport },
 }
 
 /// Last verify outcome for the footer / verify pane.
@@ -140,6 +153,9 @@ pub struct App {
     tree_rows: Vec<TreeRow>,
     picker_items: Vec<PickerItem>,
     picker_focus: usize,
+    snapshot: SnapshotUi,
+    snapshot_rows: Vec<SnapshotEnvelope>,
+    snapshot_focus: usize,
 }
 
 impl App {
@@ -188,6 +204,9 @@ impl App {
             tree_rows: Vec::new(),
             picker_items,
             picker_focus: 0,
+            snapshot: SnapshotUi::Closed,
+            snapshot_rows: Vec::new(),
+            snapshot_focus: 0,
         };
         app.expand_all_dirs();
         app.rebuild_rows();
@@ -324,6 +343,30 @@ impl App {
         self.help_scroll
     }
 
+    /// Snapshot overlay state.
+    #[must_use]
+    pub fn snapshot_ui(&self) -> &SnapshotUi {
+        &self.snapshot
+    }
+
+    /// Snapshot overlay open?
+    #[must_use]
+    pub fn snapshot_overlay(&self) -> bool {
+        !matches!(self.snapshot, SnapshotUi::Closed)
+    }
+
+    /// Core snapshot envelopes (14-tui §3).
+    #[must_use]
+    pub fn snapshot_rows(&self) -> &[SnapshotEnvelope] {
+        &self.snapshot_rows
+    }
+
+    /// Focused snapshot row.
+    #[must_use]
+    pub fn snapshot_focus(&self) -> usize {
+        self.snapshot_focus
+    }
+
     /// Transient error banner (no secrets; `geode-grotto` redacts). Cleared
     /// on the next key.
     #[must_use]
@@ -422,6 +465,9 @@ impl App {
         let name = VERB_TABS.get(self.verb).copied().unwrap_or("geode");
         if name != "verify" {
             self.verify_overlay = false;
+        }
+        if name != "snapshot" {
+            self.close_snapshots();
         }
         if self.ctx.is_none() {
             if !matches!(name, "geode") {
@@ -628,6 +674,7 @@ impl App {
         self.verb = 0;
         self.verify = VerifyState::None;
         self.verify_overlay = false;
+        self.close_snapshots();
         self.tree_rows.clear();
         self.expanded.clear();
         self.select_picker_for_vault();
@@ -673,6 +720,181 @@ impl App {
             self.focus = 0;
         } else if self.focus >= self.tree_rows.len() {
             self.focus = self.tree_rows.len() - 1;
+        }
+    }
+
+    /// Toggle the snapshot overlay (`s`). Opening refreshes from core.
+    pub(crate) fn toggle_snapshots(&mut self) {
+        if self.snapshot_overlay() {
+            self.close_snapshots();
+            return;
+        }
+        if self.ctx.is_none() {
+            self.error = Some("unlock a vault first — Enter on a picker row (snapshot)".into());
+            return;
+        }
+        self.snapshot = SnapshotUi::List;
+        self.refresh_snapshots();
+    }
+
+    /// Close the snapshot overlay.
+    pub(crate) fn close_snapshots(&mut self) {
+        self.snapshot = SnapshotUi::Closed;
+        self.snapshot_focus = 0;
+    }
+
+    fn refresh_snapshots(&mut self) {
+        let Some(ctx) = &self.ctx else {
+            self.snapshot_rows.clear();
+            return;
+        };
+        let result = vault::list_snapshots(ctx);
+        match result {
+            Ok(rows) => {
+                self.snapshot_rows = rows;
+                if self.snapshot_rows.is_empty() {
+                    self.snapshot_focus = 0;
+                } else if self.snapshot_focus >= self.snapshot_rows.len() {
+                    self.snapshot_focus = self.snapshot_rows.len() - 1;
+                }
+            }
+            Err(e) => self.error = Some(format!("snapshot: {e}")),
+        }
+    }
+
+    /// j/k in the snapshot list.
+    pub(crate) fn move_snapshot(&mut self, delta: i32) {
+        if !matches!(self.snapshot, SnapshotUi::List) {
+            return;
+        }
+        let n = self.snapshot_rows.len();
+        if n == 0 {
+            return;
+        }
+        let ni = i64::try_from(n).unwrap_or(i64::MAX);
+        let fi = i64::try_from(self.snapshot_focus).unwrap_or(i64::MAX);
+        let next = (fi + i64::from(delta)).rem_euclid(ni);
+        self.snapshot_focus = usize::try_from(next).unwrap_or(0);
+    }
+
+    /// Start naming a snapshot (`n`).
+    pub(crate) fn snapshot_begin_create(&mut self) {
+        if self.ctx.is_none() {
+            return;
+        }
+        self.snapshot = SnapshotUi::Name { buf: String::new() };
+    }
+
+    /// Type into the snapshot name buffer. Core validates on submit.
+    pub(crate) fn snapshot_name_char(&mut self, c: char) {
+        if let SnapshotUi::Name { buf } = &mut self.snapshot {
+            if buf.len() < 64 && (c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+                buf.push(c);
+            }
+        }
+    }
+
+    /// Backspace in the name buffer.
+    pub(crate) fn snapshot_name_backspace(&mut self) {
+        if let SnapshotUi::Name { buf } = &mut self.snapshot {
+            buf.pop();
+        }
+    }
+
+    /// Cancel name / confirm and return to the list.
+    pub(crate) fn snapshot_cancel_edit(&mut self) {
+        if self.snapshot_overlay() {
+            self.snapshot = SnapshotUi::List;
+        }
+    }
+
+    /// Submit a new named snapshot (core `create_snapshot`).
+    pub(crate) fn snapshot_commit_create(&mut self) {
+        let name = match &self.snapshot {
+            SnapshotUi::Name { buf } => buf.clone(),
+            _ => return,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+        let result = match &self.ctx {
+            Some(ctx) => vault::create_snapshot(ctx, &name, now),
+            None => return,
+        };
+        match result {
+            Ok(_) => {
+                self.snapshot = SnapshotUi::List;
+                self.refresh_snapshots();
+                if let Some(i) = self.snapshot_rows.iter().position(|r| r.name == name) {
+                    self.snapshot_focus = i;
+                }
+            }
+            Err(e) => self.error = Some(format!("snapshot create: {e}")),
+        }
+    }
+
+    /// Ask to restore the focused snapshot (confirm MUST name it + epoch).
+    pub(crate) fn snapshot_begin_restore(&mut self) {
+        let Some(row) = self.snapshot_rows.get(self.snapshot_focus) else {
+            self.error = Some("no snapshots — `n` to name one".into());
+            return;
+        };
+        self.snapshot = SnapshotUi::ConfirmRestore {
+            name: row.name.clone(),
+            epoch: row.epoch,
+        };
+    }
+
+    /// Restore after confirm. Reloads the vault so the tree matches.
+    pub(crate) fn snapshot_commit_restore(&mut self) {
+        let (name, _epoch) = match &self.snapshot {
+            SnapshotUi::ConfirmRestore { name, epoch } => (name.clone(), *epoch),
+            _ => return,
+        };
+        let result = match &self.ctx {
+            Some(ctx) => vault::restore_snapshot(ctx, &name),
+            None => return,
+        };
+        match result {
+            Ok(()) => {
+                if let (Some(path), key) = (self.vault.clone(), self.key.clone()) {
+                    match vault::open(&path, key.as_deref()) {
+                        Ok(ctx) => {
+                            self.ctx = Some(ctx);
+                            self.focus = 0;
+                            self.expand_all_dirs();
+                            self.rebuild_rows();
+                        }
+                        Err(e) => self.error = Some(format!("snapshot restore reopen: {e}")),
+                    }
+                }
+                self.snapshot = SnapshotUi::List;
+                self.refresh_snapshots();
+            }
+            Err(e) => self.error = Some(format!("snapshot restore: {e}")),
+        }
+    }
+
+    /// Confirm before `gc` — core has no `--dry-run` preview API.
+    pub(crate) fn snapshot_begin_gc(&mut self) {
+        if self.ctx.is_none() {
+            return;
+        }
+        self.snapshot = SnapshotUi::ConfirmGc;
+    }
+
+    /// Run core `gc` and show the [`GcReport`].
+    pub(crate) fn snapshot_commit_gc(&mut self) {
+        let result = match &self.ctx {
+            Some(ctx) => vault::gc(ctx),
+            None => return,
+        };
+        match result {
+            Ok(report) => self.snapshot = SnapshotUi::GcDone { report },
+            Err(e) => {
+                self.snapshot = SnapshotUi::List;
+                self.error = Some(format!("gc: {e}"));
+            }
         }
     }
 

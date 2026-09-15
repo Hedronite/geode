@@ -12,6 +12,7 @@ pub mod keyring;
 pub mod list;
 pub mod open;
 pub mod seal;
+pub mod snapshot;
 pub mod vault;
 pub mod verify;
 
