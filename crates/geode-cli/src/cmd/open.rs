@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Args;
-use geode_core::manifest::EntryKind;
-use geode_core::{object, vault as corevault, Error, Result};
+use geode_grotto::manifest::EntryKind;
+use geode_grotto::{object, vault as corevault, Error, Result};
 
 use crate::{cmd, GlobalArgs, OutMode};
 

@@ -1,6 +1,6 @@
 [package]
-name = "geode-core"
-description = "GDE1 format, crypto, vault, and policy evaluate - the Geode API"
+name = "geode-grotto"
+description = "GDE1 custody core (format, crypto, vault, policy, keyring) - the Geode API"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [lib]
-name = "geode_core"
+name = "geode_grotto"
 path = "src/lib.rs"
 
 [features]
@@ -26,6 +26,12 @@ argon2 = "0.6"
 getrandom = "0.3"
 subtle = "2"
 base64ct = { version = "1", features = ["alloc"] }
+# G1a (v0.2.0): OS keyring storage for ISK / wrap passphrase. Default v1
+# feature pulls the platform-native store (Keychain on macOS, Credential
+# Manager on Windows, Secret Service on Linux). When no store is available
+# at runtime (e.g. CI without a D-Bus secret service) callers fall back to
+# a 0600 file via keyring::store_secret_file.
+keyring = "4"
 
 [dev-dependencies]
 tempfile = "3"

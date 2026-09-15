@@ -13,15 +13,15 @@
 
 use std::path::PathBuf;
 
-use geode_core::aead::{derive_chunk_nonce, seal_chunk, ChunkAd};
-use geode_core::kdf::{
+use geode_grotto::aead::{derive_chunk_nonce, seal_chunk, ChunkAd};
+use geode_grotto::kdf::{
     derive_epoch_key, derive_key_id, derive_manifest_key, derive_meta_key, derive_name_key, Epoch,
     EpochKey, IdentitySecret, ObjectId, VaultId,
 };
-use geode_core::wrap::{
+use geode_grotto::wrap::{
     unwrap_identity_passphrase, wrap_identity_passphrase_with, Argon2Params, WrapSalt,
 };
-use geode_core::{MAGIC_GKEY, SUITE_0X01};
+use geode_grotto::{MAGIC_GKEY, SUITE_0X01};
 
 fn hex(b: &[u8]) -> String {
     use std::fmt::Write as _;
@@ -142,7 +142,7 @@ fn wrap_vector(
     assert_eq!(recovered.as_bytes(), &isk_arr, "wrap round-trip broke");
     let wrong = unwrap_identity_passphrase(&wrapped, b"wrong passphrase");
     assert!(
-        matches!(wrong, Err(geode_core::Error::AuthFail)),
+        matches!(wrong, Err(geode_grotto::Error::AuthFail)),
         "wrong passphrase must be AuthFail, got {wrong:?}"
     );
 

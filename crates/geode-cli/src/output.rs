@@ -18,7 +18,7 @@
 
 use std::io::Write;
 
-use geode_core::Error;
+use geode_grotto::Error;
 
 /// Exit codes — 05-cli §3. Scripts MUST distinguish 2 from 1.
 /// `LOCKED` (5) has no mapping in v0.1.0 (no mount/lock path) and is

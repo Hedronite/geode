@@ -8,6 +8,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod key;
+pub mod keyring;
 pub mod list;
 pub mod open;
 pub mod seal;
@@ -17,10 +18,10 @@ pub mod verify;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use geode_core::kdf::{self, Epoch, EpochKey, IdentitySecret, KeyId, VaultId};
-use geode_core::manifest::{self, Manifest};
-use geode_core::recipients::{self, Recipient, Recipients};
-use geode_core::{Error, Result};
+use geode_grotto::kdf::{self, Epoch, EpochKey, IdentitySecret, KeyId, VaultId};
+use geode_grotto::manifest::{self, Manifest};
+use geode_grotto::recipients::{self, Recipient, Recipients};
+use geode_grotto::{Error, Result};
 use zeroize::Zeroize;
 
 use crate::output::exit;
@@ -61,20 +62,17 @@ const GKEY_VERSION: u8 = 1;
 const GKEY_KIND_RAW: u8 = 0x00;
 const GKEY_KIND_WRAP: u8 = 0x01;
 
-/// Load an identity key file (02-cryptography 6).
-///
-/// v0.1.0 reads the raw form (6.1). The passphrase-wrapped form (6.2) is
-/// unreachable from the CLI until `geode-core` exposes a keyfile API —
-/// `Secret32` construction is crate-private by design (G3 handoff note).
+/// Load an identity key file (02-cryptography 6): raw form (6.1) and
+/// passphrase-wrapped form (6.2, via the public wrap API from G5a).
+/// Permissions are checked before any byte is read (core `keyfile`).
 pub fn load_isk(path: &Path) -> Result<IdentitySecret> {
-    refuse_world_readable(path)?;
-    let raw = std::fs::read(path).map_err(Error::Io)?;
+    let raw = geode_grotto::keyfile::load_key_file_bytes(path)?;
     if raw.len() < 6 {
         return Err(Error::Format("key file too short".into()));
     }
     let mut magic = [0u8; 4];
     magic.copy_from_slice(&raw[0..4]);
-    geode_core::assert_magic(&magic, geode_core::MAGIC_GKEY)?;
+    geode_grotto::assert_magic(&magic, geode_grotto::MAGIC_GKEY)?;
     if raw[4] != GKEY_VERSION {
         return Err(Error::Format(format!("unsupported GKEY version {}", raw[4])));
     }
@@ -93,32 +91,46 @@ pub fn load_isk(path: &Path) -> Result<IdentitySecret> {
             isk.zeroize();
             Ok(id)
         }
-        GKEY_KIND_WRAP => Err(Error::Format(
-            "passphrase-wrapped GKEY: unwrap needs a geode-core keyfile API (tracked)".into(),
-        )),
+        GKEY_KIND_WRAP => {
+            // 02-cryptography 6.2: salt[16] m u32 t u32 p u32 nonce[32]
+            // tag[16] wrapped_isk[32] — 114 bytes total.
+            if raw.len() != 6 + 16 + 12 + 32 + 16 + 32 {
+                return Err(Error::Format("wrapped GKEY wrong length".into()));
+            }
+            let mut salt = [0u8; 16];
+            salt.copy_from_slice(&raw[6..22]);
+            let u32le = |o: usize| u32::from_le_bytes(raw[o..o + 4].try_into().expect("4"));
+            let mut nonce = [0u8; 32];
+            nonce.copy_from_slice(&raw[34..66]);
+            let mut tag = [0u8; 16];
+            tag.copy_from_slice(&raw[66..82]);
+            let mut wrapped = [0u8; 32];
+            wrapped.copy_from_slice(&raw[82..114]);
+            let wk = geode_grotto::wrap::WrappedKey {
+                salt: geode_grotto::wrap::WrapSalt(salt),
+                argon2_m_kib: u32le(22),
+                argon2_t: u32le(26),
+                argon2_p: u32le(30),
+                wrap_nonce: nonce,
+                wrap_tag: tag,
+                wrapped_isk: wrapped,
+            };
+            let pass = passphrase()?;
+            geode_grotto::wrap::unwrap_identity_passphrase(&wk, pass.as_bytes())
+        }
         other => Err(Error::Format(format!("unknown GKEY kind 0x{other:02x}"))),
     }
 }
 
-/// 02-cryptography 6.1: refuse a group/world-readable key file.
-#[cfg(unix)]
-fn refuse_world_readable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path).map_err(Error::Io)?.permissions().mode();
-    if mode & 0o077 != 0 {
-        return Err(Error::Format(format!(
-            "key file {} is group/world-readable; chmod 600 first",
-            path.display()
-        )));
+/// Passphrase for wrapped keys: `GEODE_PASSPHRASE` when set (the startup
+/// warning already fired in `main`), else the no-echo prompt.
+fn passphrase() -> Result<zeroize::Zeroizing<String>> {
+    if let Some(p) = std::env::var_os("GEODE_PASSPHRASE") {
+        return Ok(zeroize::Zeroizing::new(p.to_string_lossy().into_owned()));
     }
-    Ok(())
+    crate::output::prompt_passphrase("passphrase: ").map_err(Error::Io)
 }
 
-/// Non-unix builds cannot check permission bits; accept (documented gap).
-#[cfg(not(unix))]
-fn refuse_world_readable(_path: &Path) -> Result<()> {
-    Ok(())
-}
 
 /// Default identity path: `$XDG_CONFIG_HOME/hedronite/geode/default.gkey`,
 /// falling back to `~/.config/hedronite/geode/default.gkey` (05-cli 2.1).
@@ -141,13 +153,20 @@ pub fn require_key(global: &crate::GlobalArgs) -> Result<PathBuf> {
     if let Some(p) = &global.key {
         return Ok(p.clone());
     }
+    if let Some(index) = geode_grotto::keyring::default_keyring_path() {
+        if let Ok(kr) = geode_grotto::keyring::load_keyring(&index) {
+            if let Some(dk) = kr.default.and_then(|id| kr.find(&id)) {
+                return Ok(PathBuf::from(&dk.path));
+            }
+        }
+    }
     if let Some(default) = default_key_path() {
         if default.is_file() {
             return Ok(default);
         }
     }
     Err(Error::Format(
-        "missing --key PATH (or GEODE_KEY_FILE, or ~/.config/hedronite/geode/default.gkey)"
+        "missing --key PATH (or GEODE_KEY_FILE, config default_key, or          ~/.config/hedronite/geode/default.gkey)"
             .into(),
     ))
 }
@@ -280,7 +299,7 @@ pub fn write_header(
     }
     let text = serde_json::to_string_pretty(&v)
         .map_err(|e| Error::Format(format!("header serialize: {e}")))?;
-    geode_core::vault::write_atomic(&root.join("header.json"), text.as_bytes())
+    geode_grotto::vault::write_atomic(&root.join("header.json"), text.as_bytes())
 }
 
 /// Write the manifest atomically with a fresh `manifest_mac` (03-format 5).
@@ -295,7 +314,7 @@ pub fn write_manifest(ctx: &VaultCtx) -> Result<()> {
     }
     let text = serde_json::to_string_pretty(&value)
         .map_err(|e| Error::Format(format!("manifest serialize: {e}")))?;
-    geode_core::vault::write_atomic(&manifest_path(&ctx.root, ctx.epoch), text.as_bytes())
+    geode_grotto::vault::write_atomic(&manifest_path(&ctx.root, ctx.epoch), text.as_bytes())
 }
 
 /// Emit a success event (05-cli 4; `schemas/event.schema.json`).

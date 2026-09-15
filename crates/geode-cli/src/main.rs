@@ -72,7 +72,7 @@ enum Commands {
     List(cmd::list::ListArgs),
     /// Print one object to stdout.
     Cat(cmd::list::CatArgs),
-    /// Manage the keyring (OS keyring / file 0600 fallback). Not wired in this build.
+    /// Manage the keyring (named identity keys, 05-cli 2.1).
     Keyring(KeyringArgs),
     /// Ratatui operator surface (not in this build — profile `core`).
     Tui,
@@ -158,9 +158,7 @@ fn main() {
         Commands::Verify(a) => cmd::verify::run(a, &cli.global, out),
         Commands::List(a) => cmd::list::run(a, &cli.global, out),
         Commands::Cat(a) => cmd::list::cat(a, &cli.global, out),
-        // G1c stub: keyring verbs are not wired until fullstack G1b lands.
-        // `Error::NotImplemented` -> exit 1 (usage) via `cmd::fail`.
-        Commands::Keyring(_) => Err(geode_core::Error::NotImplemented),
+        Commands::Keyring(a) => cmd::keyring::run(a, out),
         // `geode tui` on a build without the `tui` feature: exit 1, not 2.
         Commands::Tui => output::tui_unavailable(),
     };

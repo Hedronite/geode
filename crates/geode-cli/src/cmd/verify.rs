@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::Args;
-use geode_core::kdf::EpochKey;
-use geode_core::object::{self, ObjectHeader};
-use geode_core::{aead, vault as corevault, Error, Result};
+use geode_grotto::kdf::EpochKey;
+use geode_grotto::object::{self, ObjectHeader};
+use geode_grotto::{aead, vault as corevault, Error, Result};
 
 use crate::{cmd, GlobalArgs, OutMode};
 
