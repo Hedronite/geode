@@ -1,16 +1,22 @@
-//! `app.rs` — TUI state and event loop (v0.2.0 G5b/G5c).
+//! `app.rs` — TUI state and event loop (v0.2.0 G5b/G5c + polish).
 //!
 //! Owns the `App` struct: the vault path, the identity key path (public),
 //! the opened [`VaultCtx`] (when unlocked), the focused tree row, the
-//! preview buffer, the last verify result, and chrome flags. The event
-//! loop is the ratatui alternate-screen loop with crossterm polling at
-//! 60 ms, matching the Lapis/Facet family.
+//! preview buffer, the last verify result, chrome flags, the active
+//! [`Palette`] (14-tui §11), and the opening [`Splash`] (polish B1). The
+//! event loop is the ratatui alternate-screen loop with crossterm polling
+//! at 60 ms, matching the Lapis/Facet family.
 //!
 //! Unlock happens **before** the alternate screen is entered so the
 //! no-echo passphrase prompt runs in cooked mode (rpassword disables echo
 //! itself); an auth failure surfaces as `Error::AuthFail` (exit 2) with no
 //! tree painted — fail-closed per 14-tui §13.2. A panic hook restores the
 //! terminal before the default hook runs (14-tui §3.4).
+//!
+//! The splash paints **inside** the alt screen after a successful open (or
+//! over the picker when no vault was given). It never gates unlock; it is
+//! skippable (any key) and auto-dismisses on a short timeout. No secret is
+//! painted on the splash (14-tui §4).
 //!
 //! No secret material lives in `App` beyond the [`Preview`] plaintext
 //! buffer, which is zeroized on row change, close, and lock. `App` never
@@ -24,6 +30,8 @@ use std::time::{Duration, Instant};
 
 use geode_grotto::Result;
 
+use crate::splash::Splash;
+use crate::theme::{Appearance, Palette};
 use crate::vault::{self, Preview, VaultCtx, VerifyReport};
 
 /// A message from the key handler. Only `Quit` breaks the event loop;
@@ -94,18 +102,25 @@ pub struct App {
     quit: bool,
     last_key: Option<String>,
     error: Option<String>,
+    // polish (14-tui §11 + B1)
+    appearance: Appearance,
+    palette: Palette,
+    splash: Option<Splash>,
 }
 
 impl App {
     /// New app for an optional vault path, identity key path, and an
     /// already-authenticated [`VaultCtx`] (unlocked before the alt
     /// screen was entered). `ctx = None` is the picker / locked state.
+    /// The opening splash is started now and dismissed on first key or
+    /// timeout (polish B1).
     #[must_use]
     pub fn new(
         vault: Option<PathBuf>,
         key: Option<PathBuf>,
         ctx: Option<VaultCtx>,
     ) -> Self {
+        let appearance = Appearance::default();
         Self {
             vault,
             key,
@@ -118,6 +133,9 @@ impl App {
             quit: false,
             last_key: None,
             error: None,
+            appearance,
+            palette: Palette::for_appearance(appearance),
+            splash: Some(Splash::new(Instant::now())),
         }
     }
 
@@ -208,7 +226,28 @@ impl App {
         self.last_key.as_deref().unwrap_or("")
     }
 
-    // --- mutations used by keys.rs -------------------------------------
+    /// The active palette (14-tui §11). All paint sites read tokens from
+    /// here; no `Color::Rgb(...)` is constructed outside `theme.rs`.
+    #[must_use]
+    pub fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
+    /// The active appearance.
+    #[must_use]
+    pub fn appearance(&self) -> Appearance {
+        self.appearance
+    }
+
+    /// Whether the opening splash is still up (polish B1).
+    #[must_use]
+    pub fn splash_active(&self) -> bool {
+        self.splash.is_some()
+    }
+}
+
+impl App {
+    // --- mutations used by keys.rs / event loop -----------------------
 
     /// Record the last key label (public chrome only — never key bytes).
     pub(crate) fn set_last_key(&mut self, label: String) {
@@ -339,6 +378,23 @@ impl App {
             ctx.session_mut().touch();
         }
     }
+
+    // --- splash (polish B1) ------------------------------------------
+
+    /// Dismiss the opening splash (any key).
+    pub(crate) fn dismiss_splash(&mut self) {
+        self.splash = None;
+    }
+
+    /// Auto-dismiss the splash on timeout.
+    pub(crate) fn poll_splash_expired(&mut self, now: Instant) {
+        if let Some(s) = self.splash.as_mut() {
+            s.poll_expired(now);
+            if s.dismissed() {
+                self.splash = None;
+            }
+        }
+    }
 }
 
 /// Install a panic hook that restores the terminal before the default
@@ -374,11 +430,31 @@ pub fn run(vault: Option<PathBuf>, key: Option<PathBuf>) -> Result<()> {
 
 fn event_loop(term: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> {
     loop {
-        term.draw(|f| crate::draw::draw(f, &app)).map_err(geode_grotto::Error::Io)?;
+        // Splash phase (polish B1): paint the splash until the operator
+        // hits any key or the short timeout fires. It never gates unlock
+        // (unlock already happened before the alt screen) and paints no
+        // secret. Any key dismisses; we still drain the event so the next
+        // loop iteration starts clean.
+        if app.splash_active() {
+            term.draw(|f| crate::splash::render(f, f.area(), app.palette()))
+                .map_err(geode_grotto::Error::Io)?;
+            if crossterm::event::poll(Duration::from_millis(60))
+                .map_err(geode_grotto::Error::Io)?
+            {
+                let _ = crossterm::event::read().map_err(geode_grotto::Error::Io);
+                app.dismiss_splash();
+            } else {
+                app.poll_splash_expired(Instant::now());
+            }
+            continue;
+        }
+
+        term.draw(|f| crate::draw::draw(f, &app))
+            .map_err(geode_grotto::Error::Io)?;
 
         // Block up to 60 ms for the next event; resize/focus fall through
         // and just trigger a redraw.
-        if !crossterm::event::poll(std::time::Duration::from_millis(60))
+        if !crossterm::event::poll(Duration::from_millis(60))
             .map_err(geode_grotto::Error::Io)?
         {
             app.poll_idle_lock();

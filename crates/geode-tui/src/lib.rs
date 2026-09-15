@@ -1,11 +1,18 @@
-//! `geode-tui` — Ratatui operator surface for `geode` (v0.2.0 G5).
+//! `geode-tui` — Ratatui operator surface for `geode` (v0.2.0 G5 + polish).
 //!
 //! Adapter over `geode-grotto`, in the same family as the Lapis and Facet
 //! TUIs. The TUI is a **human** surface; it MUST NOT paint secret material
 //! (ISK/EK/passphrase/token/wrap bytes) in any pane, overlay, help screen,
-//! or error message (14-tui §4). It prints only public identifiers
+//! splash, or error message (14-tui §4). It prints only public identifiers
 //! (`vault_id`, `key_id`, `epoch`, manifest hash, paths, counts, sizes) and
 //! chrome text.
+//!
+//! v0.2.0 polish: an opening splash (14-tui aesthetic, `splash.rs`) and
+//! operator chrome matching the Hedronite mocks — hex+◆ mark, gold `geode`,
+//! grey verb tabs, gold dashed frame, two-row footer (`draw.rs`). Palette
+//! tokens live in `theme.rs` (Graphite Honey default / Porcelain Honey,
+//! 14-tui §11). Theme **files** do not gate 0.2 (14-tui §11.3): built-in
+//! palettes only; a loader is 0.3+ MAY.
 //!
 //! G5b/G5c: the TUI unlocks a real vault in-process via `geode-grotto`
 //! (`Session::unlock` zeroizes ISK; header + manifest MACs verified), then
@@ -31,6 +38,10 @@ pub mod app;
 pub mod draw;
 #[cfg(feature = "tui")]
 pub mod keys;
+#[cfg(feature = "tui")]
+pub mod splash;
+#[cfg(feature = "tui")]
+pub mod theme;
 #[cfg(feature = "tui")]
 pub mod vault;
 
