@@ -17,6 +17,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+### Fixed
+
+- Help overlay (`?`) is opaque: `Clear` the overlay rect, then paint a `Block` with a solid palette background so the tree/meta no longer show through ([[foundry/geode/geode-spec-0.0.0/14-tui]] §7.1).
+- Operator verbs actually run on an unlocked vault: `j`/`k` move, `h`/`l` collapse/expand, `Tab` cycles panes, `[`/`]` cycle verb tabs (`list` / `verify` / `cat`), `v`/`V` verify with an overlay, `p` bounded preview, `L` lock with Enter to re-open from the picker. Empty picker is not the success path.
+
+### Changed
+
+- Splash samples [[foundry/geode/brand/brandmark.jpg]] (stone ring, teal crystal, gold star) into half-block cells. Header `geode <version>` / `GDE1 · core`; footer `sealed · keyring default · exit 0`. Version is `CARGO_PKG_VERSION` (0.2.0), never the mock's `0.1.1`.
+
 ## [0.2.0] — 2026-09-15
 
 TUI operator release. **Workspace version is bumped to 0.2.0 with this release.** SemVer note: on 0.x, `geode tui` changing from "exit 1, not available" to a working TUI is treated as a breaking surface change, so 0.2.0 rather than 0.1.2. The v0.2.0 git tag is NOT cut here; PM tags after Evan GO. No format change; `GDE1` objects from 0.1.x remain readable.

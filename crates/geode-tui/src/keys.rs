@@ -1,10 +1,12 @@
-//! `keys.rs` — TUI key dispatch (v0.2.0 G5b/G5c).
+//! `keys.rs` — TUI key dispatch (v0.2.0 UX).
 //!
 //! `handle_key` translates a `crossterm::event::KeyEvent` into `App`
-//! mutations and an optional [`Message::Quit`]. G5b wires the operator
-//! verbs: `j`/`k` move, `Enter` inspect, `v`/`V` verify (cheap/full),
-//! `p` preview (explicit, bounded), `L` lock, `?` help, `Tab` cycle pane.
-//! `q`/`Esc`/`Ctrl+C` quit (Esc closes an overlay first, per 14-tui §7.1).
+//! mutations and an optional [`Message::Quit`]. Operator verbs:
+//! `j`/`k` move, `h`/`l` collapse/expand, `Enter` inspect, `v`/`V`
+//! verify (cheap/full), `p` preview (explicit, bounded), `L` lock, `?`
+//! help (j/k scroll), `Tab`/`BackTab` cycle pane, `[`/`]` cycle verb
+//! tabs (tree / list / verify / cat). `q`/`Esc`/`Ctrl+C` quit (Esc
+//! closes an overlay first, per 14-tui §7.1).
 //!
 //! Key labels recorded for the footer are public chrome (e.g. `"q"`,
 //! `"Enter"`, `"v"`) — never the byte representation of any secret.
@@ -22,45 +24,43 @@ pub fn handle_key(app: &mut App, k: KeyEvent) -> Option<Message> {
         return None;
     }
 
-    // Any keypress is activity: reset the idle-lock timer (14-tui §3.3).
     app.touch();
-
-    // Public chrome label for the footer indicator. Deliberately a short,
-    // public glyph — never the byte representation of any secret.
     app.set_last_key(key_label(&k));
 
-    // Esc closes an overlay before quitting (14-tui §7.1: Esc = cancel).
     if matches!(k.code, KeyCode::Esc) {
         if app.help() {
             app.toggle_help();
             return None;
         }
+        if app.verify_overlay() {
+            app.close_verify_overlay();
+            return None;
+        }
         if app.preview().is_some() {
-            app.toggle_preview(); // close preview
+            app.toggle_preview();
             return None;
         }
         app.quit_now();
         return Some(Message::Quit);
     }
 
-    // `?` toggles help from anywhere.
     if matches!(k.code, KeyCode::Char('?')) {
         app.toggle_help();
         return None;
     }
-    // While the help overlay is up, only `?`/`Esc`/`q`/`Q` act; everything
-    // else is swallowed so the operator reads the help without side effects.
     if app.help() {
         match k.code {
             KeyCode::Char('q' | 'Q') => {
                 app.quit_now();
                 return Some(Message::Quit);
             }
-            _ => return None,
+            KeyCode::Char('j') | KeyCode::Down => app.scroll_help(1),
+            KeyCode::Char('k') | KeyCode::Up => app.scroll_help(-1),
+            _ => {}
         }
+        return None;
     }
 
-    // Global quit.
     let quit = match k.code {
         KeyCode::Char('q' | 'Q') => true,
         KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => true,
@@ -71,21 +71,41 @@ pub fn handle_key(app: &mut App, k: KeyEvent) -> Option<Message> {
         return Some(Message::Quit);
     }
 
-    // Picker / locked state: only `?` (handled above) and quit do anything;
-    // the verbs need an unlocked vault.
+    if app.verify_overlay() {
+        match k.code {
+            KeyCode::Char('[') => app.cycle_verb(-1),
+            KeyCode::Char(']') => app.cycle_verb(1),
+            _ => {}
+        }
+        return None;
+    }
+
     if app.picker() {
+        match k.code {
+            KeyCode::Char('j') | KeyCode::Down => app.move_picker(1),
+            KeyCode::Char('k') | KeyCode::Up => app.move_picker(-1),
+            KeyCode::Enter => app.open_picker_selection(),
+            KeyCode::Char('[') => app.cycle_verb(-1),
+            KeyCode::Char(']') => app.cycle_verb(1),
+            _ => {}
+        }
         return None;
     }
 
     match k.code {
         KeyCode::Char('L') => app.lock(),
         KeyCode::Tab => app.cycle_pane(),
+        KeyCode::BackTab => app.cycle_pane_rev(),
         KeyCode::Char('j') | KeyCode::Down => app.move_focus(1),
         KeyCode::Char('k') | KeyCode::Up => app.move_focus(-1),
+        KeyCode::Char('h') | KeyCode::Left => app.collapse(),
+        KeyCode::Char('l') | KeyCode::Right => app.expand_or_inspect(),
         KeyCode::Enter => app.inspect(),
         KeyCode::Char('v') => app.verify(false),
         KeyCode::Char('V') => app.verify(true),
         KeyCode::Char('p') => app.toggle_preview(),
+        KeyCode::Char('[') => app.cycle_verb(-1),
+        KeyCode::Char(']') => app.cycle_verb(1),
         _ => {}
     }
     None

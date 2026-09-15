@@ -1,4 +1,4 @@
-//! `app.rs` — TUI state and event loop (v0.2.0 G5b/G5c + polish).
+//! `app.rs` — TUI state and event loop (v0.2.0 G5b/G5c + UX).
 //!
 //! Owns the `App` struct: the vault path, the identity key path (public),
 //! the opened [`VaultCtx`] (when unlocked), the focused tree row, the
@@ -11,7 +11,8 @@
 //! no-echo passphrase prompt runs in cooked mode (rpassword disables echo
 //! itself); an auth failure surfaces as `Error::AuthFail` (exit 2) with no
 //! tree painted — fail-closed per 14-tui §13.2. A panic hook restores the
-//! terminal before the default hook runs (14-tui §3.4).
+//! terminal before the default hook runs (14-tui §3.4). The picker can
+//! re-open a vault in-process after `L` (raw GKEY needs no prompt).
 //!
 //! The splash paints **inside** the alt screen after a successful open (or
 //! over the picker when no vault was given). It never gates unlock; it is
@@ -25,14 +26,24 @@
 
 #![cfg_attr(not(feature = "tui"), allow(dead_code))]
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use geode_grotto::Result;
 
 use crate::splash::Splash;
 use crate::theme::{Appearance, Palette};
+use crate::tree::{self, TreeRow};
 use crate::vault::{self, Preview, VaultCtx, VerifyReport};
+
+/// Shipped verb tabs (14-tui §1.2). `geode` is the brand/home tab.
+/// **No `mount`** — mount is optional chrome (14-tui §9). `keyring` ships
+/// in 0.2. `[` / `]` cycle and activate: tree, list, verify, cat (preview);
+/// the rest are CLI-only banners.
+pub const VERB_TABS: &[&str] = &[
+    "geode", "keygen", "vault", "seal", "open", "verify", "list", "cat", "keyring",
+];
 
 /// A message from the key handler. Only `Quit` breaks the event loop;
 /// every other action mutates `App` in place and returns `None`.
@@ -47,6 +58,13 @@ pub enum Pane {
     Tree,
     Meta,
     Preview,
+}
+
+/// Tree vs flat `geode list` (verb tabs `geode` / `list`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum View {
+    Tree,
+    List,
 }
 
 /// Last verify outcome for the footer / verify pane.
@@ -87,6 +105,15 @@ fn age_label(d: Duration) -> String {
     }
 }
 
+/// A selectable vault on the picker (public path only).
+#[derive(Debug, Clone)]
+pub struct PickerItem {
+    /// On-disk vault directory.
+    pub path: PathBuf,
+    /// Short label (usually the last component).
+    pub label: String,
+}
+
 /// TUI state. Holds only public chrome + the [`VaultCtx`] (whose session
 /// owns EK). No raw key bytes are stored on `App`.
 #[derive(Debug)]
@@ -96,16 +123,23 @@ pub struct App {
     ctx: Option<VaultCtx>,
     focus: usize,
     pane: Pane,
+    view: View,
+    verb: usize,
     preview: Option<Preview>,
     verify: VerifyState,
+    verify_overlay: bool,
     help: bool,
+    help_scroll: u16,
     quit: bool,
     last_key: Option<String>,
     error: Option<String>,
-    // polish (14-tui §11 + B1)
     appearance: Appearance,
     palette: Palette,
     splash: Option<Splash>,
+    expanded: BTreeSet<String>,
+    tree_rows: Vec<TreeRow>,
+    picker_items: Vec<PickerItem>,
+    picker_focus: usize,
 }
 
 impl App {
@@ -115,11 +149,7 @@ impl App {
     /// The opening splash is started now and dismissed on first key or
     /// timeout (polish B1).
     #[must_use]
-    pub fn new(
-        vault: Option<PathBuf>,
-        key: Option<PathBuf>,
-        ctx: Option<VaultCtx>,
-    ) -> Self {
+    pub fn new(vault: Option<PathBuf>, key: Option<PathBuf>, ctx: Option<VaultCtx>) -> Self {
         Self::with_options(vault, key, ctx, crate::RunOptions::default())
     }
 
@@ -134,34 +164,47 @@ impl App {
         options: crate::RunOptions,
     ) -> Self {
         let appearance = options.appearance;
-        Self {
+        let picker_items = discover_picker_items(vault.as_deref());
+        let mut app = Self {
             vault,
             key,
             ctx,
             focus: 0,
             pane: Pane::Tree,
+            view: View::Tree,
+            verb: 0,
             preview: None,
             verify: VerifyState::None,
+            verify_overlay: false,
             help: false,
+            help_scroll: 0,
             quit: false,
             last_key: None,
             error: None,
             appearance,
             palette: Palette::for_appearance(appearance),
             splash: options.splash.then(|| Splash::new(Instant::now())),
-        }
+            expanded: BTreeSet::new(),
+            tree_rows: Vec::new(),
+            picker_items,
+            picker_focus: 0,
+        };
+        app.expand_all_dirs();
+        app.rebuild_rows();
+        app.select_picker_for_vault();
+        app
     }
 
     /// The vault path, if any.
     #[must_use]
-    pub fn vault(&self) -> Option<&std::path::Path> {
+    pub fn vault(&self) -> Option<&Path> {
         self.vault.as_deref()
     }
 
     /// The identity key path (`--key` / `GEODE_KEY_FILE`), if any. Public
     /// path, never key bytes.
     #[must_use]
-    pub fn key(&self) -> Option<&std::path::Path> {
+    pub fn key(&self) -> Option<&Path> {
         self.key.as_deref()
     }
 
@@ -183,7 +226,19 @@ impl App {
         self.ctx.is_none()
     }
 
-    /// Focused tree row index.
+    /// Known vaults on the picker (public paths).
+    #[must_use]
+    pub fn picker_items(&self) -> &[PickerItem] {
+        &self.picker_items
+    }
+
+    /// Focused picker row.
+    #[must_use]
+    pub fn picker_focus(&self) -> usize {
+        self.picker_focus
+    }
+
+    /// Focused tree / list row index.
     #[must_use]
     pub fn focus(&self) -> usize {
         self.focus
@@ -195,17 +250,48 @@ impl App {
         self.ctx.as_ref().map_or(0, |c| c.entries().len())
     }
 
-    /// Focused manifest entry, if any.
+    /// Number of visible tree / list rows.
+    #[must_use]
+    pub fn row_count(&self) -> usize {
+        self.tree_rows.len()
+    }
+
+    /// Visible tree / list rows.
+    #[must_use]
+    pub fn rows(&self) -> &[TreeRow] {
+        &self.tree_rows
+    }
+
+    /// Focused visible row, if any.
+    #[must_use]
+    pub fn focused_row(&self) -> Option<&TreeRow> {
+        self.tree_rows.get(self.focus)
+    }
+
+    /// Focused manifest entry, if the current row is a file.
     #[must_use]
     pub fn focused_entry(&self) -> Option<&geode_grotto::manifest::Entry> {
         let ctx = self.ctx.as_ref()?;
-        ctx.entries().get(self.focus)
+        let row = self.tree_rows.get(self.focus)?;
+        ctx.entries().get(row.entry_index?)
     }
 
     /// Focused pane.
     #[must_use]
     pub fn pane(&self) -> Pane {
         self.pane
+    }
+
+    /// Tree vs list view.
+    #[must_use]
+    pub fn view(&self) -> View {
+        self.view
+    }
+
+    /// Active verb-tab index into [`VERB_TABS`].
+    #[must_use]
+    pub fn verb(&self) -> usize {
+        self.verb
     }
 
     /// Live preview, if open.
@@ -220,10 +306,22 @@ impl App {
         &self.verify
     }
 
+    /// Verify overlay open?
+    #[must_use]
+    pub fn verify_overlay(&self) -> bool {
+        self.verify_overlay
+    }
+
     /// Help overlay open?
     #[must_use]
     pub fn help(&self) -> bool {
         self.help
+    }
+
+    /// Help overlay scroll offset (j/k).
+    #[must_use]
+    pub fn help_scroll(&self) -> u16 {
+        self.help_scroll
     }
 
     /// Transient error banner (no secrets; `geode-grotto` redacts). Cleared
@@ -240,7 +338,8 @@ impl App {
     }
 
     /// The active palette (14-tui §11). All paint sites read tokens from
-    /// here; no `Color::Rgb(...)` is constructed outside `theme.rs`.
+    /// here; no `Color::Rgb(...)` is constructed outside `theme.rs` except
+    /// the splash brandmark sample.
     #[must_use]
     pub fn palette(&self) -> &Palette {
         &self.palette
@@ -265,7 +364,6 @@ impl App {
     /// Record the last key label (public chrome only — never key bytes).
     pub(crate) fn set_last_key(&mut self, label: String) {
         self.last_key = Some(label);
-        // Any key clears the transient error banner.
         self.error = None;
     }
 
@@ -274,18 +372,88 @@ impl App {
         self.quit = true;
     }
 
-    /// Toggle the help overlay.
+    /// Toggle the help overlay. Opening resets scroll.
     pub(crate) fn toggle_help(&mut self) {
         self.help = !self.help;
+        if self.help {
+            self.help_scroll = 0;
+        }
     }
 
-    /// Cycle pane focus: Tree -> Meta -> Preview -> Tree.
+    /// Scroll the help overlay (`j`/`k` while `?` is open).
+    pub(crate) fn scroll_help(&mut self, delta: i32) {
+        let next = i32::from(self.help_scroll).saturating_add(delta);
+        self.help_scroll = u16::try_from(next.clamp(0, 64)).unwrap_or(0);
+    }
+
+    /// Close the verify overlay.
+    pub(crate) fn close_verify_overlay(&mut self) {
+        self.verify_overlay = false;
+    }
+
+    /// Cycle pane focus: Tree -> Meta -> Preview (if open) -> Tree.
     pub(crate) fn cycle_pane(&mut self) {
         self.pane = match self.pane {
             Pane::Tree => Pane::Meta,
-            Pane::Meta => Pane::Preview,
-            Pane::Preview => Pane::Tree,
+            Pane::Meta if self.preview.is_some() => Pane::Preview,
+            Pane::Meta | Pane::Preview => Pane::Tree,
         };
+    }
+
+    /// Reverse pane cycle (`Shift+Tab`).
+    pub(crate) fn cycle_pane_rev(&mut self) {
+        self.pane = match self.pane {
+            Pane::Tree if self.preview.is_some() => Pane::Preview,
+            Pane::Meta => Pane::Tree,
+            Pane::Tree | Pane::Preview => Pane::Meta,
+        };
+    }
+
+    /// Cycle verb tabs and activate the landing verb.
+    pub(crate) fn cycle_verb(&mut self, delta: i32) {
+        let n = i32::try_from(VERB_TABS.len()).unwrap_or(1);
+        let cur = i32::try_from(self.verb).unwrap_or(0);
+        let next = (cur + delta).rem_euclid(n);
+        self.verb = usize::try_from(next).unwrap_or(0);
+        self.activate_verb();
+    }
+
+    fn activate_verb(&mut self) {
+        let name = VERB_TABS.get(self.verb).copied().unwrap_or("geode");
+        if name != "verify" {
+            self.verify_overlay = false;
+        }
+        if self.ctx.is_none() {
+            if !matches!(name, "geode") {
+                self.error = Some(format!(
+                    "unlock a vault first — Enter on a picker row ({name})"
+                ));
+            }
+            return;
+        }
+        match name {
+            "geode" => {
+                self.view = View::Tree;
+                self.verb = 0;
+                self.rebuild_rows();
+            }
+            "list" => {
+                self.view = View::List;
+                self.rebuild_rows();
+                self.pane = Pane::Tree;
+            }
+            "verify" => {
+                if matches!(self.verify, VerifyState::None) {
+                    self.verify(false);
+                } else {
+                    self.verify_overlay = true;
+                }
+            }
+            "cat" => self.toggle_preview(),
+            other => {
+                self.error = Some(format!("CLI-only in 0.2: `geode {other}`"));
+            }
+        }
     }
 
     /// Move the tree cursor; clears the preview buffer (14-tui §8.7).
@@ -293,7 +461,7 @@ impl App {
         if self.ctx.is_none() {
             return;
         }
-        let n = self.entry_count();
+        let n = self.tree_rows.len();
         if n == 0 {
             return;
         }
@@ -301,14 +469,93 @@ impl App {
         let fi = i64::try_from(self.focus).unwrap_or(i64::MAX);
         let next = (fi + i64::from(delta)).rem_euclid(ni);
         self.focus = usize::try_from(next).unwrap_or(0);
-        // Row change clears and zeroizes the preview buffer.
         self.preview = None;
     }
 
-    /// Stat the focused row into the meta pane (Enter; 14-tui §7.2.2).
-    pub(crate) fn inspect(&mut self) {
-        if self.ctx.is_some() {
+    /// Move the picker cursor.
+    pub(crate) fn move_picker(&mut self, delta: i32) {
+        let n = self.picker_items.len();
+        if n == 0 {
+            return;
+        }
+        let ni = i64::try_from(n).unwrap_or(i64::MAX);
+        let fi = i64::try_from(self.picker_focus).unwrap_or(i64::MAX);
+        let next = (fi + i64::from(delta)).rem_euclid(ni);
+        self.picker_focus = usize::try_from(next).unwrap_or(0);
+    }
+
+    /// Collapse the focused dir, or collapse its parent (`h`).
+    pub(crate) fn collapse(&mut self) {
+        let Some(row) = self.tree_rows.get(self.focus).cloned() else {
+            return;
+        };
+        if row.is_dir && self.expanded.contains(&row.path) {
+            self.expanded.remove(&row.path);
+            self.rebuild_rows();
+            return;
+        }
+        if let Some((parent, _)) = row.path.rsplit_once('/') {
+            self.expanded.remove(parent);
+            self.rebuild_rows();
+            if let Some(i) = self.tree_rows.iter().position(|r| r.path == parent) {
+                self.focus = i;
+            }
+        }
+    }
+
+    /// Expand the focused dir, or inspect a file (`l`).
+    pub(crate) fn expand_or_inspect(&mut self) {
+        let Some(row) = self.tree_rows.get(self.focus).cloned() else {
+            return;
+        };
+        if row.is_dir {
+            self.expanded.insert(row.path);
+            self.rebuild_rows();
+        } else {
             self.pane = Pane::Meta;
+        }
+    }
+
+    /// Stat the focused row into the meta pane (Enter; 14-tui §7.2.2).
+    /// Directories toggle expand/collapse instead.
+    pub(crate) fn inspect(&mut self) {
+        if self.ctx.is_none() {
+            return;
+        }
+        if let Some(row) = self.tree_rows.get(self.focus) {
+            if row.is_dir {
+                let path = row.path.clone();
+                if !self.expanded.remove(&path) {
+                    self.expanded.insert(path);
+                }
+                self.rebuild_rows();
+                return;
+            }
+        }
+        self.pane = Pane::Meta;
+    }
+
+    /// Open the focused picker vault in-process.
+    pub(crate) fn open_picker_selection(&mut self) {
+        let Some(item) = self.picker_items.get(self.picker_focus).cloned() else {
+            self.error = Some("no vault on the picker — `geode vault init notes.geode`".into());
+            return;
+        };
+        match vault::open(&item.path, self.key.as_deref()) {
+            Ok(ctx) => {
+                self.vault = Some(item.path);
+                self.ctx = Some(ctx);
+                self.focus = 0;
+                self.pane = Pane::Tree;
+                self.view = View::Tree;
+                self.verb = 0;
+                self.preview = None;
+                self.verify = VerifyState::None;
+                self.verify_overlay = false;
+                self.expand_all_dirs();
+                self.rebuild_rows();
+            }
+            Err(e) => self.error = Some(format!("open: {e}")),
         }
     }
 
@@ -322,12 +569,17 @@ impl App {
         };
         let now = Instant::now();
         match result {
-            Ok(report) => self.verify = VerifyState::Ok { report, at: now },
+            Ok(report) => {
+                self.verify = VerifyState::Ok { report, at: now };
+                self.verify_overlay = true;
+                if let Some(i) = VERB_TABS.iter().position(|v| *v == "verify") {
+                    self.verb = i;
+                }
+            }
             Err(_e) => {
-                // Fail-closed (14-tui §13.2): no "show anyway". The error
-                // text stays out of chrome to avoid any leak surface; the
-                // footer carries only the public ✗ glyph + age.
+                // Fail-closed (14-tui §13.2): no "show anyway".
                 self.verify = VerifyState::Fail { at: now };
+                self.verify_overlay = true;
                 self.error = Some("verify failed — authentication/integrity (exit 2)".into());
             }
         }
@@ -339,16 +591,26 @@ impl App {
     pub(crate) fn toggle_preview(&mut self) {
         if self.preview.is_some() {
             self.preview = None;
+            if self.pane == Pane::Preview {
+                self.pane = Pane::Tree;
+            }
             return;
         }
         let result = match (&self.ctx, self.focused_entry()) {
             (Some(ctx), Some(entry)) => vault::preview(ctx, &entry.path, vault::PREVIEW_MAX_BYTES),
+            (Some(_), None) => {
+                self.error = Some("preview: focus a file (not a directory)".into());
+                return;
+            }
             _ => return,
         };
         match result {
             Ok(p) => {
                 self.preview = Some(p);
                 self.pane = Pane::Preview;
+                if let Some(i) = VERB_TABS.iter().position(|v| *v == "cat") {
+                    self.verb = i;
+                }
             }
             Err(e) => self.error = Some(format!("preview: {e}")),
         }
@@ -356,14 +618,20 @@ impl App {
 
     /// Lock now: drop the whole [`VaultCtx`] (EK zeroized on drop via the
     /// session) and clear the preview buffer. Returns to the picker
-    /// (14-tui §3.3), not a locked-but-painted tree.
+    /// (14-tui §3.3), not a locked-but-painted tree. Enter re-opens.
     pub(crate) fn lock(&mut self) {
         self.ctx = None;
         self.preview = None;
         self.focus = 0;
         self.pane = Pane::Tree;
+        self.view = View::Tree;
+        self.verb = 0;
         self.verify = VerifyState::None;
-        self.error = Some("locked — quit and re-run `geode tui <vault>` to unlock".into());
+        self.verify_overlay = false;
+        self.tree_rows.clear();
+        self.expanded.clear();
+        self.select_picker_for_vault();
+        self.error = Some("locked — Enter to unlock the selected vault".into());
     }
 
     /// Poll idle lock on the session. If the session idle-locks, drop the
@@ -375,11 +643,7 @@ impl App {
             None => false,
         };
         if locked {
-            self.ctx = None;
-            self.preview = None;
-            self.focus = 0;
-            self.pane = Pane::Tree;
-            self.verify = VerifyState::None;
+            self.lock();
             self.error = Some("idle lock — session locked".into());
         }
         locked
@@ -390,6 +654,45 @@ impl App {
         if let Some(ctx) = &mut self.ctx {
             ctx.session_mut().touch();
         }
+    }
+
+    fn expand_all_dirs(&mut self) {
+        self.expanded = self
+            .ctx
+            .as_ref()
+            .map(|c| tree::all_dir_paths(c.entries()))
+            .unwrap_or_default();
+    }
+
+    fn rebuild_rows(&mut self) {
+        self.tree_rows = match &self.ctx {
+            Some(ctx) => tree::visible_rows(ctx.entries(), &self.expanded, self.view == View::List),
+            None => Vec::new(),
+        };
+        if self.tree_rows.is_empty() {
+            self.focus = 0;
+        } else if self.focus >= self.tree_rows.len() {
+            self.focus = self.tree_rows.len() - 1;
+        }
+    }
+
+    fn select_picker_for_vault(&mut self) {
+        if self.picker_items.is_empty() {
+            self.picker_focus = 0;
+            return;
+        }
+        if let Some(v) = &self.vault {
+            let want = v.canonicalize().unwrap_or_else(|_| v.clone());
+            if let Some(i) = self
+                .picker_items
+                .iter()
+                .position(|p| p.path == want || p.path == *v)
+            {
+                self.picker_focus = i;
+                return;
+            }
+        }
+        self.picker_focus = self.picker_focus.min(self.picker_items.len() - 1);
     }
 
     // --- splash (polish B1) ------------------------------------------
@@ -410,6 +713,31 @@ impl App {
     }
 }
 
+fn discover_picker_items(explicit: Option<&Path>) -> Vec<PickerItem> {
+    let mut out: Vec<PickerItem> = Vec::new();
+    let mut push = |p: PathBuf| {
+        if !p.join("GEODE").is_file() {
+            return;
+        }
+        let canon = p.canonicalize().unwrap_or_else(|_| p.clone());
+        if out.iter().any(|i| i.path == canon) {
+            return;
+        }
+        let label = p.file_name().map_or_else(
+            || p.display().to_string(),
+            |s| s.to_string_lossy().into_owned(),
+        );
+        out.push(PickerItem { path: canon, label });
+    };
+    if let Some(p) = explicit {
+        push(p.to_path_buf());
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        push(PathBuf::from(home).join("notes.geode"));
+    }
+    out
+}
+
 /// Install a panic hook that restores the terminal before the default
 /// hook runs (14-tui §3.4). Best-effort: the restore call itself never
 /// panics (`ratatui::try_restore` returns Result).
@@ -424,11 +752,7 @@ fn install_panic_hook() {
 /// Run the TUI. Unlocks in-process before entering the alternate screen;
 /// auth failure surfaces as `Error::AuthFail` (exit 2) with no tree
 /// painted. Restores the terminal on every return path.
-pub fn run(
-    vault: Option<PathBuf>,
-    key: Option<PathBuf>,
-    options: crate::RunOptions,
-) -> Result<()> {
+pub fn run(vault: Option<PathBuf>, key: Option<PathBuf>, options: crate::RunOptions) -> Result<()> {
     install_panic_hook();
 
     // Unlock BEFORE the alternate screen so the no-echo passphrase prompt
@@ -440,24 +764,16 @@ pub fn run(
 
     let mut term = ratatui::try_init().map_err(geode_grotto::Error::Io)?;
     let result = event_loop(&mut term, App::with_options(vault, key, ctx, options));
-    // Best-effort restore; ignore errors so the real result is preserved.
     let _ = ratatui::try_restore();
     result
 }
 
 fn event_loop(term: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> {
     loop {
-        // Splash phase (polish B1): paint the splash until the operator
-        // hits any key or the short timeout fires. It never gates unlock
-        // (unlock already happened before the alt screen) and paints no
-        // secret. Any key dismisses; we still drain the event so the next
-        // loop iteration starts clean.
         if app.splash_active() {
             term.draw(|f| crate::splash::render(f, f.area(), app.palette()))
                 .map_err(geode_grotto::Error::Io)?;
-            if crossterm::event::poll(Duration::from_millis(60))
-                .map_err(geode_grotto::Error::Io)?
-            {
+            if crossterm::event::poll(Duration::from_millis(60)).map_err(geode_grotto::Error::Io)? {
                 let _ = crossterm::event::read().map_err(geode_grotto::Error::Io);
                 app.dismiss_splash();
             } else {
@@ -469,11 +785,7 @@ fn event_loop(term: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> {
         term.draw(|f| crate::draw::draw(f, &app))
             .map_err(geode_grotto::Error::Io)?;
 
-        // Block up to 60 ms for the next event; resize/focus fall through
-        // and just trigger a redraw.
-        if !crossterm::event::poll(Duration::from_millis(60))
-            .map_err(geode_grotto::Error::Io)?
-        {
+        if !crossterm::event::poll(Duration::from_millis(60)).map_err(geode_grotto::Error::Io)? {
             app.poll_idle_lock();
             continue;
         }
