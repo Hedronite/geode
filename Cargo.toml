@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/geode-core", "crates/geode-cli", "crates/geode-tui"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -16,5 +16,5 @@ unsafe_code = "forbid"
 all = "warn"
 pedantic = "warn"
 
-# v0.1.0 ships conformance profile `core` only.
-# No default `tui` / `fuse` / `pq` features anywhere in this workspace.
+# v0.2.0 adds the `tui` profile: geode-cli defaults feature `tui` on (14-tui §2).
+# `geode-grotto` still builds with no ratatui/crossterm. No `fuse` / `pq` features.
