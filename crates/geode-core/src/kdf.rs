@@ -58,9 +58,13 @@ impl IdentitySecret {
         Self(Secret32::new_unchecked(bytes))
     }
 
-    /// Borrow the raw ISK bytes. Crate-private: no leak across the API.
+    /// Borrow the raw ISK bytes.
+    ///
+    /// Secret material: callers MUST NOT log, print, or serialize these
+    /// bytes. Exposed publicly so tooling (vector generation, recipient
+    /// unwrap adapters) can verify round-trips. `Debug` still redacts.
     #[must_use]
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         self.0.as_bytes()
     }
 }
@@ -82,9 +86,14 @@ impl EpochKey {
         Self(Secret32::new_unchecked(bytes))
     }
 
-    /// Borrow the raw EK bytes. Crate-private: consumed by AEAD / wrap / nonce.
+    /// Borrow the raw EK bytes.
+    ///
+    /// Secret material: callers MUST NOT log, print, or serialize these
+    /// bytes. Exposed publicly so tooling (vector generation, recipient
+    /// unwrap adapters) can feed the AEAD/wrap primitives without re-deriving.
+    /// The `Debug` impl still redacts the value.
     #[must_use]
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         self.0.as_bytes()
     }
 }

@@ -1,0 +1,12 @@
+{
+  "context_label": "geode-test-vectors-v1",
+  "ek": "09ffa8435a254ec4a881387ea799d725dacff2a87705856aebcdd62d557e0fda",
+  "epoch": 1,
+  "isk": "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f",
+  "key_id": "e3e3d66e50a3079e75e62e4957bcc1b2",
+  "manifest_key": "c5a40867c53655f8d244bed21ca5859886262e7486ee13029cb240e2f613ff80",
+  "meta_key": "30cebcbce22d415b357708c12b2644bb93827d97e2242f20ea844f048055ce8d",
+  "name_key": "09adb2ea0617faed717c63b9a9ec8ef0084972224a196c5fc6a90d11fcff2754",
+  "suite": 1,
+  "vault_id": "101112131415161718191a1b1c1d1e1f"
+}

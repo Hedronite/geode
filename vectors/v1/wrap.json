@@ -1,0 +1,13 @@
+{
+  "argon2_m_kib": 16384,
+  "argon2_p": 4,
+  "argon2_t": 3,
+  "isk": "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f",
+  "magic": "GKEY",
+  "passphrase": "correct horse battery staple",
+  "salt": "303132333435363738393a3b3c3d3e3f",
+  "suite": 1,
+  "wrap_nonce": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+  "wrap_tag": "bc66f83364ec73084da0514c471584e6",
+  "wrapped_isk": "e14cae494333b16ac3231973e41828ba1e5d7144a7de045e03084d769e63f06a"
+}
