@@ -75,6 +75,13 @@ impl std::fmt::Debug for IdentitySecret {
 pub struct EpochKey(Secret32);
 
 impl EpochKey {
+    /// Wrap raw 32 bytes as the EK (recipient unwrap path). The bytes
+    /// are copied into a zeroizing buffer.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(Secret32::new_unchecked(bytes))
+    }
+
     /// Borrow the raw EK bytes. Crate-private: consumed by AEAD / wrap / nonce.
     #[must_use]
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {

@@ -4,18 +4,18 @@
 //! the `core` profile of the GDE1 spec 2: format, crypto, vault init,
 //! seal/open/verify/list, key files.
 //!
-//! # G1 status
+//! # G2 status
 //!
-//! Suite `0x01` (AEGIS-256-X2 + BLAKE3 + Argon2id + HCTR2-256) is real for
-//! KDF, AEAD seal/open, and passphrase wrap. HCTR2 name-seal stays stubbed
-//! until G2 (the suite identifier and unknown-suite abort are real now).
-//! Vault directory / object I/O is G2.
+//! Suite 0x01 crypto (G1) plus GDE1 object seal/open with content root, vault
+//! directory layout with atomic writes, JCS canonicalization + manifest MAC,
+//! and symmetric recipient wrap. Path-bind is enforced: a bound object moved
+//! to a different path fails open. HCTR2 name-seal and token issue stay
+//! stubbed (G3/agent plane).
 //!
-//! Reference: SPEC-v010 G1, CHECKLIST-v010 G1a-G1c, 02-cryptography.
+//! Reference: SPEC-v010 G2, CHECKLIST-v010 G2a-G2c, 02-cryptography, 03-format.
 
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
-// G1: silence pedantic doc-lints on thin crypto wrappers. Tighten in G2.
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
@@ -25,21 +25,18 @@ pub mod chunk;
 pub mod kdf;
 pub mod manifest;
 pub mod name;
+pub mod object;
 pub mod policy;
 pub mod recipients;
 pub mod token;
+pub mod vault;
 pub mod wrap;
 pub mod zero;
 
 /// Crate-wide error.
-///
-/// Exit-code mapping (05-cli 3) is owned by the CLI adapter; the library only
-/// classifies. `AuthFail` is the integrity / authentication failure family
-/// (CLI exit 2).
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// Still-stubbed paths (HCTR2 name seal, manifest MAC, recipient wrap,
-    /// token issue) until G2. Removed once each lands.
+    /// Still-stubbed paths (HCTR2 name seal, token issue) until G3/agent.
     #[error("geode-core: not implemented yet (stub)")]
     NotImplemented,
 
@@ -75,9 +72,6 @@ pub const MAGIC_GTOK: &[u8; 4] = b"GTOK";
 pub const MAGIC_GMFT: &[u8; 4] = b"GMFT";
 
 /// Abort on unknown suite (02-cryptography 1.1; SPEC 4.2).
-///
-/// v0.1 only knows suite `0x01`. Any other value is a hard failure, never a
-/// silent fallback.
 pub fn assert_suite(suite: u8) -> Result<()> {
     if suite == SUITE_0X01 {
         Ok(())
