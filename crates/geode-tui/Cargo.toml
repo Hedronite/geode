@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
 
 [lib]
 name = "geode_tui"
@@ -22,7 +22,7 @@ default = ["tui"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:rpassword", "dep:zeroize", "dep:serde_json", "dep:blake3"]
 
 [dependencies]
-geode-grotto = { path = "../geode-core" }
+geode-grotto = { version = "0.2.0", path = "../geode-core" }
 
 [dependencies.ratatui]
 version = "0.30"
