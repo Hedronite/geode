@@ -18,6 +18,9 @@ use geode_grotto::kdf::{
     derive_epoch_key, derive_key_id, derive_manifest_key, derive_meta_key, derive_name_key, Epoch,
     EpochKey, IdentitySecret, ObjectId, VaultId,
 };
+use geode_grotto::name::{
+    bucket_for_len, open_name, open_name_ciphertext, seal_name, seal_name_ciphertext,
+};
 use geode_grotto::wrap::{
     unwrap_identity_passphrase, wrap_identity_passphrase_with, Argon2Params, WrapSalt,
 };
@@ -161,6 +164,48 @@ fn wrap_vector(
     })
 }
 
+fn name_vector(
+    name_key: &[u8; 32],
+    vault_id: VaultId,
+    epoch: Epoch,
+    parent_id: [u8; 16],
+    component: &str,
+) -> serde_json::Value {
+    let bucket = bucket_for_len(component.len()).expect("bucket");
+    let ct = seal_name_ciphertext(name_key, &vault_id, epoch, &parent_id, component).expect("seal");
+    let encoded =
+        seal_name(name_key, &vault_id, epoch, &parent_id, component).expect("seal encoded");
+    // Round-trip.
+    let opened = open_name(name_key, &vault_id, epoch, &parent_id, &encoded).expect("open");
+    assert_eq!(opened, component, "name round-trip broke");
+    // Bit-flip in the ciphertext MUST be AuthFail (fail-closed).
+    let mut flipped = ct.clone();
+    flipped[0] ^= 0xff;
+    let r = open_name_ciphertext(name_key, &vault_id, epoch, &parent_id, &flipped);
+    assert!(
+        matches!(r, Err(geode_grotto::Error::AuthFail)),
+        "bit-flip must be AuthFail, got {r:?}"
+    );
+    // Tweak = vault_id || le32(epoch) || parent_id (all public inputs).
+    let mut tweak = Vec::with_capacity(36);
+    tweak.extend_from_slice(&vault_id.0);
+    tweak.extend_from_slice(&epoch.0.to_le_bytes());
+    tweak.extend_from_slice(&parent_id);
+
+    serde_json::json!({
+        "suite": SUITE_0X01,
+        "name_key": hex(name_key),
+        "vault_id": hex(&vault_id.0),
+        "epoch": epoch.0,
+        "parent_id": hex(&parent_id),
+        "component": component,
+        "bucket": bucket,
+        "tweak": hex(&tweak),
+        "ciphertext": hex(&ct),
+        "encoded": encoded,
+    })
+}
+
 fn main() {
     let dir: PathBuf = std::env::args()
         .nth(1)
@@ -242,10 +287,28 @@ fn main() {
     );
     write_atomic(&dir.join("wrap.json"), json_pretty(&wrap).as_bytes()).expect("write wrap.json");
 
+    // name.json: HCTR2-256 length-preserving filename seal from THIS impl.
+    // NameKey is derived from the same EK used above (kdf.json / chunk.json).
+    let name_key = derive_name_key(&ek, vid, ep);
+    let root_parent = [0u8; 16];
+    let mut parent2 = [0u8; 16];
+    parent2[0] = 0xa0;
+    let n0 = name_vector(&name_key, vid, ep, root_parent, "hello");
+    let n1 = name_vector(&name_key, vid, ep, parent2, "secret-doc");
+    let n2 = name_vector(&name_key, vid, ep, root_parent, "0123456789abcdef");
+    let name_doc = serde_json::json!({
+        "suite": SUITE_0X01,
+        "encoding": "base32hex-lower-nopad",
+        "names": [n0, n1, n2],
+    });
+    write_atomic(&dir.join("name.json"), json_pretty(&name_doc).as_bytes())
+        .expect("write name.json");
+
     println!(
-        "wrote {kdf} {chunk} {wrap}",
+        "wrote {kdf} {chunk} {wrap} {name}",
         kdf = dir.join("kdf.json").display(),
         chunk = dir.join("chunk.json").display(),
         wrap = dir.join("wrap.json").display(),
+        name = dir.join("name.json").display(),
     );
 }
