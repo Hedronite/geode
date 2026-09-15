@@ -1,12 +1,12 @@
 [package]
 name = "geode-cli"
-description = "geode — Hedronite custody plane CLI (adapter over geode-core)"
+description = "geode — Hedronite custody plane CLI (adapter over geode-grotto)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+publish = true
 
 [[bin]]
 name = "geode"
