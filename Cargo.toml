@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/geode-core", "crates/geode-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/VirtualMachinist/geode"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+
+# v0.1.0 ships conformance profile `core` only.
+# No default `tui` / `fuse` / `pq` features anywhere in this workspace.
