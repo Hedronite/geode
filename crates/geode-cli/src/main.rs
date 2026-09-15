@@ -192,6 +192,9 @@ pub enum AgentCmd {
         /// Unix socket path (default transport when `--stdio` is absent).
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
+        /// Sealed agent token (hex armor or GTOK); else `$GEODE_TOKEN`.
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
     },
     /// Token lifecycle: issue a scoped token, or inspect one.
     Token {
@@ -206,6 +209,9 @@ pub enum AgentCmd {
         /// Object path inside the vault.
         #[arg(value_name = "PATH")]
         path: String,
+        /// Sealed agent token (hex armor or GTOK); else `$GEODE_TOKEN`.
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
     },
     /// Write stdin as a new object at PATH under an allow prefix (06 §4).
     Write {
@@ -215,6 +221,9 @@ pub enum AgentCmd {
         /// Object path inside the vault.
         #[arg(value_name = "PATH")]
         path: String,
+        /// Sealed agent token (hex armor or GTOK); else `$GEODE_TOKEN`.
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
     },
     /// List entries under a prefix.
     List {
@@ -224,6 +233,9 @@ pub enum AgentCmd {
         /// Prefix to list under (optional).
         #[arg(value_name = "PREFIX")]
         prefix: Option<String>,
+        /// Sealed agent token (hex armor or GTOK); else `$GEODE_TOKEN`.
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
     },
 }
 
