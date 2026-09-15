@@ -39,6 +39,17 @@
 //! matching `unlock_at` / `lock_if_idle`, so the whole session API is drivable
 //! by a synthetic clock. No `ratatui` / `crossterm` in `geode-grotto`.
 
+//!
+//! # v0.2.1 / G1a
+//!
+//! `snapshot` module (04-vault 7): create/list/restore of authenticated
+//! manifest snapshots at `epochs/N/snapshots/<name>.json`, plus `gc` of
+//! `.gobj` files unreferenced by the current manifest and all named
+//! snapshots. Snapshots are MAC'd under the `ManifestKey` with AD
+//! `geode/v1/snapshot`; the embedded manifest retains its own
+//! `manifest_mac`, so a restored snapshot re-verifies under `load_vault`.
+//! Live objects are untouched by `gc` and still open after a run.
+
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
 #![allow(clippy::module_name_repetitions)]
@@ -57,6 +68,7 @@ pub mod object;
 pub mod policy;
 pub mod recipients;
 pub mod session;
+pub mod snapshot;
 pub mod token;
 pub mod vault;
 pub mod wrap;

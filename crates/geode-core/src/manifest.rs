@@ -166,12 +166,25 @@ fn mac_nonce(manifest_key: &[u8; 32]) -> Nonce {
 
 /// Compute the manifest MAC over canonical body (02-cryptography 8).
 pub fn manifest_mac(manifest_key: &[u8; 32], body: &[u8]) -> Result<[u8; 16]> {
+    Ok(mac_with(manifest_key, b"geode/v1/manifest", body))
+}
+
+/// Snapshot MAC over a canonical snapshot envelope body (04-vault 7).
+/// Distinct AD from `manifest_mac` so a snapshot tag cannot be replayed as a
+/// manifest tag and vice versa.
+#[allow(clippy::unnecessary_wraps)] // mirrors `manifest_mac`'s Result API for the `mac_fn` pointer contract
+pub fn snapshot_mac(manifest_key: &[u8; 32], body: &[u8]) -> Result<[u8; 16]> {
+    Ok(mac_with(manifest_key, b"geode/v1/snapshot", body))
+}
+
+/// AEGIS-256-X2 MAC of `body` under `manifest_key` with associated data `ad`.
+fn mac_with(manifest_key: &[u8; 32], ad: &[u8], body: &[u8]) -> [u8; 16] {
     let nonce = mac_nonce(manifest_key);
     let ctx = Aegis256X2::<16>::new(manifest_key, &nonce);
-    let (_ct, tag) = ctx.encrypt(body, b"geode/v1/manifest");
+    let (_ct, tag) = ctx.encrypt(body, ad);
     let mut t = [0u8; 16];
     t.copy_from_slice(&tag);
-    Ok(t)
+    t
 }
 
 #[cfg(test)]

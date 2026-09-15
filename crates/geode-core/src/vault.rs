@@ -13,13 +13,47 @@ pub const GEODE_SENTINEL: &str = "GDE1 vault\nhttps://hedronite.com\nThis direct
 
 const HEX_CHARS: &[u8] = b"0123456789abcdef";
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
         s.push(HEX_CHARS[(b >> 4) as usize] as char);
         s.push(HEX_CHARS[(b & 0xf) as usize] as char);
     }
     s
+}
+
+/// Decode a lowercase-hex string into bytes (len must be even, >=0).
+pub(crate) fn hex_decode(s: &str) -> Result<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return Err(Error::Format(format!("odd-length hex: {s}")));
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let hi = hex_nibble(b[i])?;
+        let lo = hex_nibble(b[i + 1])?;
+        out.push((hi << 4) | lo);
+        i += 2;
+    }
+    Ok(out)
+}
+
+fn hex_nibble(c: u8) -> Result<u8> {
+    Ok(match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => return Err(Error::Format(format!("bad hex char {c:?}"))),
+    })
+}
+
+/// Path of the manifest for an epoch (03-format 2).
+#[must_use]
+pub fn manifest_path(root: &Path, epoch: Epoch) -> PathBuf {
+    root.join("epochs")
+        .join(format!("{:08}", epoch.0))
+        .join("manifest.json")
 }
 
 /// Object files are sharded by the first 2 hex chars of `object_id`
