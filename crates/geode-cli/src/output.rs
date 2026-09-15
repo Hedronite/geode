@@ -23,6 +23,15 @@
 //! names) and states that no key material is printed. The no-key-bytes
 //! guarantee below is unchanged — `human_error`/`exit_family` print only
 //! public context carried by `Error`, never ISK/FEK/passphrase/wrap bytes.
+//!
+//! v0.2.1 G2c (agent help): `geode agent --help` and its sub-verb help
+//! strings live in `main.rs` clap definitions; this module reaffirms the
+//! chrome guarantee that agent help text prints only public identifiers
+//! (`vault_id`, `key_id`, `principal`, `epoch`, paths, prefixes, ops,
+//! ttl, counts, sizes) — never `GTOK…` token values, ISK/FEK, passphrases,
+//! or wrap blobs. The TUI unlock invariant (14-tui §1.4, §10) is enforced
+//! in `main.rs`: `--token`/`GEODE_TOKEN` is scoped to the agent verbs and
+//! is NOT a global clap flag, so `geode tui` has no `--token` unlock path.
 
 use std::io::Write;
 

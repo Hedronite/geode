@@ -10,6 +10,14 @@
 //! `Error::NotImplemented` (exit 1 usage) until fullstack G1b wires the
 //! real `cmd::keyring` module.
 //!
+//! v0.2.1 G2c: `agent` subcommand is registered (clap help chrome,
+//! frontend-owned) so `geode agent --help` documents the agent plane verbs
+//! (06-agent-plane: serve, token issue/inspect, read/write/list). The
+//! dispatch stubs to `Error::NotImplemented` (exit 1 usage) until fullstack
+//! wires `cmd::agent`. `--token`/`GEODE_TOKEN` is scoped to the agent verbs,
+//! NOT a global clap flag, so `geode tui` cannot gain a `--token` unlock
+//! path (14-tui §1.4: the TUI is a human surface).
+//!
 //! Exit-code discipline (05-cli 3): clap's default error exit is 2, which
 //! collides with the auth/integrity family. We intercept clap errors and
 //! force usage/IO/config errors to exit **1** so scripts can distinguish
@@ -87,8 +95,20 @@ enum Commands {
     Gc(cmd::snapshot::GcArgs),
     /// Manage the keyring (named identity keys, 05-cli 2.1).
     Keyring(KeyringArgs),
+    /// Agent plane (06-agent-plane): serve MCP over stdio/socket, issue and
+    /// inspect scoped tokens, and run the read/write/list tool verbs under a
+    /// token. Chrome-only in v0.2.1 G2c — `--help` documents the verbs; the
+    /// dispatch stubs to `Error::NotImplemented` (exit 1 usage) until
+    /// fullstack wires `cmd::agent`.
+    Agent(AgentArgs),
     /// Ratatui operator surface (14-tui). With the `tui` feature off
     /// (core-profile build) this prints "not available" and exits 1.
+    ///
+    /// Invariant (14-tui §1.4, §10): the TUI is a **human** surface. It
+    /// unlocks in-process via `--key` + passphrase, never via `--token`.
+    /// `--token` is deliberately NOT a global clap arg here (it would leak
+    /// into the TUI subcommand); it lives on the agent verbs only. The TUI
+    /// MUST NOT gain a `--token` unlock path or any agent-verb surface.
     Tui {
         /// Vault to open; omit for the vault picker.
         #[arg(value_name = "VAULT")]
@@ -115,6 +135,7 @@ impl Commands {
             Self::Snapshot(_) => "snapshot",
             Self::Gc(_) => "gc",
             Self::Keyring(_) => "keyring",
+            Self::Agent(_) => "agent",
             Self::Tui { .. } => "tui",
         }
     }
@@ -143,6 +164,97 @@ pub enum KeyringCmd {
         #[arg(long, value_name = "NAME")]
         label: String,
     },
+}
+
+/// `geode agent` — agent plane verbs (05-cli 2.6, 06-agent-plane). Frontend
+/// registers the subcommand shape so `geode agent --help` documents the
+/// verbs; fullstack wires the real `cmd::agent` module. Until then the
+/// dispatch stubs to `Error::NotImplemented` (exit 1 usage). No key bytes
+/// are printed by this chrome — see `output.rs` (public ids only).
+///
+/// `--token`/`GEODE_TOKEN` is the agent identity path (05-cli 1). It is
+/// scoped to the agent verbs below, NOT a global clap flag, so it cannot
+/// reach `geode tui` (14-tui §1.4: the TUI is a human surface).
+#[derive(Args, Debug)]
+pub struct AgentArgs {
+    #[command(subcommand)]
+    pub cmd: AgentCmd,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentCmd {
+    /// Serve the MCP tool server (06 §3). Default transport is a Unix socket;
+    /// `--stdio` speaks MCP over stdin/stdout for Facet/agent hosts.
+    Serve {
+        /// Speak MCP over stdin/stdout (no socket).
+        #[arg(long)]
+        stdio: bool,
+        /// Unix socket path (default transport when `--stdio` is absent).
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+    },
+    /// Token lifecycle: issue a scoped token, or inspect one.
+    Token {
+        #[command(subcommand)]
+        cmd: TokenCmd,
+    },
+    /// Read one object (06 §4). Agents SHOULD prefer this over `geode cat`.
+    Read {
+        /// Vault directory.
+        #[arg(value_name = "VAULT")]
+        vault: PathBuf,
+        /// Object path inside the vault.
+        #[arg(value_name = "PATH")]
+        path: String,
+    },
+    /// Write stdin as a new object at PATH under an allow prefix (06 §4).
+    Write {
+        /// Vault directory.
+        #[arg(value_name = "VAULT")]
+        vault: PathBuf,
+        /// Object path inside the vault.
+        #[arg(value_name = "PATH")]
+        path: String,
+    },
+    /// List entries under a prefix.
+    List {
+        /// Vault directory.
+        #[arg(value_name = "VAULT")]
+        vault: PathBuf,
+        /// Prefix to list under (optional).
+        #[arg(value_name = "PREFIX")]
+        prefix: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TokenCmd {
+    /// Issue a sealed token (`GTOK…`) for a principal (06 §2). Stdout is the
+    /// token or a path; Facet MUST store it `secret: true`.
+    Issue {
+        /// Vault the token is scoped to.
+        #[arg(long, value_name = "DIR")]
+        vault: PathBuf,
+        /// Principal id (`agent:…`, `h3s:…`, `ci:…`).
+        #[arg(long, value_name = "ID")]
+        principal: String,
+        /// Token lifetime (e.g. `15m`).
+        #[arg(long, value_name = "DURATION")]
+        ttl: String,
+        /// Allowed operation set (comma list: `list,read,write,…`).
+        #[arg(long, value_name = "OPS")]
+        ops: String,
+        /// Path prefix the token allows (repeatable).
+        #[arg(long, value_name = "PREFIX")]
+        allow_prefix: Vec<String>,
+        /// Per-token byte cap for reads/writes (default applies when omitted).
+        #[arg(long, value_name = "BYTES")]
+        max_bytes: Option<u64>,
+    },
+    /// Inspect a sealed token: principal, ops, prefixes, ttl, expiry.
+    /// Read-only — the TUI mirrors this view (14-tui §6.10); issuance is
+    /// CLI-only.
+    Inspect,
 }
 
 fn main() {
@@ -187,6 +299,10 @@ fn main() {
         Commands::Snapshot(a) => cmd::snapshot::run(a, &cli.global, out),
         Commands::Gc(a) => cmd::snapshot::gc(a, &cli.global, out),
         Commands::Keyring(a) => cmd::keyring::run(a, out),
+        // G2c (v0.2.1): agent plane chrome. `--help` documents the verbs
+        // (06-agent-plane); behavior is fullstack's later gate. Stub to
+        // `Error::NotImplemented`, which `cmd::fail` maps to exit 1 (usage).
+        Commands::Agent(_) => Err(geode_grotto::Error::NotImplemented),
         // Feature on: the TUI starts (14-tui 2), wired with the vault path
         // and the global `--key` / `GEODE_KEY_FILE` identity path (G5). The
         // TUI unlocks in-process via `geode-grotto` (14-tui 3); the CLI stays
