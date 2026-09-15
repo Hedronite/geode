@@ -1,1 +1,6 @@
 target/
+
+# Geode secrets and smoke vaults — never commit keys or ciphertext trees
+*.gkey
+secret.gkey
+/notes.geode/

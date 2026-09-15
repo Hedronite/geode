@@ -29,6 +29,10 @@ crates/
   geode-cli/    # geode binary (clap adapter over geode-core)
 ```
 
+## Keys
+
+`geode keygen` writes `./secret.gkey` by default (with a warning). Move it to the default identity path — `~/.config/hedronite/geode/default.gkey` (honors `$XDG_CONFIG_HOME`) — and every verb finds it without `--key` when the file exists. Key files are gitignored (`*.gkey`); never commit one.
+
 ## Build
 
 ```

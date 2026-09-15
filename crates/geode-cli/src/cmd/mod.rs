@@ -120,12 +120,36 @@ fn refuse_world_readable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `--key` is required for every verb except `keygen`.
+/// Default identity path: `$XDG_CONFIG_HOME/hedronite/geode/default.gkey`,
+/// falling back to `~/.config/hedronite/geode/default.gkey` (05-cli 2.1).
+#[must_use]
+pub fn default_key_path() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return Some(PathBuf::from(xdg).join("hedronite/geode/default.gkey"));
+        }
+    }
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(|h| PathBuf::from(h).join(".config/hedronite/geode/default.gkey"))
+}
+
+/// `--key` is required for every verb except `keygen`. Resolution order:
+/// `--key PATH`, then `GEODE_KEY_FILE` (clap `env`), then the XDG default
+/// **when the file exists** (G0a hygiene, v0.2.0). Otherwise a usage error.
 pub fn require_key(global: &crate::GlobalArgs) -> Result<PathBuf> {
-    global
-        .key
-        .clone()
-        .ok_or_else(|| Error::Format("missing --key PATH (or GEODE_KEY_FILE)".into()))
+    if let Some(p) = &global.key {
+        return Ok(p.clone());
+    }
+    if let Some(default) = default_key_path() {
+        if default.is_file() {
+            return Ok(default);
+        }
+    }
+    Err(Error::Format(
+        "missing --key PATH (or GEODE_KEY_FILE, or ~/.config/hedronite/geode/default.gkey)"
+            .into(),
+    ))
 }
 
 /// Path of the manifest for an epoch (03-format 2).
