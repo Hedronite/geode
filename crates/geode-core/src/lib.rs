@@ -29,6 +29,15 @@
 //! ids. `lock` drops EK (zeroized on drop). Idle lock (default 15 min, `0` =
 //! never) is polled by the host. No TUI crate lives in `geode-grotto` —
 //! `ratatui` / `crossterm` stay out of core so this module is testable headless.
+//!
+//! # v0.2.0 / G5a
+//!
+//! Session polish: confirmed the G4 zeroization contract (ISK zeroized on
+//! unlock via `drop(isk)` + `Secret32::Drop`; EK zeroized on `lock` and on
+//! session drop). Filled the synthetic-clock hole — `touch` and
+//! `unlock_wrapped` now have `_at` variants (`touch_at`, `unlock_wrapped_at`)
+//! matching `unlock_at` / `lock_if_idle`, so the whole session API is drivable
+//! by a synthetic clock. No `ratatui` / `crossterm` in `geode-grotto`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]

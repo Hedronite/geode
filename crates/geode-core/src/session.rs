@@ -106,8 +106,32 @@ impl Session {
         context_label: &str,
         idle_timeout: Duration,
     ) -> Result<Self> {
+        Self::unlock_wrapped_at(
+            wrapped,
+            passphrase,
+            vault_id,
+            epoch,
+            context_label,
+            idle_timeout,
+            Instant::now(),
+        )
+    }
+
+    /// [`Self::unlock_wrapped`] with an explicit "now" for the idle-timer
+    /// origin, paralleling [`Self::unlock_at`]. Wrong passphrase or tampered
+    /// wrap surfaces `Error::AuthFail`; ISK is zeroized before the session
+    /// is returned (same contract as [`Self::unlock_at`]).
+    pub fn unlock_wrapped_at(
+        wrapped: &WrappedKey,
+        passphrase: &[u8],
+        vault_id: VaultId,
+        epoch: Epoch,
+        context_label: &str,
+        idle_timeout: Duration,
+        now: Instant,
+    ) -> Result<Self> {
         let isk = unwrap_identity_passphrase(wrapped, passphrase)?;
-        Self::unlock(isk, vault_id, epoch, context_label, idle_timeout)
+        Self::unlock_at(isk, vault_id, epoch, context_label, idle_timeout, now)
     }
 
     /// Borrow the live EK, or `Err(Error::Locked)` if the session is locked.
@@ -159,7 +183,17 @@ impl Session {
 
     /// Mark activity now (resets the idle timer). No-op when locked.
     pub fn touch(&mut self) {
-        self.last_activity = Instant::now();
+        self.touch_at(Instant::now());
+    }
+
+    /// [`Self::touch`] with an explicit "now", so hosts driving a synthetic
+    /// clock (and tests) can reset the idle timer deterministically -- the
+    /// same contract [`Self::unlock_at`] / [`Self::lock_if_idle`] already
+    /// honour. No-op when locked.
+    pub fn touch_at(&mut self, now: Instant) {
+        if self.ek.is_some() {
+            self.last_activity = now;
+        }
     }
 
     /// Lock now: drop and zeroize EK. Idempotent.
@@ -331,5 +365,64 @@ mod tests {
         assert_eq!(s.context_label(), "ctx");
         let expected_id = derive_key_id(&isk()).unwrap();
         assert_eq!(s.key_id().0, expected_id.0);
+    }
+
+    // G5a: the public touch API must be drivable by a synthetic clock,
+    // matching unlock_at / lock_if_idle. The G4 touch() used Instant::now(),
+    // forcing tests to poke last_activity directly; touch_at closes that.
+    #[test]
+    fn touch_at_resets_idle_timer_via_public_api() {
+        let t0 = Instant::now();
+        let mut s = Session::unlock_at(isk(), vault(), Epoch(1), "", Duration::from_millis(10), t0)
+            .unwrap();
+        // Near timeout, then a fresh activity at t1 via the public API.
+        let t1 = t0 + Duration::from_millis(8);
+        assert!(!s.lock_if_idle(t1));
+        s.touch_at(t1);
+        let t2 = t1 + Duration::from_millis(8);
+        assert!(!s.lock_if_idle(t2), "touched, should not be idle yet");
+        let t3 = t1 + Duration::from_millis(11);
+        assert!(s.lock_if_idle(t3), "past the new timeout, should lock");
+    }
+
+    #[test]
+    fn touch_at_is_noop_when_locked() {
+        let t0 = Instant::now();
+        let mut s =
+            Session::unlock_at(isk(), vault(), Epoch(1), "", Duration::from_millis(1), t0).unwrap();
+        s.lock();
+        let t1 = t0 + Duration::from_secs(1);
+        s.touch_at(t1);
+        // Still locked; touch did not resurrect the session.
+        assert!(s.is_locked());
+        assert!(matches!(s.ek(), Err(Error::Locked)));
+    }
+
+    // G5a: the wrapped-unlock path must also accept an explicit "now" so its
+    // idle-timer origin is deterministic, matching unlock_at.
+    #[test]
+    fn unlock_wrapped_at_binds_idle_origin_to_now() {
+        let isk = isk();
+        let passphrase = b"correct horse battery staple";
+        let wrapped =
+            wrap_identity_passphrase(&isk, passphrase, Argon2Params::DEFAULT_CHEAP).expect("wrap");
+        let t0 = Instant::now();
+        let mut s = Session::unlock_wrapped_at(
+            &wrapped,
+            passphrase,
+            vault(),
+            Epoch(1),
+            "tui",
+            Duration::from_millis(1),
+            t0,
+        )
+        .expect("unlock wrapped at");
+        assert!(s.is_unlocked());
+        // EK matches independent derivation.
+        let expected = derive_epoch_key(&isk, vault(), Epoch(1), "tui").unwrap();
+        assert_eq!(s.ek().unwrap().as_bytes(), expected.as_bytes());
+        // Idle origin is t0: locking fires at t0 + timeout.
+        assert!(s.lock_if_idle(t0 + Duration::from_millis(2)));
+        assert!(s.is_locked());
     }
 }
