@@ -17,6 +17,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-15
+
+TUI operator release. **Workspace version is bumped to 0.2.0 with this release.** SemVer note: on 0.x, `geode tui` changing from "exit 1, not available" to a working TUI is treated as a breaking surface change, so 0.2.0 rather than 0.1.2. The v0.2.0 git tag is NOT cut here; PM tags after Evan GO. No format change; `GDE1` objects from 0.1.x remain readable.
+
+### Added
+
+- `geode tui [VAULT] [--key PATH]` — Ratatui operator TUI over `geode-grotto` ([[foundry/geode/geode-spec-0.0.0/14-tui]]): vault picker, in-process session unlock (ISK held in `Secret32`, zeroized on drop), tree/preview/evidence panes, family-aligned keybindings. Secrets are never painted (14-tui §4 closed set).
+- `geode-tui` crate (adapter only; `geode-grotto` has no ratatui/crossterm dependency).
+- `geode-cli` feature `tui`, default-on; a `--no-default-features` build answers `geode tui` with exit 1 and "this build has no TUI" (14-tui §2.3).
+
+### Changed
+
+- Publish metadata: `geode-grotto` and `geode-cli` are now `publish = true`; CLI description corrected to "adapter over geode-grotto".
+
 ## [0.1.1] — 2026-09-15
 
 Hygiene + keyring release. **Workspace version is bumped to 0.1.1 with this release** (the alternative — holding 0.1.0 until Evan GO on the tag — was rejected: the shipped binary should report what it is). The v0.1.1 git tag itself is NOT cut here; PM tags after Evan GO. No format change; `GDE1` objects from 0.1.0 remain readable.
@@ -46,6 +60,7 @@ First release. Conformance profile **`core`** ([[foundry/geode/geode-spec-0.0.0/
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/VirtualMachinist/geode/compare/main...feat/v0.2.0
+[Unreleased]: https://github.com/VirtualMachinist/geode/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/VirtualMachinist/geode/compare/dc0e942...v0.2.0
 [0.1.1]: https://github.com/VirtualMachinist/geode/compare/dc0e942...feat/v0.2.0
 [0.1.0]: https://github.com/VirtualMachinist/geode/releases/tag/v0.1.0
