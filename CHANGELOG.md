@@ -9,22 +9,35 @@ related:
   - "[[foundry/geode/geode-spec-0.0.0/12-roadmap]]"
   - "[[foundry/geode/SPEC-v010]]"
   - "[[foundry/geode/SPEC-v020]]"
+  - "[[foundry/geode/SPEC-v021]]"
+  - "[[foundry/geode/SPEC-v022]]"
 ---
 
 # Changelog
 
-Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise).
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise). Foundry packs v021/v022 are milestones, not the git tag ([[foundry/SEMVER]]).
 
 ## [Unreleased]
 
-### Fixed
+## [0.2.1] — 2026-09-15
 
-- Help overlay (`?`) is opaque: `Clear` the overlay rect, then paint a `Block` with a solid palette background so the tree/meta no longer show through ([[foundry/geode/geode-spec-0.0.0/14-tui]] §7.1).
-- Operator verbs actually run on an unlocked vault: `j`/`k` move, `h`/`l` collapse/expand, `Tab` cycles panes, `[`/`]` cycle verb tabs (`list` / `verify` / `cat`), `v`/`V` verify with an overlay, `p` bounded preview, `L` lock with Enter to re-open from the picker. Empty picker is not the success path.
+Compatible 0.x patch (Cargo: feature/fix on 0.x bumps patch). Covers foundry packs v021 + v022 on main `159078a` plus this version bump. No format change; `GDE1` objects from 0.2.0 remain readable.
+
+### Added
+
+- `--seal-names` — HCTR2-256 length-preserving filename seal; golden vector `vectors/v1/name.json`.
+- Snapshots + `gc` / `gc_preview`; TUI snapshot pane (preview then confirm).
+- `geode agent token issue|inspect` — scoped `GTOK` tokens (TTL, ops, `--allow-prefix`, `max_bytes`). JSON `token` field is hex armor.
+- `geode-grotto::agent_ops` — token-gated `list` / `read` / `write` (strict `..` deny, leak-denies default off → Io NotFound, truncated read + full-plaintext sha256).
+- `geode agent list|read|write` with `GEODE_TOKEN` / `--token` on **agent verbs only**.
+- `geode agent serve --stdio` — MCP tools `geode_list` / `geode_read` / `geode_write` (no keygen/mount). `--key` still required.
 
 ### Changed
 
-- Splash samples [[foundry/geode/brand/brandmark.jpg]] (stone ring, teal crystal, gold star) into half-block cells. Header `geode <version>` / `GDE1 · core`; footer `sealed · keyring default · exit 0`. Version is `CARGO_PKG_VERSION` (0.2.0), never the mock's `0.1.1`.
+- Splash header version is `CARGO_PKG_VERSION` (never the mock `0.1.1`).
+- Help overlay (`?`) is opaque.
+- Operator TUI verbs actually run on an unlocked vault (`j`/`k`, `Tab`, verify, preview, lock).
+- `geode agent --help` matches shipped verbs; `geode tui --token` remains unexpected (exit 1).
 
 ## [0.2.0] — 2026-09-15
 
@@ -69,7 +82,8 @@ First release. Conformance profile **`core`** ([[foundry/geode/geode-spec-0.0.0/
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/VirtualMachinist/geode/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/VirtualMachinist/geode/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/VirtualMachinist/geode/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/VirtualMachinist/geode/compare/dc0e942...v0.2.0
 [0.1.1]: https://github.com/VirtualMachinist/geode/compare/dc0e942...feat/v0.2.0
 [0.1.0]: https://github.com/VirtualMachinist/geode/releases/tag/v0.1.0
