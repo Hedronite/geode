@@ -163,6 +163,41 @@ pub fn inspect(sealed: &[u8], ek: &EpochKey, now: i64) -> Result<Token> {
     Ok(token)
 }
 
+// ---- G0c (v0.2.3): token-issue narrowing ----
+
+/// Does `token`'s grant narrow `policy` for its principal? (10-policy 2.5.)
+///
+/// A token may only narrow, never widen. Checks `allow_ops` / `allow_prefix`
+/// / `max_bytes` against the matching `PrincipalGrant` in `policy`:
+///
+/// - The principal MUST be in `policy` (else [`Error::PolicyDeny`]).
+/// - `token.allow_ops` must be a subset of `grant.ops`.
+/// - Each `token.allow_prefix` must be covered by some `grant.prefixes`
+///   (via [`crate::policy::prefix_covers`]).
+/// - If `grant.max_bytes` is `Some(n)`, `token.max_bytes` must be `<= n`.
+///
+/// Returns `Ok(())` if the token narrows policy, [`Error::PolicyDeny`] if
+/// it would widen. Errors never contain ISK or key material.
+pub fn narrows_policy(token: &Token, policy: &crate::policy::Policy) -> Result<()> {
+    crate::policy::token_narrows_policy(token, policy)
+}
+
+/// Issue a sealed token that is verified to narrow `policy` (10-policy 2.5).
+///
+/// Calls [`narrows_policy`] first; if the token would widen policy (or the
+/// principal is not in policy), returns [`Error::PolicyDeny`] without
+/// sealing. Otherwise delegates to [`issue`]. The caller holds `EK` from an
+/// unlocked session; a locked session has no EK and cannot construct the
+/// call.
+pub fn issue_narrow(
+    token: &Token,
+    ek: &EpochKey,
+    policy: &crate::policy::Policy,
+) -> Result<Vec<u8>> {
+    narrows_policy(token, policy)?;
+    issue(token, ek)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
