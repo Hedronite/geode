@@ -32,6 +32,21 @@
 //! or wrap blobs. The TUI unlock invariant (14-tui §1.4, §10) is enforced
 //! in `main.rs`: `--token`/`GEODE_TOKEN` is scoped to the agent verbs and
 //! is NOT a global clap flag, so `geode tui` has no `--token` unlock path.
+//!
+//! v0.2.3 G2 (policy chrome): `geode policy --help` and `show|set|check
+//! --help` live in the `PolicyArgs`/`PolicyCmd` clap shapes in `main.rs`
+//! and MUST stay in sync with the shipped verbs (fullstack G1 wired
+//! `cmd::policy::run`). This module reaffirms the chrome guarantee: policy
+//! help text prints only public identifiers (`vault_id`, `epoch`, paths,
+//! principal ids, ops, prefixes) — never ISK/FEK, passphrases, or wrap
+//! blobs. The JSON deny path (`--output json`) emits `code: policy_deny`
+//! (exit 3) via `cmd::map_error`; the human path names the `policy deny`
+//! family. Break-glass (`policy set --yes --break-glass`, 10-policy 4) is
+//! **loud** — stderr + JSON `break_glass: true` event — never silent, and
+//! there is no break-glass for tokens. The TUI no-`--token` invariant
+//! (14-tui §1.4, §10) is re-verified: `geode tui --token x` is an
+//! unexpected-argument usage error (exit 1), and `geode tui --help` has
+//! no `--token` row.
 
 use std::io::Write;
 

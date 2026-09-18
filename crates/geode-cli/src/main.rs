@@ -150,13 +150,16 @@ impl Commands {
     }
 }
 
-/// `geode keyring` — keyring management (05-cli 2.1). Frontend registers the
-/// subcommand shape so `--help` lists it; fullstack G1b wires the real
-/// `cmd::keyring` module. Until then the dispatch stubs to
-/// `Error::NotImplemented` (exit 1 usage).
-/// registers the subcommand shape so `geode policy --help` lists the
-/// verbs; fullstack G1 (v0.2.3) wires the real `cmd::policy` module.
-/// Help prose chrome is frontend-owned (G2). No key bytes are printed.
+/// `geode policy` — policy document verbs (10-policy). Frontend registers
+/// the subcommand shape (G2) so `geode policy --help` and `show|set|check
+/// --help` list the shipped verbs; fullstack G1 (v0.2.3) wired the real
+/// `cmd::policy` module. Help prose chrome is frontend-owned. No key
+/// bytes are printed — see `output.rs` (public ids only).
+///
+/// Break-glass (10-policy 4): rewriting a sealed policy requires
+/// `--yes --break-glass` and is printed **loudly** to stderr (never
+/// silent); there is no break-glass for tokens. `policy check` deny is
+/// `Error::PolicyDeny` → JSON `code: policy_deny`, exit 3.
 #[derive(Args, Debug)]
 pub struct PolicyArgs {
     #[command(subcommand)]
