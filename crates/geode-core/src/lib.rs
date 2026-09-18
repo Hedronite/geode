@@ -52,6 +52,16 @@
 //! when no `EpochKey` is supplied (locked session has no EK). TTL clamped to
 //! `[0, MAX_TTL_SECS]` (15m default / 12h max).
 //!
+//! # v0.2.3 / G0
+//!
+//! `policy` module (10-policy 3): seal/load `policy.json.sealed` under
+//! `MetaKey` with AD `geode/v1/policy || vault_id || le32(epoch)`. Missing
+//! file => `default_policy` (`human:local` admin on `""`, everyone else
+//! deny). Tamper / wrong `MetaKey` => `Error::AuthFail`. Token issue must
+//! narrow policy (`token::issue_narrow` + `policy::token_narrows_policy`):
+//! ops subset, prefix subset, `max_bytes` <= grant cap when set. No new
+//! `Error` variant; errors never contain ISK.
+//!
 //! # v0.2.2 / G0
 //!
 //! `agent_ops` module (06-agent-plane 3, 4, 6): token-gated list / read /
@@ -140,6 +150,7 @@ pub const MAGIC_GDE1: &[u8; 4] = b"GDE1";
 pub const MAGIC_GKEY: &[u8; 4] = b"GKEY";
 pub const MAGIC_GTOK: &[u8; 4] = b"GTOK";
 pub const MAGIC_GMFT: &[u8; 4] = b"GMFT";
+pub const MAGIC_GPOL: &[u8; 4] = b"GPOL";
 
 /// Abort on unknown suite (02-cryptography 1.1; SPEC 4.2).
 pub fn assert_suite(suite: u8) -> Result<()> {
