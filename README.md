@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="https://github.com/VirtualMachinist/geode">
+    <img src="assets/splashwordbrand.jpg" alt="Geode product mark" width="280" />
+  </a>
+</p>
+
 <h1 align="center">Geode</h1>
 
 <p align="center">
