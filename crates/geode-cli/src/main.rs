@@ -96,6 +96,9 @@ enum Commands {
     Gc(cmd::snapshot::GcArgs),
     /// Manage the keyring (named identity keys, 05-cli 2.1).
     Keyring(KeyringArgs),
+    /// Policy document (10-policy): show the effective policy, seal a new
+    /// one, or dry-run an op against it.
+    Policy(PolicyArgs),
     /// Agent plane (06-agent-plane): serve MCP over stdio/socket, issue and
     /// inspect scoped tokens, and run the read/write/list tool verbs under a
     /// token. Help chrome is frontend-owned (G2c); dispatch is wired by
@@ -114,7 +117,12 @@ enum Commands {
         #[arg(value_name = "VAULT")]
         vault: Option<PathBuf>,
         /// Built-in palette (14-tui §11). Default: graphite.
-        #[arg(long, value_name = "NAME", env = "GEODE_APPEARANCE", default_value = "graphite")]
+        #[arg(
+            long,
+            value_name = "NAME",
+            env = "GEODE_APPEARANCE",
+            default_value = "graphite"
+        )]
         appearance: AppearanceArg,
         /// Skip the opening splash (14-tui polish; env: `GEODE_TUI_NO_SPLASH=true`).
         #[arg(long, env = "GEODE_TUI_NO_SPLASH")]
@@ -135,6 +143,7 @@ impl Commands {
             Self::Snapshot(_) => "snapshot",
             Self::Gc(_) => "gc",
             Self::Keyring(_) => "keyring",
+            Self::Policy(_) => "policy",
             Self::Agent(_) => "agent",
             Self::Tui { .. } => "tui",
         }
@@ -145,6 +154,56 @@ impl Commands {
 /// subcommand shape so `--help` lists it; fullstack G1b wires the real
 /// `cmd::keyring` module. Until then the dispatch stubs to
 /// `Error::NotImplemented` (exit 1 usage).
+/// registers the subcommand shape so `geode policy --help` lists the
+/// verbs; fullstack G1 (v0.2.3) wires the real `cmd::policy` module.
+/// Help prose chrome is frontend-owned (G2). No key bytes are printed.
+#[derive(Args, Debug)]
+pub struct PolicyArgs {
+    #[command(subcommand)]
+    pub cmd: PolicyCmd,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PolicyCmd {
+    /// Print the effective policy (the default when none is sealed).
+    Show {
+        /// Vault directory.
+        #[arg(value_name = "VAULT")]
+        vault: PathBuf,
+    },
+    /// Seal a JSON policy file into the vault. Rewriting an existing
+    /// sealed policy requires `--yes --break-glass` (10-policy 4).
+    Set {
+        /// Vault directory.
+        #[arg(value_name = "VAULT")]
+        vault: PathBuf,
+        /// Policy JSON file to seal.
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+        /// Confirm the rewrite.
+        #[arg(long)]
+        yes: bool,
+        /// Human override flag (10-policy 4); never applies to tokens.
+        #[arg(long)]
+        break_glass: bool,
+    },
+    /// Dry-run: would PRINCIPAL be allowed OP on PATH? Deny exits 3.
+    Check {
+        /// Vault directory.
+        #[arg(value_name = "VAULT")]
+        vault: PathBuf,
+        /// Principal id (`human:...`, `agent:...`, `h3s:...`, `ci:...`).
+        #[arg(long, value_name = "ID")]
+        principal: String,
+        /// Operation (`list|read|write|mount|verify|admin`).
+        #[arg(long, value_name = "OP")]
+        op: String,
+        /// Vault-relative path.
+        #[arg(long, value_name = "PATH")]
+        path: String,
+    },
+}
+
 #[derive(Args, Debug)]
 pub struct KeyringArgs {
     #[command(subcommand)]
@@ -318,6 +377,7 @@ fn main() {
         Commands::Snapshot(a) => cmd::snapshot::run(a, &cli.global, out),
         Commands::Gc(a) => cmd::snapshot::gc(a, &cli.global, out),
         Commands::Keyring(a) => cmd::keyring::run(a, out),
+        Commands::Policy(a) => cmd::policy::run(a, &cli.global, out),
         Commands::Agent(a) => cmd::agent::run(a, &cli.global, out),
         // Feature on: the TUI starts (14-tui 2), wired with the vault path
         // and the global `--key` / `GEODE_KEY_FILE` identity path (G5). The

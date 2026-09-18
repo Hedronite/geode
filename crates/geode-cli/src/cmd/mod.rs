@@ -12,6 +12,7 @@ pub mod key;
 pub mod keyring;
 pub mod list;
 pub mod open;
+pub mod policy;
 pub mod seal;
 pub mod snapshot;
 pub mod vault;
@@ -76,7 +77,10 @@ pub fn load_isk(path: &Path) -> Result<IdentitySecret> {
     magic.copy_from_slice(&raw[0..4]);
     geode_grotto::assert_magic(&magic, geode_grotto::MAGIC_GKEY)?;
     if raw[4] != GKEY_VERSION {
-        return Err(Error::Format(format!("unsupported GKEY version {}", raw[4])));
+        return Err(Error::Format(format!(
+            "unsupported GKEY version {}",
+            raw[4]
+        )));
     }
     match raw[5] {
         GKEY_KIND_RAW => {
@@ -133,7 +137,6 @@ fn passphrase() -> Result<zeroize::Zeroizing<String>> {
     crate::output::prompt_passphrase("passphrase: ").map_err(Error::Io)
 }
 
-
 /// Default identity path: `$XDG_CONFIG_HOME/hedronite/geode/default.gkey`,
 /// falling back to `~/.config/hedronite/geode/default.gkey` (05-cli 2.1).
 #[must_use]
@@ -157,7 +160,12 @@ pub fn require_key(global: &crate::GlobalArgs) -> Result<PathBuf> {
     }
     if let Some(index) = geode_grotto::keyring::default_keyring_path() {
         if let Ok(kr) = geode_grotto::keyring::load_keyring(&index) {
-            if let Some(path) = kr.default.as_deref().and_then(|id| kr.find(id)).map(|k| PathBuf::from(&k.path)) {
+            if let Some(path) = kr
+                .default
+                .as_deref()
+                .and_then(|id| kr.find(id))
+                .map(|k| PathBuf::from(&k.path))
+            {
                 return Ok(path);
             }
         }
@@ -288,11 +296,7 @@ pub fn load_vault(root: &Path, isk: &IdentitySecret) -> Result<VaultCtx> {
 }
 
 /// Write `header.json` with a MAC under the manifest key (03-format 3).
-pub fn write_header(
-    root: &Path,
-    fields: serde_json::Value,
-    manifest_key: &[u8; 32],
-) -> Result<()> {
+pub fn write_header(root: &Path, fields: serde_json::Value, manifest_key: &[u8; 32]) -> Result<()> {
     let canon = manifest::canonicalize(&fields)?;
     let mac = manifest::manifest_mac(manifest_key, &canon)?;
     let mut v = fields;
@@ -324,8 +328,7 @@ pub fn write_manifest(ctx: &VaultCtx) -> Result<()> {
 pub fn emit(out: OutMode, verb: &str, extra: serde_json::Value, text: &str) {
     match out {
         OutMode::Json => {
-            let mut doc =
-                serde_json::json!({"ok": true, "verb": verb, "schema": "geode.event.v1"});
+            let mut doc = serde_json::json!({"ok": true, "verb": verb, "schema": "geode.event.v1"});
             if let (Some(d), Some(x)) = (doc.as_object_mut(), extra.as_object()) {
                 for (k, v) in x {
                     d.insert(k.clone(), v.clone());
@@ -368,9 +371,7 @@ fn map_error(err: &Error) -> (&'static str, i32) {
         Error::AuthFail => ("auth_fail", exit::AUTH),
         Error::Io(e) if e.kind() == std::io::ErrorKind::NotFound => ("not_found", exit::USAGE),
         Error::Io(_) => ("io", exit::USAGE),
-        Error::Format(m) if m.contains("unknown cipher suite") => {
-            ("unsupported_suite", exit::AUTH)
-        }
+        Error::Format(m) if m.contains("unknown cipher suite") => ("unsupported_suite", exit::AUTH),
         Error::Format(m) if m.contains("unknown magic") => ("auth_fail", exit::AUTH),
         Error::Format(_) | Error::Crypto(_) | Error::NotImplemented => ("usage", exit::USAGE),
         Error::PolicyDeny => ("policy_deny", exit::POLICY),
