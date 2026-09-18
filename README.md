@@ -27,7 +27,6 @@
 
 <p align="center">
   Built by <a href="https://hedronite.com">Hedronite</a>'s <a href="https://github.com/VirtualMachinist">VirtualMachinist</a>.
-  Geode does not decrypt TurboCrypt trees; TurboCrypt does not decrypt Geode trees.
 </p>
 
 ---
@@ -92,7 +91,6 @@ A `--no-default-features` build has no TUI: `geode tui` then exits 1.
 |---|---|
 | FUSE mount | Not shipped. `geode open VAULT DST` extracts plaintext to a directory. |
 | Post-quantum | Suite `0x01` only. No `pq` feature. |
-| TurboCrypt interop | Geode does not decrypt TurboCrypt trees; TurboCrypt does not decrypt Geode trees. |
 | Unix-socket MCP | `geode agent serve --stdio` ships. Socket transport exits 1. |
 | TUI unlock via token | The TUI is a human surface. `--token` / `GEODE_TOKEN` exist on agent verbs only. |
 
