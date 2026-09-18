@@ -65,6 +65,36 @@ fn setup_vault(dir: &Path) {
         &geode(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]),
         "vault init",
     );
+    // v0.2.3: token issue always narrows policy (10-policy 2.5). A
+    // policy-less vault's default policy grants `human:local` only, so the
+    // fixtures seal a policy granting `agent:test` list/read/write on
+    // `scratch/` (cap 1 MiB, matching the CLI default `--max-bytes`).
+    let show = geode(
+        dir,
+        &["--key", "k.gkey", "--output", "json", "policy", "show", "v.geode"],
+    );
+    assert_ok(&show, "policy show (id)");
+    let doc: serde_json::Value = serde_json::from_slice(&show.stdout).expect("show json");
+    let vid = doc["policy"]["vault_id"].as_str().expect("vault_id");
+    let policy = format!(
+        r#"{{"version":1,"vault_id":"{vid}","default":"deny","principals":[{{"id":"human:local","ops":["list","read","write","mount","verify","admin"],"prefixes":[""]}},{{"id":"agent:test","ops":["list","read","write"],"prefixes":["scratch/"],"max_bytes":1048576}}]}}"#
+    );
+    std::fs::write(dir.join("policy.json"), policy).expect("write policy.json");
+    assert_ok(
+        &geode(
+            dir,
+            &[
+                "--key",
+                "k.gkey",
+                "policy",
+                "set",
+                "v.geode",
+                "--file",
+                "policy.json",
+            ],
+        ),
+        "policy set",
+    );
 }
 
 /// Issue a token on the fixture vault; returns the hex armor (the

@@ -305,6 +305,42 @@ fn policy_fail_closed() {
 }
 
 #[test]
+fn token_issue_policy_less_denies() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_vault(dir);
+    // No policy sealed: the default policy grants `human:local` admin on
+    // `""` and denies everyone else (10-policy 3), so an agent grant MUST
+    // fail closed — issue_narrow over the default policy, exit 3.
+    let issue = geode(
+        dir,
+        &[
+            "--key",
+            "k.gkey",
+            "agent",
+            "token",
+            "issue",
+            "--vault",
+            "v.geode",
+            "--principal",
+            "agent:oma",
+            "--ops",
+            "list,read",
+            "--allow-prefix",
+            "scratch/",
+            "--ttl",
+            "15m",
+        ],
+    );
+    assert_eq!(
+        issue.status.code(),
+        Some(3),
+        "policy-less agent grant must deny: {}",
+        String::from_utf8_lossy(&issue.stderr)
+    );
+}
+
+#[test]
 fn token_issue_narrows_policy() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();

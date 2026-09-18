@@ -203,18 +203,14 @@ fn issue(
         allow_prefix: prefixes,
         max_bytes,
     };
-    // 10-policy 2.5: when a sealed policy exists, a token may only narrow
-    // it — issue refuses a grant policy would deny (`Error::PolicyDeny`,
-    // exit 3). Vaults with no policy file keep the pre-policy behavior
-    // (the default policy grants `human:local` only, which no agent token
-    // could narrow).
-    let sealed = if geode_grotto::policy::policy_path(vault).is_file() {
-        let mk = geode_grotto::kdf::derive_meta_key(&ctx.ek, ctx.vault_id, ctx.epoch);
-        let policy = geode_grotto::policy::load_policy(vault, &mk, ctx.vault_id, ctx.epoch)?;
-        token::issue_narrow(&claims, &ctx.ek, &policy)?
-    } else {
-        token::issue(&claims, &ctx.ek)?
-    };
+    // 10-policy 2.5: a token may only narrow policy, never widen — issue
+    // refuses a grant policy would deny (`Error::PolicyDeny`, exit 3).
+    // `load_policy` returns the default policy when no file is sealed
+    // (`human:local` admin on `""`, everyone else deny), so an agent grant
+    // on a policy-less vault fails closed.
+    let mk = geode_grotto::kdf::derive_meta_key(&ctx.ek, ctx.vault_id, ctx.epoch);
+    let policy = geode_grotto::policy::load_policy(vault, &mk, ctx.vault_id, ctx.epoch)?;
+    let sealed = token::issue_narrow(&claims, &ctx.ek, &policy)?;
     let id_hex = cmd::hex(&id);
 
     match out {
