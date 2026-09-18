@@ -203,7 +203,18 @@ fn issue(
         allow_prefix: prefixes,
         max_bytes,
     };
-    let sealed = token::issue(&claims, &ctx.ek)?;
+    // 10-policy 2.5: when a sealed policy exists, a token may only narrow
+    // it — issue refuses a grant policy would deny (`Error::PolicyDeny`,
+    // exit 3). Vaults with no policy file keep the pre-policy behavior
+    // (the default policy grants `human:local` only, which no agent token
+    // could narrow).
+    let sealed = if geode_grotto::policy::policy_path(vault).is_file() {
+        let mk = geode_grotto::kdf::derive_meta_key(&ctx.ek, ctx.vault_id, ctx.epoch);
+        let policy = geode_grotto::policy::load_policy(vault, &mk, ctx.vault_id, ctx.epoch)?;
+        token::issue_narrow(&claims, &ctx.ek, &policy)?
+    } else {
+        token::issue(&claims, &ctx.ek)?
+    };
     let id_hex = cmd::hex(&id);
 
     match out {
@@ -745,15 +756,33 @@ impl<'g> StdioServer<'g> {
         // op); the claims drive the default prefix and Facet events.
         let claims = token::inspect(&self.sealed, &ctx.ek, now)?;
         match name {
-            "geode_list" => {
-                Self::list_tool(self.facet_events, ctx, &claims, &self.sealed, now, vault, args)
-            }
-            "geode_read" => {
-                Self::read_tool(self.facet_events, ctx, &claims, &self.sealed, now, vault, args)
-            }
-            "geode_write" => {
-                Self::write_tool(self.facet_events, ctx, &claims, &self.sealed, now, vault, args)
-            }
+            "geode_list" => Self::list_tool(
+                self.facet_events,
+                ctx,
+                &claims,
+                &self.sealed,
+                now,
+                vault,
+                args,
+            ),
+            "geode_read" => Self::read_tool(
+                self.facet_events,
+                ctx,
+                &claims,
+                &self.sealed,
+                now,
+                vault,
+                args,
+            ),
+            "geode_write" => Self::write_tool(
+                self.facet_events,
+                ctx,
+                &claims,
+                &self.sealed,
+                now,
+                vault,
+                args,
+            ),
             other => Err(Error::Format(format!("unknown tool '{other}'"))),
         }
     }
@@ -819,12 +848,19 @@ impl<'g> StdioServer<'g> {
             "hex" => ReadMode::Hex,
             "hash" => ReadMode::Hash,
             other => {
-                return Err(Error::Format(format!(
-                    "bad mode '{other}' (text|hex|hash)"
-                )));
+                return Err(Error::Format(format!("bad mode '{other}' (text|hex|hash)")));
             }
         };
-        let outcome = agent_ops::read(&ctx.ek, Path::new(vault), sealed, now, path, max_bytes, mode, false)?;
+        let outcome = agent_ops::read(
+            &ctx.ek,
+            Path::new(vault),
+            sealed,
+            now,
+            path,
+            max_bytes,
+            mode,
+            false,
+        )?;
         Self::facet_event(facet_events, ctx, claims, "read", &outcome.path, None);
         let mut doc = read_doc(&outcome, mode);
         doc["ok"] = serde_json::json!(true);
@@ -871,7 +907,14 @@ impl<'g> StdioServer<'g> {
             }
         };
         let outcome = agent_ops::write(&ctx.ek, Path::new(vault), sealed, now, path, &body, false)?;
-        Self::facet_event(facet_events, ctx, claims, "write", &outcome.path, Some(&outcome.content_root));
+        Self::facet_event(
+            facet_events,
+            ctx,
+            claims,
+            "write",
+            &outcome.path,
+            Some(&outcome.content_root),
+        );
         Ok(serde_json::json!({
             "ok": true,
             "verb": "write",
@@ -905,9 +948,13 @@ impl<'g> StdioServer<'g> {
         let empty = serde_json::json!({});
         let args = params.and_then(|p| p.get("arguments")).unwrap_or(&empty);
         match self.dispatch_tool(name, args) {
-            Ok(doc) => rpc_ok(id, &serde_json::json!({"content": [{"type": "text", "text": doc.to_string()}]}),
+            Ok(doc) => rpc_ok(
+                id,
+                &serde_json::json!({"content": [{"type": "text", "text": doc.to_string()}]}),
             ),
-            Err(e) => rpc_ok(id, &serde_json::json!({
+            Err(e) => rpc_ok(
+                id,
+                &serde_json::json!({
                     "content": [{"type": "text", "text": serde_json::json!({
                         "ok": false,
                         "error": {"code": mcp_error_code(&e), "message": e.to_string()},
@@ -945,7 +992,9 @@ impl<'g> StdioServer<'g> {
                 continue; // notification (e.g. notifications/initialized)
             };
             let frame = match method {
-                "initialize" => rpc_ok(&id, &serde_json::json!({
+                "initialize" => rpc_ok(
+                    &id,
+                    &serde_json::json!({
                         "protocolVersion": MCP_PROTOCOL_VERSION,
                         "capabilities": {"tools": {}},
                         "serverInfo": {"name": "geode", "version": env!("CARGO_PKG_VERSION")},
