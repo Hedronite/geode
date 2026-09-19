@@ -106,6 +106,28 @@ enum Commands {
     /// Policy document (10-policy): show the effective policy, seal a new
     /// one, or dry-run an op against it.
     Policy(PolicyArgs),
+    /// Mount a vault read-only at MOUNTPOINT (08-mount). Foreground
+    /// default; prints the UID-bypass warning on every attempt.
+    Mount {
+        /// Vault directory.
+        #[arg(value_name = "VAULT")]
+        vault: PathBuf,
+        /// Mountpoint directory.
+        #[arg(value_name = "MOUNTPOINT")]
+        mountpoint: PathBuf,
+        /// Read-only mount (the only mode this pack).
+        #[arg(long)]
+        read_only: bool,
+        /// Fork to background (08-mount 3; not honored until FUSE lands).
+        #[arg(long)]
+        daemon: bool,
+    },
+    /// Unmount a mounted vault (fusermount3 / umount, 08-mount 3).
+    Unmount {
+        /// Mountpoint directory.
+        #[arg(value_name = "MOUNTPOINT")]
+        mountpoint: PathBuf,
+    },
     /// Agent plane (06-agent-plane): serve MCP over stdio/socket, issue and
     /// inspect scoped tokens, and run the read/write/list tool verbs under a
     /// token. Help chrome is frontend-owned (G2c); dispatch is wired by
@@ -151,6 +173,8 @@ impl Commands {
             Self::Gc(_) => "gc",
             Self::Keyring(_) => "keyring",
             Self::Policy(_) => "policy",
+            Self::Mount { .. } => "mount",
+            Self::Unmount { .. } => "unmount",
             Self::Agent(_) => "agent",
             Self::Tui { .. } => "tui",
         }
@@ -388,6 +412,13 @@ fn main() {
         Commands::Gc(a) => cmd::snapshot::gc(a, &cli.global, out),
         Commands::Keyring(a) => cmd::keyring::run(a, out),
         Commands::Policy(a) => cmd::policy::run(a, &cli.global, out),
+        Commands::Mount {
+            vault,
+            mountpoint,
+            read_only,
+            daemon,
+        } => cmd::mount::mount(vault, mountpoint, *read_only, *daemon, &cli.global, out),
+        Commands::Unmount { mountpoint } => cmd::mount::unmount(mountpoint, &cli.global, out),
         Commands::Agent(a) => cmd::agent::run(a, &cli.global, out),
         // Feature on: the TUI starts (14-tui 2), wired with the vault path
         // and the global `--key` / `GEODE_KEY_FILE` identity path (G5). The
