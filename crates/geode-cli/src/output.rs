@@ -60,6 +60,19 @@
 //! an unexpected-argument usage error (exit 1), and `geode tui --help`
 //! has no `--token` row.
 
+//! v0.2.5 G2 (mount/unmount chrome): `geode mount --help` and
+//! `geode unmount --help` (clap `Mount`/`Unmount` shapes in `main.rs`)
+//! document the shipped verbs and `--read-only` (the only mode this pack;
+//! `--daemon` is parsed but not honored until the FUSE session lands). The
+//! mount help includes the UID-bypass warning text itself (08-mount 5:
+//! "a mount is a policy bypass for any process of that UID") so an
+//! operator sees it in `--help`, not only at runtime. `cmd/mount.rs`
+//! behavior is unchanged (frontend owns the chrome copy only). No key
+//! bytes, token values, ISK/FEK, passphrases, or wrap blobs appear in
+//! this help. The TUI no-`--token` invariant (14-tui §1.4, §10) is
+//! re-verified unchanged: `geode tui --token x` is an unexpected-argument
+//! usage error (exit 1), and `geode tui --help` has no `--token` row.
+
 use std::io::Write;
 
 use geode_grotto::Error;
