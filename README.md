@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/VirtualMachinist/geode/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/VirtualMachinist/geode/ci.yml?branch=main&style=flat&colorA=252220&colorB=2AB5A5&label=ci" alt="CI"></a>
-  <a href="https://github.com/VirtualMachinist/geode/releases/tag/v0.2.2"><img src="https://img.shields.io/github/v/release/VirtualMachinist/geode?style=flat&colorA=252220&colorB=2AB5A5&label=Geode" alt="Geode latest release"></a>
+  <a href="https://github.com/VirtualMachinist/geode/releases/tag/v0.2.3"><img src="https://img.shields.io/github/v/release/VirtualMachinist/geode?style=flat&colorA=252220&colorB=2AB5A5&label=Geode" alt="Geode latest release"></a>
   <a href="https://crates.io/crates/geode-grotto"><img src="https://img.shields.io/crates/v/geode-grotto?style=flat&colorA=252220&colorB=2AB5A5" alt="geode-grotto on crates.io"></a>
   <a href="https://crates.io/crates/geode-cli"><img src="https://img.shields.io/crates/v/geode-cli?style=flat&colorA=252220&colorB=2AB5A5" alt="geode-cli on crates.io"></a>
   <a href="https://rustup.rs"><img src="https://img.shields.io/badge/Rust-1.85-F46623?style=flat&colorA=252220&logo=rust&logoColor=white" alt="Rust 1.85"></a>
@@ -49,7 +49,7 @@ It is not a FUSE mount, not a post-quantum suite, and not an interop layer for o
 | Binary | `geode` ([`geode-cli`](crates/geode-cli)) |
 | Library | [`geode-grotto`](crates/geode-core) (Rust import `geode_grotto`) |
 | TUI | [`geode-tui`](crates/geode-tui), default feature `tui` |
-| Version | **0.2.2** · [v0.2.2](https://github.com/VirtualMachinist/geode/releases/tag/v0.2.2) · [CHANGELOG](CHANGELOG.md) |
+| Version | **0.2.3** · [v0.2.3](https://github.com/VirtualMachinist/geode/releases/tag/v0.2.3) · [CHANGELOG](CHANGELOG.md) |
 | Rust | 1.85 |
 | License | [Apache-2.0](LICENSE) |
 
@@ -126,7 +126,7 @@ vectors/v1/           # golden vectors: kdf, chunk, wrap, name
 
 ## Status
 
-Workspace **0.2.2** matches git tag [`v0.2.2`](https://github.com/VirtualMachinist/geode/releases/tag/v0.2.2) and the crates.io versions of `geode-grotto` / `geode-cli`. GDE1 objects from 0.2.0 remain readable; the format is frozen at suite `0x01`.
+Workspace **0.2.3** matches git tag [`v0.2.3`](https://github.com/VirtualMachinist/geode/releases/tag/v0.2.3) and the crates.io versions of `geode-grotto` / `geode-cli`. GDE1 objects from 0.2.0 remain readable; the format is frozen at suite `0x01`.
 
 Shipped on this tag:
 
