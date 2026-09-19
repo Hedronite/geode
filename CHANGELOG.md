@@ -3,7 +3,7 @@ title: Geode changelog
 type: repo-changelog
 status: current
 created: "2026-09-15"
-updated: "2026-09-18"
+updated: "2026-09-19"
 related:
   - "[[foundry/geode/geode-spec-0.0.0/SPEC]]"
   - "[[foundry/geode/geode-spec-0.0.0/12-roadmap]]"
@@ -12,6 +12,7 @@ related:
   - "[[foundry/geode/SPEC-v021]]"
   - "[[foundry/geode/SPEC-v022]]"
   - "[[foundry/geode/SPEC-v023]]"
+  - "[[foundry/geode/SPEC-v024]]"
 ---
 
 # Changelog
@@ -19,6 +20,16 @@ related:
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise). Foundry packs v021/v022 are milestones, not the git tag ([[foundry/SEMVER]]).
 
 ## [Unreleased]
+
+## [0.2.3] — 2026-09-19
+
+Compatible 0.x patch. Foundry pack **v024** (Facet collection example). No format change; `GDE1` objects from 0.2.2 remain readable.
+
+### Added
+
+- `geode-grotto::event` — `geode.event.v1` builder; Facet events never include ISK, raw `GTOK`, or `.gkey` bytes. `FACET_REDACT_NAMES`: `GKEY`, `GTOK`, PEM, `GEODE_PASSPHRASE`.
+- `examples/facet-geode.yaml` — OpenCollection-shaped workstation collection. `GEODE_TOKEN` and key-file vars are `secret: true` / `from: env:…`. Requests: cheap `verify --output json`, `agent list` under prefix, `policy check`.
+- README and clap `--help` point at the example.
 
 ## [0.2.2] — 2026-09-18
 
@@ -97,7 +108,8 @@ First release. Conformance profile **`core`** ([[foundry/geode/geode-spec-0.0.0/
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/VirtualMachinist/geode/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/VirtualMachinist/geode/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/VirtualMachinist/geode/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/VirtualMachinist/geode/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/VirtualMachinist/geode/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/VirtualMachinist/geode/compare/dc0e942...v0.2.0

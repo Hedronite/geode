@@ -20,8 +20,8 @@ default = ["tui"]
 tui = ["dep:geode-tui"]
 
 [dependencies]
-geode-grotto = { version = "0.2.2", path = "../geode-core" }
-geode-tui = { version = "0.2.2", path = "../geode-tui", optional = true }
+geode-grotto = { version = "0.2.3", path = "../geode-core" }
+geode-tui = { version = "0.2.3", path = "../geode-tui", optional = true }
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 getrandom = "0.3"
