@@ -106,8 +106,15 @@ enum Commands {
     /// Policy document (10-policy): show the effective policy, seal a new
     /// one, or dry-run an op against it.
     Policy(PolicyArgs),
-    /// Mount a vault read-only at MOUNTPOINT (08-mount). Foreground
-    /// default; prints the UID-bypass warning on every attempt.
+    /// Mount a vault read-only at MOUNTPOINT (08-mount). Foreground is the
+    /// default (`--daemon` is parsed but not honored until the FUSE session
+    /// lands). Every attempt prints the UID-bypass warning FIRST, before any
+    /// refusal:
+    ///
+    ///   warning: a mount is a policy bypass for any process of that UID
+    ///   (08-mount 5)
+    ///
+    /// Unmount before leaving agents unsupervised. No key bytes in this help.
     Mount {
         /// Vault directory.
         #[arg(value_name = "VAULT")]
