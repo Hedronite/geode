@@ -47,6 +47,18 @@
 //! (14-tui §1.4, §10) is re-verified: `geode tui --token x` is an
 //! unexpected-argument usage error (exit 1), and `geode tui --help` has
 //! no `--token` row.
+//!
+//! v0.2.4 G2 (facet-geode pointer): the root `geode --help` `long_about`
+//! (clap `Cli` in `main.rs`) and the repo `README.md` both point at
+//! `examples/facet-geode.yaml` — a Facet collection that drives the agent
+//! plane (`geode agent serve --stdio`) with secret-hydrated vars. This
+//! module reaffirms the chrome guarantee: the pointer names only a public
+//! path and a public verb; no key bytes, token values, ISK/FEK, passphrases,
+//! or wrap blobs appear in `--help`. The example file itself is owned by
+//! fullstack and is not edited here. The TUI no-`--token` invariant
+//! (14-tui §1.4, §10) is re-verified unchanged: `geode tui --token x` is
+//! an unexpected-argument usage error (exit 1), and `geode tui --help`
+//! has no `--token` row.
 
 use std::io::Write;
 

@@ -108,6 +108,7 @@ One rule: **ciphertext on the shared disk; the identity key stays with the opera
 - Objects are sealed under an epoch key: AEGIS-256-X2 chunks, BLAKE3 content root, JCS-canonical manifest MAC, symmetric recipient wrap, optional path-bind.
 - `--seal-names` stores ciphertext filenames (HCTR2-256, length-preserving). Golden vector: [`vectors/v1/name.json`](vectors/v1/name.json).
 - `geode agent token issue` mints a `GTOK` (TTL, ops, `--allow-prefix`, `max_bytes`). Tokens are not the identity key and never carry key material.
+- The agent plane is driven from a Facet collection; see [`examples/facet-geode.yaml`](examples/facet-geode.yaml) for a worked example with secret-hydrated vars (token and key path come `from: env:…`, never literals).
 - Scripts must treat exit **2** as authentication/integrity failure. Usage and I/O are exit **1**. Clap parse errors are forced to 1 so 2 stays unambiguous.
 - `unsafe_code` is forbidden in the workspace.
 
