@@ -13,6 +13,7 @@ related:
   - "[[foundry/geode/SPEC-v022]]"
   - "[[foundry/geode/SPEC-v023]]"
   - "[[foundry/geode/SPEC-v024]]"
+  - "[[foundry/geode/SPEC-v025]]"
 ---
 
 # Changelog
@@ -20,6 +21,15 @@ related:
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise). Foundry packs v021/v022 are milestones, not the git tag ([[foundry/SEMVER]]).
 
 ## [Unreleased]
+
+## [0.2.4] — 2026-09-19
+
+Compatible 0.x patch. Foundry pack **v025** (Linux FUSE read-only / kernel-free VFS). No format change; `GDE1` objects from 0.2.3 remain readable. Live `/dev/fuse` is not required for this release (Darwin + unprivileged GHA).
+
+### Added
+
+- `geode-grotto::vfs` — kernel-free path+offset → chunk decrypt slice. Read-only this release.
+- `geode mount VAULT MOUNTPOINT --read-only` and `geode unmount`. UID-bypass warning on every mount attempt. Darwin: exit 1 unsupported. No `geode_mount` in default MCP tools.
 
 ## [0.2.3] — 2026-09-19
 
@@ -108,7 +118,8 @@ First release. Conformance profile **`core`** ([[foundry/geode/geode-spec-0.0.0/
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/VirtualMachinist/geode/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/VirtualMachinist/geode/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/VirtualMachinist/geode/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/VirtualMachinist/geode/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/VirtualMachinist/geode/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/VirtualMachinist/geode/compare/v0.2.0...v0.2.1
