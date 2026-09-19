@@ -37,7 +37,14 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "geode",
     version = concat!(env!("CARGO_PKG_VERSION"), " (GDE1 suite 0x01)"),
-    about = "Geode — Hedronite file custody (GDE1, suite 0x01)"
+    about = "Geode — Hedronite file custody (GDE1, suite 0x01)",
+    long_about = concat!(
+        "Geode — Hedronite file custody (GDE1, suite 0x01).\n",
+        "\n",
+        "Agent plane (geode agent serve --stdio) is driven from a Facet ",
+        "collection; see examples/facet-geode.yaml for a worked example ",
+        "with secret-hydrated vars. No key bytes in this help."
+    )
 )]
 struct Cli {
     #[command(flatten)]
