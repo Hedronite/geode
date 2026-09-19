@@ -52,6 +52,17 @@
 //! when no `EpochKey` is supplied (locked session has no EK). TTL clamped to
 //! `[0, MAX_TTL_SECS]` (15m default / 12h max).
 //!
+//! # v0.2.4 / G0
+//!
+//! `event` module (07-hedronite-integration 2; 05-cli 4): a shipped core
+//! builder for `geode.event.v1` payloads that carries ONLY public
+//! identifiers -- never ISK, EK, raw `GTOK`, `.gkey` bytes, or passphrases.
+//! `FACET_REDACT_NAMES` documents the Facet redact contract
+//! (`GKEY`, `GTOK`, `PEM`, `GEODE_PASSPHRASE`). `assert_event_safe` is the
+//! guard; `build_event` / `build_facet_event` / `build_error_event` call it
+//! before returning a payload. No new `Error` variant; errors never contain
+//! ISK or key bytes.
+//!
 //! # v0.2.3 / G0
 //!
 //! `policy` module (10-policy 3): seal/load `policy.json.sealed` under
@@ -93,6 +104,7 @@
 pub mod aead;
 pub mod agent_ops;
 pub mod chunk;
+pub mod event;
 pub mod hctr2;
 pub mod kdf;
 pub mod keyfile;
