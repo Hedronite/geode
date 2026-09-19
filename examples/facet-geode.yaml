@@ -1,0 +1,44 @@
+# Facet collection — Geode custody plane (07-hedronite-integration).
+#
+# Secret discipline: the agent token and the identity key-file path are
+# `secret: true` vars hydrated `from: env:…` — never literals in this
+# file, never in Lattice, never in a ledger. The token value is the hex
+# armor from `geode agent token issue --output json` (Facet stores it
+# secret: true). Global CLI flags (`--key`, `--output`) lead the argv;
+# subcommand args follow.
+name: geode-workstation
+requests:
+  - name: verify-vault
+    command: geode
+    args: ["--key", "${geode_key_file}", "--output", "json", "verify", "${vault_path}", "--cheap"]
+    vars:
+      vault_path:
+        value: "${HOME}/work/notes.geode"
+      geode_key_file:
+        secret: true
+        from: env:GEODE_KEY_FILE
+
+  - name: list-scratch
+    command: geode
+    args: ["--key", "${geode_key_file}", "--output", "json", "agent", "list", "${vault_path}", "scratch/"]
+    env:
+      GEODE_TOKEN: "${geode_token}"
+    vars:
+      vault_path:
+        value: "${HOME}/work/notes.geode"
+      geode_key_file:
+        secret: true
+        from: env:GEODE_KEY_FILE
+      geode_token:
+        secret: true
+        from: env:GEODE_TOKEN
+
+  - name: policy-check
+    command: geode
+    args: ["--key", "${geode_key_file}", "--output", "json", "policy", "check", "${vault_path}", "--principal", "agent:oma", "--op", "read", "--path", "scratch/plan.md"]
+    vars:
+      vault_path:
+        value: "${HOME}/work/notes.geode"
+      geode_key_file:
+        secret: true
+        from: env:GEODE_KEY_FILE
