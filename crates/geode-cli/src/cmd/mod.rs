@@ -11,6 +11,7 @@ pub mod agent;
 pub mod key;
 pub mod keyring;
 pub mod list;
+pub mod mount;
 pub mod open;
 pub mod policy;
 pub mod seal;
