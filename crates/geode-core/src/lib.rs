@@ -52,6 +52,21 @@
 //! when no `EpochKey` is supplied (locked session has no EK). TTL clamped to
 //! `[0, MAX_TTL_SECS]` (15m default / 12h max).
 //!
+//! # v0.2.5 / G0
+//!
+//! `vfs` module (08-mount 3, 8): kernel-free VFS read. `read_range` maps
+//! `(vault_root, epoch, object_id, path_bind, off, len)` to a plaintext
+//! slice **without** `/dev/fuse` -- it parses the GDE1 object header,
+//! verifies the header tag, walks the contiguous chunk records from chunk
+//! 0, and decrypts ONLY the chunk(s) the byte range touches
+//! (`first_chunk = off / chunk_size`, `last_chunk = (off+len-1) / chunk_size`),
+//! then slices the joined plaintext to `[off, off+len)`. A one-byte read at
+//! offset 1 GiB of a multi-GiB object decrypts one chunk, not the whole file
+//! (08-mount 8). Read-only this pack: writes / create / unlink stay
+//! `Error::NotImplemented` for a later pack. Missing path =>
+//! `Error::Io(NotFound)`; tamper / bind mismatch => `Error::AuthFail`. No
+//! ISK in errors; no new `Error` variant.
+
 //! # v0.2.4 / G0
 //!
 //! `event` module (07-hedronite-integration 2; 05-cli 4): a shipped core
@@ -118,6 +133,7 @@ pub mod session;
 pub mod snapshot;
 pub mod token;
 pub mod vault;
+pub mod vfs;
 pub mod wrap;
 pub mod zero;
 
