@@ -5,13 +5,19 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 
+use base64ct::{Base64, Encoding};
 use clap::Args;
-use geode_grotto::kdf::{self, IdentitySecret};
+use geode_grotto::kdf::{self, IdentitySecret, KeyId};
 use geode_grotto::wrap::{self, Argon2Params};
 use geode_grotto::{Error, Result};
 use zeroize::Zeroize;
 
 use crate::{cmd, OutMode};
+
+/// BLAKE3 domain for the identity's X25519 static secret (02-cryptography
+/// 6.3: "derived from BLAKE3-expand(ISK) streams"). CLI-local until the
+/// spec pins the exact string; changing it changes every `.gpub`.
+const X25519_IDENTITY_DOMAIN: &str = "geode/v1/x25519-identity";
 
 #[derive(Args, Debug)]
 pub struct KeygenArgs {
@@ -28,9 +34,14 @@ pub struct KeygenArgs {
 
 pub fn run(args: &KeygenArgs, out: OutMode) -> Result<()> {
     if args.cheap && !args.password {
-        return Err(Error::Format("--cheap only makes sense with --password".into()));
+        return Err(Error::Format(
+            "--cheap only makes sense with --password".into(),
+        ));
     }
-    let path = args.path.clone().unwrap_or_else(|| PathBuf::from("secret.gkey"));
+    let path = args
+        .path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("secret.gkey"));
     if args.path.is_none() {
         crate::output::print_keygen_default_path_warning();
     }
@@ -74,7 +85,6 @@ pub fn run(args: &KeygenArgs, out: OutMode) -> Result<()> {
     };
 
     let key_id = kdf::derive_key_id(&IdentitySecret::from_bytes(isk))?;
-    isk.zeroize();
 
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -93,17 +103,88 @@ pub fn run(args: &KeygenArgs, out: OutMode) -> Result<()> {
     f.write_all(&buf).map_err(Error::Io)?;
     f.sync_all().map_err(Error::Io)?;
 
+    // 02-cryptography 6.3: every keygen also emits the adjacent `.gpub`
+    // (public half only — key_id + X25519 public, never ISK material).
+    let gpub = write_gpub(&path, &isk, &key_id)?;
+    isk.zeroize();
+
     cmd::emit(
         out,
         "keygen",
         serde_json::json!({
             "key_id": cmd::hex(&key_id.0),
             "path": path.display().to_string(),
+            "gpub": gpub.display().to_string(),
             "wrapped": args.password,
         }),
-        &format!("key_id {} -> {}", cmd::hex(&key_id.0), path.display()),
+        &format!(
+            "key_id {} -> {} (public {})",
+            cmd::hex(&key_id.0),
+            path.display(),
+            gpub.display()
+        ),
     );
     Ok(())
+}
+
+/// Derive the identity's X25519 static secret from the ISK (BLAKE3-expand
+/// stream, 02-cryptography 6.3) and return the public key bytes.
+fn x25519_public(isk: &[u8; 32]) -> [u8; 32] {
+    let sk_bytes = blake3::derive_key(X25519_IDENTITY_DOMAIN, isk);
+    let sk = x25519_dalek::StaticSecret::from(sk_bytes);
+    x25519_dalek::PublicKey::from(&sk).to_bytes()
+}
+
+/// Write `<keyfile stem>.gpub` (02-cryptography 6.3): a public JSON
+/// document — version, `key_id`, X25519 public (base64). Contains no secret
+/// material; written 0644. Refuses to overwrite (same as the `.gkey`).
+fn write_gpub(gkey_path: &std::path::Path, isk: &[u8; 32], key_id: &KeyId) -> Result<PathBuf> {
+    let gpub_path = gkey_path.with_extension("gpub");
+    let doc = serde_json::json!({
+        "version": 1,
+        "key_id": cmd::hex(&key_id.0),
+        "x25519_public": Base64::encode_string(&x25519_public(isk)),
+    });
+    let text = serde_json::to_string_pretty(&doc)
+        .map_err(|e| Error::Format(format!("gpub serialize: {e}")))?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o644);
+    }
+    let mut f = opts.open(&gpub_path).map_err(Error::Io)?;
+    f.write_all(text.as_bytes()).map_err(Error::Io)?;
+    f.write_all(b"\n").map_err(Error::Io)?;
+    f.sync_all().map_err(Error::Io)?;
+    Ok(gpub_path)
+}
+
+/// Parse a `.gpub` document: (`key_id`, x25519 public bytes). Used by
+/// `vault add-recipient`.
+pub fn read_gpub(path: &std::path::Path) -> Result<(KeyId, [u8; 32])> {
+    let text = std::fs::read_to_string(path).map_err(Error::Io)?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| Error::Format(format!("gpub parse: {e}")))?;
+    if doc.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Err(Error::Format("gpub version must be 1".into()));
+    }
+    let key_id_hex = doc
+        .get("key_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::Format("gpub missing key_id".into()))?;
+    let mut key_id = [0u8; 16];
+    cmd::unhex(key_id_hex, &mut key_id)?;
+    let public_b64 = doc
+        .get("x25519_public")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::Format("gpub missing x25519_public".into()))?;
+    let public: [u8; 32] = Base64::decode_vec(public_b64)
+        .map_err(|e| Error::Format(format!("gpub public base64: {e}")))?
+        .try_into()
+        .map_err(|_| Error::Format("gpub x25519_public not 32 bytes".into()))?;
+    Ok((KeyId(key_id), public))
 }
 
 /// Prompt twice and require a match; `GEODE_PASSPHRASE` skips the prompt
