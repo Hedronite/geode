@@ -911,6 +911,7 @@ dependencies = [
 name = "geode-cli"
 version = "0.2.4"
 dependencies = [
+ "base64ct",
  "blake3",
  "clap",
  "geode-grotto",
@@ -921,6 +922,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "walkdir",
+ "x25519-dalek",
  "zeroize",
 ]
 

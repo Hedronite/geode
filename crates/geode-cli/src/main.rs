@@ -85,7 +85,7 @@ pub enum AppearanceArg {
 enum Commands {
     /// Generate an identity key file (GKEY, raw form, 0600).
     Keygen(cmd::key::KeygenArgs),
-    /// Vault lifecycle (init).
+    /// Vault lifecycle (init, recipients, add-recipient).
     Vault(cmd::vault::VaultArgs),
     /// Seal a file or tree into a vault.
     Seal(cmd::seal::SealArgs),
@@ -170,7 +170,11 @@ impl Commands {
     fn verb(&self) -> &'static str {
         match self {
             Self::Keygen(_) => "keygen",
-            Self::Vault(_) => "vault_init",
+            Self::Vault(a) => match &a.cmd {
+                cmd::vault::VaultCmd::Init(_) => "vault_init",
+                cmd::vault::VaultCmd::Recipients(_) => "vault_recipients",
+                cmd::vault::VaultCmd::AddRecipient(_) => "vault_add_recipient",
+            },
             Self::Seal(_) => "seal",
             Self::Open(_) => "open",
             Self::Verify(_) => "verify",

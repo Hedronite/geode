@@ -23,6 +23,8 @@ tui = ["dep:geode-tui"]
 geode-grotto = { version = "0.2.4", path = "../geode-core" }
 geode-tui = { version = "0.2.4", path = "../geode-tui", optional = true }
 blake3 = "1"
+base64ct = { version = "1", features = ["alloc"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 clap = { version = "4", features = ["derive", "env"] }
 getrandom = "0.3"
 serde_json = "1"
