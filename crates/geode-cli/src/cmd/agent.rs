@@ -18,6 +18,12 @@
 //! default toolset has no `geode_keygen` / `geode_cat_key` / `geode_mount`
 //! (06-agent-plane 3). The Unix-socket transport remains a later gate and
 //! exits 1 (usage) by design.
+//!
+//! Soft Jev remainder (`agent scope` + MCP wrapper when
+//! `GEODE_JEV_TRANSPORT` is set): Choice `{allow, deny, ask}` on the
+//! non-prefix intent. Prefix / `../` / TTL / MAC stay in core. Jev never
+//! sees a token and never decides seal/open/verify. Shadow: `auto_allow`
+//! is always false.
 
 use std::collections::HashMap;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -78,6 +84,22 @@ pub fn run(args: &AgentArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
             socket,
             token,
         } => serve(*stdio, socket.as_deref(), token.as_deref(), global),
+        AgentCmd::Scope {
+            path,
+            op,
+            allow_prefix,
+            principal,
+            intent,
+            body_digest,
+        } => scope(
+            path,
+            op,
+            allow_prefix,
+            principal,
+            intent.as_deref(),
+            body_digest.as_deref(),
+            out,
+        ),
     }
 }
 
@@ -565,6 +587,89 @@ fn write(
     Ok(())
 }
 
+/// `geode agent scope` — named remainder ask. No vault, no token, no key.
+/// Code owns prefix / `..`; Jev classifies the rest in shadow.
+fn scope(
+    path: &str,
+    op: &str,
+    allow_prefix: &[String],
+    principal: &str,
+    intent: Option<&str>,
+    body_digest: Option<&str>,
+    out: OutMode,
+) -> Result<()> {
+    let ask = geode_grotto::jev::RemainderAsk {
+        verb: op.to_ascii_lowercase(),
+        path: path.to_owned(),
+        principal: principal.to_owned(),
+        allow_prefix: allow_prefix.to_vec(),
+        intent: intent.unwrap_or("").to_owned(),
+        body_digest: body_digest.map(str::to_owned),
+    };
+    let decision = geode_grotto::jev::ask(&ask, geode_grotto::jev::Transport::resolve_cli())?;
+    let extra = serde_json::to_value(&decision)
+        .map_err(|e| Error::Format(format!("jev decision json: {e}")))?;
+    cmd::emit(
+        out,
+        "agent_scope",
+        extra,
+        &format!(
+            "choice {} (status {}, auto_allow {}, transport {})",
+            decision.choice.as_str(),
+            decision.status,
+            decision.auto_allow,
+            decision.transport
+        ),
+    );
+    Ok(())
+}
+
+/// Soft remainder annotation for MCP tools. Opt-in via `GEODE_JEV_TRANSPORT`.
+/// Never blocks a code-allowed op; never runs when code already denied.
+fn remainder_annotation(
+    verb: &str,
+    path: &str,
+    claims: &Token,
+    args: &serde_json::Value,
+    body: Option<&[u8]>,
+) -> Option<serde_json::Value> {
+    if !geode_grotto::jev::Transport::is_configured() {
+        return None;
+    }
+    let intent = args
+        .get("intent")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let ask = geode_grotto::jev::RemainderAsk {
+        verb: verb.to_owned(),
+        path: path.to_owned(),
+        principal: claims.principal_id.0.clone(),
+        allow_prefix: claims.allow_prefix.clone(),
+        intent,
+        body_digest: body.map(geode_grotto::jev::body_digest),
+    };
+    match geode_grotto::jev::ask(&ask, geode_grotto::jev::Transport::resolve()) {
+        Ok(d) => serde_json::to_value(d).ok(),
+        Err(e) => Some(serde_json::json!({
+            "shadow": true,
+            "auto_allow": false,
+            "choice": "ask",
+            "status": "unavailable",
+            "reason": e.to_string(),
+        })),
+    }
+}
+
+fn with_jev(mut doc: serde_json::Value, jev: Option<serde_json::Value>) -> serde_json::Value {
+    if let Some(j) = jev {
+        if let Some(o) = doc.as_object_mut() {
+            o.insert("jev".into(), j);
+        }
+    }
+    doc
+}
+
 // ---------------------------------------------------------------------
 // `geode agent serve --stdio` — MCP over newline-delimited JSON-RPC.
 // ---------------------------------------------------------------------
@@ -676,6 +781,7 @@ impl<'g> StdioServer<'g> {
                     "properties": {
                         "vault": vault_prop.clone(),
                         "prefix": {"type": "string", "description": "Prefix to list under (default: the token's first allow prefix)"},
+                        "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
                     },
                     "required": ["vault"],
                 },
@@ -690,6 +796,7 @@ impl<'g> StdioServer<'g> {
                         "path": {"type": "string", "description": "Vault-relative object path"},
                         "max_bytes": {"type": "integer", "description": "Read cap (default 64 KiB; hard cap from the token)"},
                         "mode": {"type": "string", "enum": ["text", "hex", "hash"], "description": "Rendering mode (default text)"},
+                        "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
                     },
                     "required": ["vault", "path"],
                 },
@@ -704,6 +811,7 @@ impl<'g> StdioServer<'g> {
                         "path": {"type": "string", "description": "Vault-relative object path"},
                         "body": {"type": "string", "description": "UTF-8 body"},
                         "body_hex": {"type": "string", "description": "Hex-encoded raw bytes (exactly one of body/body_hex)"},
+                        "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
                     },
                     "required": ["vault", "path"],
                 },
@@ -814,13 +922,17 @@ impl<'g> StdioServer<'g> {
             })
             .collect();
         Self::facet_event(facet_events, ctx, claims, "list", &prefix, None);
-        Ok(serde_json::json!({
-            "ok": true,
-            "verb": "list",
-            "path": prefix,
-            "files": files.len(),
-            "entries": files,
-        }))
+        let jev = remainder_annotation("list", &prefix, claims, args, None);
+        Ok(with_jev(
+            serde_json::json!({
+                "ok": true,
+                "verb": "list",
+                "path": prefix,
+                "files": files.len(),
+                "entries": files,
+            }),
+            jev,
+        ))
     }
 
     /// `geode_read` (06-agent-plane 4): body, capped preview, or hash only.
@@ -861,7 +973,10 @@ impl<'g> StdioServer<'g> {
         let mut doc = read_doc(&outcome, mode);
         doc["ok"] = serde_json::json!(true);
         doc["verb"] = serde_json::json!("read");
-        Ok(doc)
+        Ok(with_jev(
+            doc,
+            remainder_annotation("read", &outcome.path, claims, args, None),
+        ))
     }
 
     /// `geode_write` (06-agent-plane 3, 4): seal `body`/`body_hex` at path.
@@ -911,14 +1026,17 @@ impl<'g> StdioServer<'g> {
             &outcome.path,
             Some(&outcome.content_root),
         );
-        Ok(serde_json::json!({
-            "ok": true,
-            "verb": "write",
-            "path": outcome.path,
-            "plain_bytes": outcome.plain_len,
-            "object_id": cmd::hex(&outcome.object_id.0),
-            "content_root": cmd::hex(&outcome.content_root),
-        }))
+        Ok(with_jev(
+            serde_json::json!({
+                "ok": true,
+                "verb": "write",
+                "path": outcome.path,
+                "plain_bytes": outcome.plain_len,
+                "object_id": cmd::hex(&outcome.object_id.0),
+                "content_root": cmd::hex(&outcome.content_root),
+            }),
+            remainder_annotation("write", &outcome.path, claims, args, Some(&body)),
+        ))
     }
 
     /// Handle one `tools/call` request frame.

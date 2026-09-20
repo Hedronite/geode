@@ -88,6 +88,13 @@
 //! ops subset, prefix subset, `max_bytes` <= grant cap when set. No new
 //! `Error` variant; errors never contain ISK.
 //!
+//! # Jev remainder (soft MCP)
+//!
+//! `jev` module: Choice `{allow, deny, ask}` on **non-prefix** intent only.
+//! Prefix / `../` / TTL / MAC stay in `agent_ops` / `token`. Jev `state`
+//! never carries GTOK / ISK / tokens. Shadow: ask / deny / low-conf ≠
+//! auto-allow. TUI does not import this module.
+//!
 //! # v0.2.2 / G0
 //!
 //! `agent_ops` module (06-agent-plane 3, 4, 6): token-gated list / read /
@@ -118,6 +125,7 @@
 
 pub mod aead;
 pub mod agent_ops;
+pub mod jev;
 pub mod chunk;
 pub mod event;
 pub mod hctr2;

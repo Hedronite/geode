@@ -1,0 +1,76 @@
+# Geode Jev scope remainder (Facet TypeSafe recipe). Transport SoT:
+# Facet docs/examples/typesafe. Hydrate typesafeApiKey via `facet env set --secret`
+# from $TYPESAFE_API_KEY. Never bake a key here, never a token or ISK in state.
+# jevShadow=true is classify-only: Jev does not seal, open, or verify.
+# Prefix / `../` / TTL / MAC stay code.
+opencollection: 1.0.0
+info:
+  name: TypeSafe Jev (Geode remainder)
+  summary: Soft MCP non-prefix remainder Choice via Facet System One. Secret typesafeApiKey from Facet env — never YAML / token / ISK.
+  version: 0.1.0
+bundled: true
+config:
+  environments:
+    - name: typesafe
+      variables:
+        - name: typesafeApi
+          value: https://api.typesafe.ai
+        - secret: true
+          name: typesafeApiKey
+          type: string
+        - name: jevModel
+          value: jev-latest
+        - name: state
+          value: "geode agent scope: non-prefix remainder. Code owns prefix, '..', TTL, MAC."
+        - name: jevShadow
+          value: "true"
+items:
+  - info:
+      name: System One
+      type: folder
+      seq: 1
+    items:
+      - info:
+          name: Scope remainder
+          type: http
+          seq: 1
+        http:
+          method: POST
+          url: "{{typesafeApi}}/v1/systemone"
+          headers:
+            - name: Authorization
+              value: "Bearer {{typesafeApiKey}}"
+            - name: Content-Type
+              value: application/json
+            - name: Accept
+              value: application/json
+          body:
+            type: json
+            data: |-
+              {
+                "state": "{{state}}",
+                "model": "{{jevModel}}",
+                "questions": {
+                  "scope": {
+                    "type": "choice",
+                    "instructions": "Given this non-prefix remainder (declared intent vs granted prefix/path/op), should the agent proceed? Code already owns prefix, '..', TTL, and MAC. Shadow only — do not seal, open, or verify.",
+                    "criteria": {
+                      "allow": "Intent matches the grant; a human may proceed later. Not a write grant and not a token decision.",
+                      "deny": "Odd, out of semantic scope, or looks like a secret leak — do not treat as allow",
+                      "ask": "Ambiguous or high-stakes — need a human. Not allow."
+                    }
+                  },
+                  "escalate": {
+                    "type": "noul",
+                    "instructions": "Is this an odd grant that should be held for a human before write?",
+                    "criteria": {
+                      "true": "Unusual path, surprising write, or the declared intent does not match the grant",
+                      "false": "Ordinary in-grant work; no hold"
+                    }
+                  }
+                }
+              }
+        settings:
+          timeout: 30000
+          followRedirects: true
+          maxRedirects: 0
