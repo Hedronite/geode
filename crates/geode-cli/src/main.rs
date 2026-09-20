@@ -15,9 +15,10 @@
 //! verbs (06-agent-plane: serve, token issue/inspect, read/write/list).
 //! Fullstack G1 (PR #20) wired `cmd::agent::run` for serve/read/write/list;
 //! the chrome here MUST stay in sync with the shipped verbs. `--token`/
-//! `GEODE_TOKEN` is scoped to the agent verbs, NOT a global clap flag, so
-//! `geode tui` cannot gain a `--token` unlock path (14-tui §1.4: the TUI is
-//! a human surface).
+//! `GEODE_TOKEN` is scoped to the token-gated agent verbs, NOT a global clap
+//! flag, so `geode tui` cannot gain a `--token` unlock path (14-tui §1.4:
+//! the TUI is a human surface). `geode agent scope` is token-free (shadow
+//! Jev remainder only) and the TUI stays Jev-free.
 //!
 //! Exit-code discipline (05-cli 3): clap's default error exit is 2, which
 //! collides with the auth/integrity family. We intercept clap errors and
@@ -340,6 +341,29 @@ pub enum AgentCmd {
         /// Sealed agent token (hex armor or GTOK); else `$GEODE_TOKEN`.
         #[arg(long, value_name = "TOKEN")]
         token: Option<String>,
+    },
+    /// Classify non-prefix remainder (shadow Jev). Code owns prefix / `../`
+    /// / TTL / MAC. No `--token` — this verb does not seal, open, or verify.
+    /// The TUI stays Jev-free.
+    Scope {
+        /// Vault-relative path already under an allow prefix.
+        #[arg(long, value_name = "PATH")]
+        path: String,
+        /// Operation (`list|read|write`). Never seal/open/verify.
+        #[arg(long, value_name = "OP")]
+        op: String,
+        /// Path prefix the grant already allows (repeatable). Code-checked.
+        #[arg(long, value_name = "PREFIX")]
+        allow_prefix: Vec<String>,
+        /// Principal id (public). Default `agent:remainder`.
+        #[arg(long, value_name = "ID", default_value = "agent:remainder")]
+        principal: String,
+        /// Declared non-prefix intent (public text; never a token).
+        #[arg(long, value_name = "TEXT")]
+        intent: Option<String>,
+        /// BLAKE3 hex of a write body (not the body).
+        #[arg(long, value_name = "HEX")]
+        body_digest: Option<String>,
     },
 }
 

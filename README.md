@@ -86,7 +86,7 @@ A `--no-default-features` build has no TUI: `geode tui` then exits 1.
 | Bytes on disk | Plaintext files | GDE1 objects (chunked AEAD, merklized content root) |
 | Filenames | Visible | Plaintext by default; `--seal-names` stores HCTR2-256 ciphertext names |
 | Humans | Any editor | `geode` CLI and the operator TUI (`geode tui`) |
-| Agents | The same key, or raw files | Scoped `GTOK` tokens; `geode agent list` / `read` / `write`; `geode agent serve --stdio` MCP tools `geode_list`, `geode_read`, `geode_write` |
+| Agents | The same key, or raw files | Scoped `GTOK` tokens; `geode agent list` / `read` / `write`; `geode agent serve --stdio` MCP tools `geode_list`, `geode_read`, `geode_write`. Soft Jev remainder (`geode agent scope`; MCP wrapper when `GEODE_JEV_TRANSPORT` is set) classifies non-prefix intent only — prefix / `../` / TTL / MAC stay code. Shadow: ask/deny/low-conf ≠ allow. See [`docs/jev-native.md`](docs/jev-native.md). |
 | Integrity | Hope | `geode verify` (full / `--cheap` / `--sample P`); exit **2** is auth/integrity |
 | History | Copies | Named snapshots and `gc` (TUI previews `gc` before confirm) |
 | Identity | Ad hoc | `geode keygen` / `geode keyring`; OS keyring with a `0600` file fallback |
@@ -98,7 +98,7 @@ A `--no-default-features` build has no TUI: `geode tui` then exits 1.
 | FUSE mount | Not shipped. `geode open VAULT DST` extracts plaintext to a directory. |
 | Post-quantum | Suite `0x01` only. No `pq` feature. |
 | Unix-socket MCP | `geode agent serve --stdio` ships. Socket transport exits 1. |
-| TUI unlock via token | The TUI is a human surface. `--token` / `GEODE_TOKEN` exist on agent verbs only. |
+| TUI unlock via token | The TUI is a human surface. `--token` / `GEODE_TOKEN` exist on token-gated agent verbs only. The TUI is Jev-free. |
 
 ## How it works
 
@@ -109,7 +109,7 @@ One rule: **ciphertext on the shared disk; the identity key stays with the opera
 - `geode vault recipients` lists the recipient set; `geode vault add-recipient DIR --gpub PATH` wraps the current epoch key for a new X25519 recipient. Recipient possession bypasses policy if the holder runs other software — `--token` cannot add or drop recipients.
 - `--seal-names` stores ciphertext filenames (HCTR2-256, length-preserving). Golden vector: [`vectors/v1/name.json`](vectors/v1/name.json).
 - `geode agent token issue` mints a `GTOK` (TTL, ops, `--allow-prefix`, `max_bytes`). Tokens are not the identity key and never carry key material.
-- The agent plane is driven from a Facet collection; see [`examples/facet-geode.yaml`](examples/facet-geode.yaml) for a worked example with secret-hydrated vars (token and key path come `from: env:…`, never literals).
+- The agent plane is driven from a Facet collection; see [`examples/facet-geode.yaml`](examples/facet-geode.yaml) for a worked example with secret-hydrated vars (token and key path come `from: env:…`, never literals). Soft Jev remainder uses the TypeSafe recipe in [`docs/examples/typesafe/`](docs/examples/typesafe/opencollection.yml) — never a token in `state`.
 - Scripts must treat exit **2** as authentication/integrity failure. Usage and I/O are exit **1**. Clap parse errors are forced to 1 so 2 stays unambiguous.
 - `unsafe_code` is forbidden in the workspace.
 

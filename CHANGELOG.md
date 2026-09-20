@@ -22,6 +22,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+### Added
+
+- Soft Jev remainder on the agent MCP plane: Choice `{allow, deny, ask}` on
+  non-prefix intent only. Prefix / `../` / TTL / MAC stay code. Shadow:
+  `ask` / `deny` / low-conf ≠ auto-allow. Optional Noul hold before write.
+  Facet TypeSafe recipe at `docs/examples/typesafe/`. CLI
+  `geode agent scope` (no token). TUI stays Jev-free. Never GTOK / ISK in
+  Jev `state`.
+
 ## [0.2.4] — 2026-09-19
 
 Compatible 0.x patch. Foundry pack **v025** (Linux FUSE read-only / kernel-free VFS). No format change; `GDE1` objects from 0.2.3 remain readable. Live `/dev/fuse` is not required for this release (Darwin + unprivileged GHA).

@@ -96,6 +96,25 @@ pub struct WriteOutcome {
     pub content_root: [u8; 32],
 }
 
+/// Code-owned path gate for the Jev remainder (prefix + `..` only).
+///
+/// Jev must never be asked when this fails. TTL / MAC stay in
+/// [`crate::token::inspect`]; this function does not see a token.
+pub fn code_scope_path(path: &str, prefixes: &[String]) -> Result<String> {
+    let norm = normalize_strict(path)?;
+    let covered = prefixes.iter().any(|g| {
+        prefix_covers(g, &norm) || {
+            let g = g.trim_end_matches('/');
+            g.is_empty() || norm == g || norm.starts_with(&format!("{g}/"))
+        }
+    });
+    if covered {
+        Ok(norm)
+    } else {
+        Err(Error::PolicyDeny)
+    }
+}
+
 /// Normalize a vault-relative path **strictly** for agent ops (06 §6.2).
 ///
 /// Unlike [`crate::policy::normalize_path`], this rejects ANY `..` segment
@@ -920,6 +939,24 @@ mod tests {
             let o = r.unwrap();
             assert!(matches!(o.body, ReadBody::Full(_)));
         }
+    }
+
+    #[test]
+    fn code_scope_path_covers_grant_and_rejects_dotdot() {
+        let prefixes = vec!["scratch/".into(), "out/".into()];
+        assert_eq!(
+            code_scope_path("scratch/note.md", &prefixes).unwrap(),
+            "scratch/note.md"
+        );
+        assert_eq!(code_scope_path("scratch/", &prefixes).unwrap(), "scratch");
+        assert!(matches!(
+            code_scope_path("scratch/../keys/x", &prefixes),
+            Err(Error::Format(_))
+        ));
+        assert!(matches!(
+            code_scope_path("keys/prod.pem", &prefixes),
+            Err(Error::PolicyDeny)
+        ));
     }
 
     #[test]
