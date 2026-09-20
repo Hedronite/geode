@@ -1,6 +1,6 @@
 //! Soft Jev remainder: Choice `{allow, deny, ask}` on non-prefix intent.
 //!
-//! Facet TypeSafe / System One is the transport; this module classifies.
+//! Facet `TypeSafe` / System One is the transport; this module classifies.
 //! It never seals, opens, or verifies, and it never sees a `GTOK` or ISK.
 //! Prefix / `../` / TTL / MAC stay in [`crate::agent_ops`] / [`crate::token`].
 
@@ -14,7 +14,7 @@ use crate::agent_ops::code_scope_path;
 use crate::policy::PrincipalId;
 use crate::{Error, Result};
 
-/// Bundled Facet OpenCollection (scope-remainder recipe).
+/// Bundled Facet `OpenCollection` (scope-remainder recipe).
 pub const FACET_COLLECTION: &str =
     include_str!("../../../docs/examples/typesafe/opencollection.yml");
 pub const FACET_SELECTOR: &str = "items/0/items/0";
@@ -288,8 +288,7 @@ pub fn remainder_state(ask: &RemainderAsk) -> Result<String> {
     let digest = ask
         .body_digest
         .as_deref()
-        .map(|d| clip(d, DIGEST_MAX))
-        .unwrap_or_else(|| "(none)".into());
+        .map_or_else(|| "(none)".into(), |d| clip(d, DIGEST_MAX));
     Ok(format!(
         "Non-prefix remainder (code already owns prefix, '..', TTL, MAC).\n\
          Jev does not seal, open, or verify. Shadow: classify only.\n\n\
@@ -388,7 +387,7 @@ fn parse_remainder_op(verb: &str) -> Result<()> {
 
 /// Classify one remainder. Code path/prefix first; Jev never overrides.
 /// Missing transport / low confidence / empty → `ask`. `auto_allow` is always false.
-pub fn ask(ask: &RemainderAsk, transport: Transport) -> Result<Decision> {
+pub fn ask(ask: &RemainderAsk, transport: &Transport) -> Result<Decision> {
     parse_remainder_op(&ask.verb)?;
     let principal = PrincipalId(ask.principal.clone());
     principal.validate()?;
@@ -629,7 +628,7 @@ mod tests {
     fn missing_transport_asks_without_allow() {
         let d = ask(
             &sample(),
-            Transport::None {
+            &Transport::None {
                 reason: "facet_not_on_path",
             },
         )
@@ -644,7 +643,7 @@ mod tests {
     fn fake_allow_is_shadow_only() {
         let d = ask(
             &sample(),
-            Transport::Fake(FakeScript::reply(judged_body("deny", 0.0, 0.9))),
+            &Transport::Fake(FakeScript::reply(judged_body("deny", 0.0, 0.9))),
         )
         .unwrap();
         assert_eq!(d.choice, Choice::Deny);
@@ -658,7 +657,7 @@ mod tests {
         a.intent = "use TYPESAFE_API_KEY=sk-live".into();
         let err = ask(
             &a,
-            Transport::None {
+            &Transport::None {
                 reason: "x",
             },
         )
@@ -670,7 +669,7 @@ mod tests {
     fn gtok_hex_in_intent_is_rejected() {
         let mut a = sample();
         a.intent = "47544f4b0101a5a5".into();
-        let err = ask(&a, Transport::None { reason: "x" }).unwrap_err();
+        let err = ask(&a, &Transport::None { reason: "x" }).unwrap_err();
         assert!(err.to_string().contains("must not carry"));
     }
 
@@ -680,7 +679,7 @@ mod tests {
         a.path = "scratch/../keys/x".into();
         let err = ask(
             &a,
-            Transport::Fake(FakeScript::reply(judged_body("allow", 0.0, 0.99))),
+            &Transport::Fake(FakeScript::reply(judged_body("allow", 0.0, 0.99))),
         )
         .unwrap_err();
         assert!(matches!(err, Error::Format(_)), "got {err:?}");
@@ -692,7 +691,7 @@ mod tests {
         a.path = "keys/prod.pem".into();
         let err = ask(
             &a,
-            Transport::Fake(FakeScript::reply(judged_body("allow", 0.0, 0.99))),
+            &Transport::Fake(FakeScript::reply(judged_body("allow", 0.0, 0.99))),
         )
         .unwrap_err();
         assert!(matches!(err, Error::PolicyDeny), "got {err:?}");
@@ -703,7 +702,7 @@ mod tests {
         for verb in ["seal", "open", "verify"] {
             let mut a = sample();
             a.verb = verb.into();
-            let err = ask(&a, Transport::None { reason: "x" }).unwrap_err();
+            let err = ask(&a, &Transport::None { reason: "x" }).unwrap_err();
             assert!(matches!(err, Error::Format(_)), "{verb}: {err:?}");
         }
     }

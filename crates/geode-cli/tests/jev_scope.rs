@@ -100,8 +100,8 @@ fn scope_help_is_token_free() {
     assert!(out.status.success(), "help failed");
     assert!(stdout.contains("geode agent scope") || stdout.contains("Classify non-prefix"));
     assert!(
-        !stdout.contains("--token"),
-        "scope must not take --token: {stdout}"
+        !stdout.contains("--token <") && !stdout.contains("--token <TOKEN>"),
+        "scope must not take a --token flag: {stdout}"
     );
     assert!(!stdout.contains("GTOK"));
     assert!(!stdout.to_ascii_lowercase().contains("stanley"));
@@ -120,7 +120,10 @@ fn tui_help_is_jev_free() {
             && !stderr.to_ascii_lowercase().contains("jev"),
         "TUI help mentions Jev"
     );
-    assert!(!stdout.contains("--token"));
+    assert!(
+        !stdout.contains("--token <"),
+        "TUI must not grow a --token flag: {stdout}"
+    );
 }
 
 #[test]

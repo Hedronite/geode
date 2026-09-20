@@ -606,7 +606,7 @@ fn scope(
         intent: intent.unwrap_or("").to_owned(),
         body_digest: body_digest.map(str::to_owned),
     };
-    let decision = geode_grotto::jev::ask(&ask, geode_grotto::jev::Transport::resolve_cli())?;
+    let decision = geode_grotto::jev::ask(&ask, &geode_grotto::jev::Transport::resolve_cli())?;
     let extra = serde_json::to_value(&decision)
         .map_err(|e| Error::Format(format!("jev decision json: {e}")))?;
     cmd::emit(
@@ -649,7 +649,7 @@ fn remainder_annotation(
         intent,
         body_digest: body.map(geode_grotto::jev::body_digest),
     };
-    match geode_grotto::jev::ask(&ask, geode_grotto::jev::Transport::resolve()) {
+    match geode_grotto::jev::ask(&ask, &geode_grotto::jev::Transport::resolve()) {
         Ok(d) => serde_json::to_value(d).ok(),
         Err(e) => Some(serde_json::json!({
             "shadow": true,

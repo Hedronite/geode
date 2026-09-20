@@ -1,4 +1,4 @@
-//! Bundled TypeSafe remainder collection: well-formed, secret-free, shadow.
+//! Bundled `TypeSafe` remainder collection: well-formed, secret-free, shadow.
 
 use std::path::PathBuf;
 
