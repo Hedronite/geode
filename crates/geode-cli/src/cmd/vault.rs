@@ -21,8 +21,18 @@ pub enum VaultCmd {
     /// Create a new vault (epoch 1, empty manifest, this key as recipient).
     Init(InitArgs),
     /// List the recipient set (types + `key_id`s; public data, no key needed).
+    ///
+    /// `recipients.json` is public and cannot open the vault alone; any one
+    /// recipient (symmetric or X25519) unwraps the epoch key. Recipient
+    /// possession bypasses policy if the holder runs other software.
     Recipients(RecipientsArgs),
     /// Wrap the current EK for a new X25519 recipient from their `.gpub`.
+    ///
+    /// Appends an X25519 recipient wrap of the current epoch key to
+    /// `recipients.json`. Requires `--key`; the ISK is dropped after unwrap
+    /// and never printed. `--token` MUST NOT add or drop recipients — tokens
+    /// narrow reads/writes, they never mint recipients. Recipient possession
+    /// bypasses policy if the holder runs other software.
     AddRecipient(AddRecipientArgs),
 }
 
