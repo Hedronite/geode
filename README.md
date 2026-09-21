@@ -110,6 +110,7 @@ One rule: **ciphertext on the shared disk; the identity key stays with the opera
 - A vault is a directory with a `GEODE` sentinel, MAC'd `header.json` / `manifest.json`, and object files under `epochs/`.
 - Objects are sealed under an epoch key: AEGIS-256-X2 chunks, BLAKE3 content root, JCS-canonical manifest MAC, symmetric recipient wrap, optional path-bind.
 - `geode vault recipients` lists the recipient set; `geode vault add-recipient DIR --gpub PATH` wraps the current epoch key for a new X25519 recipient. Recipient possession bypasses policy if the holder runs other software — `--token` cannot add or drop recipients.
+- `geode vault rotate DIR` increments the epoch (`--yes` skips confirm). `--drop-recipient ID` + `--reseal` is the complete revocation path. Without `--reseal`, a drop is incomplete revocation — the former recipient still reads old objects. Do not fix it in policy. `--token` cannot rotate.
 - `--seal-names` stores ciphertext filenames (HCTR2-256, length-preserving). Golden vector: [`vectors/v1/name.json`](vectors/v1/name.json).
 - `geode agent token issue` mints a `GTOK` (TTL, ops, `--allow-prefix`, `max_bytes`). Tokens are not the identity key and never carry key material.
 - The agent plane is driven from a Facet collection; see [`examples/facet-geode.yaml`](examples/facet-geode.yaml) for a worked example with secret-hydrated vars (token and key path come `from: env:…`, never literals). Soft Jev remainder uses the TypeSafe recipe in [`docs/examples/typesafe/`](docs/examples/typesafe/opencollection.yml) — never a token in `state`.
