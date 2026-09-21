@@ -16,7 +16,7 @@ use crate::{Error, Result};
 
 /// Bundled Facet `OpenCollection` (scope-remainder recipe).
 pub const FACET_COLLECTION: &str =
-    include_str!("../../../docs/examples/typesafe/opencollection.yml");
+    include_str!("../embedded/opencollection.yml");
 pub const FACET_SELECTOR: &str = "items/0/items/0";
 pub const FACET_ENVIRONMENT: &str = "typesafe";
 
