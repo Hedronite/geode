@@ -3,7 +3,7 @@ title: Geode changelog
 type: repo-changelog
 status: current
 created: "2026-09-15"
-updated: "2026-09-19"
+updated: "2026-09-21"
 related:
   - "[[foundry/geode/geode-spec-0.0.0/SPEC]]"
   - "[[foundry/geode/geode-spec-0.0.0/12-roadmap]]"
@@ -14,6 +14,8 @@ related:
   - "[[foundry/geode/SPEC-v023]]"
   - "[[foundry/geode/SPEC-v024]]"
   - "[[foundry/geode/SPEC-v025]]"
+  - "[[foundry/geode/SPEC-v026]]"
+  - "[[foundry/geode/SPEC-v027]]"
 ---
 
 # Changelog
@@ -22,14 +24,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-09-21
+
+Compatible 0.x patch. Foundry packs **v026** (X25519 recipients) and **v027** (epoch rotate + reseal). No format change; `GDE1` objects from 0.2.4 remain readable. Also ships Evan's Jev remainder (shadow; TUI Jev-free).
+
 ### Added
 
-- Soft Jev remainder on the agent MCP plane: Choice `{allow, deny, ask}` on
-  non-prefix intent only. Prefix / `../` / TTL / MAC stay code. Shadow:
-  `ask` / `deny` / low-conf ≠ auto-allow. Optional Noul hold before write.
-  Facet TypeSafe recipe at `docs/examples/typesafe/`. CLI
-  `geode agent scope` (no token). TUI stays Jev-free. Never GTOK / ISK in
-  Jev `state`.
+- X25519 recipients: wrap/unwrap of EK (02 §7.2); `geode vault recipients` / `add-recipient` / `.gpub`. Hybrid/ML-KEM still stub.
+- `geode vault rotate DIR [--reseal] [--drop-recipient ID] [--add-recipient PUB]`. Drop without `--reseal` is incomplete revocation.
+- Soft Jev remainder on the agent MCP plane: Choice `{allow, deny, ask}` on non-prefix intent only. Prefix / `../` / TTL / MAC stay code. Shadow: `ask` / `deny` / low-conf ≠ auto-allow. Optional Noul hold before write. Facet TypeSafe recipe at `docs/examples/typesafe/`. CLI `geode agent scope` (no token). TUI stays Jev-free. Never GTOK / ISK in Jev `state`.
 
 ## [0.2.4] — 2026-09-19
 
