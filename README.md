@@ -37,6 +37,9 @@
 
 ---
 
+> **Status:** In production use as daily-driver / dogfood file custody (GDE1 vaults, operator TUI, agent tokens). Hardening: format frozen at suite 0x01; mount/PQ/TurboCrypt are explicitly out of scope. Not a toy reference.
+
+
 Geode seals files and directory trees so people and agents can share a disk without sharing plaintext. Ciphertext lives on the disk. Keys stay with the operator. Agents get scoped tokens, not the identity key.
 
 The on-disk format is **GDE1**, cipher suite **`0x01`**: AEGIS-256-X2, BLAKE3, Argon2id, and HCTR2-256. The binary is `geode`. The library crate is [`geode-grotto`](https://crates.io/crates/geode-grotto) (directory [`crates/geode-core`](crates/geode-core)).
