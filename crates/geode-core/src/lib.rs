@@ -88,6 +88,22 @@
 //! ops subset, prefix subset, `max_bytes` <= grant cap when set. No new
 //! `Error` variant; errors never contain ISK.
 //!
+//! # v0.2.7 / G0
+//!
+//! `rotate` module (04-vault 6; SPEC-v027): epoch rotation + reseal. `rotate_epoch`
+//! derives a new EK (`geode/v1/epoch-fek` with `new_epoch`) and wraps it for each
+//! **remaining** recipient (sym via ISK, X25519 via the recipient stored static
+//! public key -- the operator never needs a recipient secret). The old epoch
+//! `recipients.json` is left untouched so a remaining recipient can still
+//! unwrap the **old** EK and open old-epoch objects without reseal; dropping a
+//! recipient without reseal is a documented **incomplete revocation**.
+//! `reseal` rewrites every old-epoch object under the new EK at the new epoch
+//! (fresh `object_id` per object) and writes a new-epoch manifest; a dropped
+//! recipient has no wrap of the new EK and cannot read the rewritten objects.
+//! `reseal_policy` re-seals `policy.json.sealed` for the new epoch (AD includes
+//! epoch). Hybrid recipients stay `Error::NotImplemented`. No new `Error` variant;
+//! errors never contain ISK.
+
 //! # Jev remainder (soft MCP)
 //!
 //! `jev` module: Choice `{allow, deny, ask}` on **non-prefix** intent only.
@@ -125,10 +141,10 @@
 
 pub mod aead;
 pub mod agent_ops;
-pub mod jev;
 pub mod chunk;
 pub mod event;
 pub mod hctr2;
+pub mod jev;
 pub mod kdf;
 pub mod keyfile;
 pub mod keyring;
@@ -137,6 +153,7 @@ pub mod name;
 pub mod object;
 pub mod policy;
 pub mod recipients;
+pub mod rotate;
 pub mod session;
 pub mod snapshot;
 pub mod token;
