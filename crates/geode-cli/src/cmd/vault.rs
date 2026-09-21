@@ -40,9 +40,12 @@ pub enum VaultCmd {
     /// not a flag here and `GEODE_TOKEN` never substitutes for `--key`.
     ///
     /// `epoch += 1`; remaining recipients wrap the new EK.
-    /// `--drop-recipient` + `--reseal` is the complete revocation path.
-    /// Without `--reseal`, a drop is incomplete revocation (old objects stay
-    /// under the old EK).
+    /// `--add-recipient PUB` wraps the new EK for an extra X25519 `.gpub`.
+    /// `--drop-recipient ID` + `--reseal` is the complete revocation path.
+    /// Without `--reseal`, a drop is incomplete revocation: the former
+    /// recipient still reads old objects (old EK stays wrapped for remaining
+    /// recipients). Do not fix incomplete revocation in policy — recipient
+    /// possession bypasses policy if the holder runs other software.
     Rotate(RotateArgs),
 }
 
@@ -78,10 +81,12 @@ pub struct RotateArgs {
     /// Vault directory.
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
-    /// Rewrite objects under the new EK (complete path with `--drop-recipient`).
+    /// Rewrite objects under the new EK. Paired with `--drop-recipient`, this
+    /// is the complete revocation path.
     #[arg(long)]
     pub reseal: bool,
-    /// Drop a recipient by `key_id` (hex). Incomplete without `--reseal`.
+    /// Drop a recipient by `key_id` (hex). Without `--reseal` this is
+    /// incomplete revocation: the former recipient still reads old objects.
     #[arg(long, value_name = "ID")]
     pub drop_recipient: Vec<String>,
     /// Wrap the new EK for an X25519 recipient `.gpub`.
