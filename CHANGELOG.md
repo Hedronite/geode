@@ -18,6 +18,7 @@ related:
   - "[[foundry/geode/SPEC-v027]]"
   - "[[foundry/geode/SPEC-v028]]"
   - "[[foundry/geode/SPEC-v029]]"
+  - "[[foundry/geode/specs/SPEC-v030]]"
 ---
 
 # Changelog
@@ -25,6 +26,19 @@ related:
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise). Foundry packs v021/v022 are milestones, not the git tag ([[foundry/SEMVER]]).
 
 ## [Unreleased]
+
+## [0.2.8] — 2026-09-22
+
+Compatible 0.x patch. Foundry pack **v030** (Linux mount session). No format change; `GDE1` objects from 0.2.7 remain readable. macOS live FUSE is not in this tag. Windows is not offered.
+
+### Added
+
+- On Linux, feature `fuse` runs a real FUSE session. Foreground is the default. `--daemon` forks and writes a pid file. `geode unmount` calls `fusermount3 -u`.
+- Kernel-free `MountSession` over the shipped VFS (read, write, create, mkdir, unlink, rename, fsync, persist on unmount, read-only rejects writes).
+
+### Changed
+
+- `geode mount --help` documents the Linux session, the read-write default versus `--read-only`, Darwin unsupported, and that Windows / WinFsp is not offered.
 
 ## [0.2.7] — 2026-09-22
 
