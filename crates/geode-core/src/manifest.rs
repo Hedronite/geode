@@ -22,11 +22,26 @@ pub struct Entry {
     pub bind: bool,
 }
 
+/// Manifest entry kind (03-format 5; `schemas/vault.manifest.schema.json`
+/// enum `file | dir | symlink`).
+///
+/// `Dir` carries no object body: the row names an `object_id` (the schema
+/// requires one) but no `.gobj` is written, and `plain_len` / `chunk_count`
+/// are 0. It exists so an empty directory survives unmount (08-mount 3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EntryKind {
     File,
+    Dir,
     Symlink,
+}
+
+impl EntryKind {
+    /// Is this row a directory (no object body; `plain_len` / `chunk_count` 0)?
+    #[must_use]
+    pub fn is_dir(self) -> bool {
+        matches!(self, Self::Dir)
+    }
 }
 
 /// Vault manifest header (03-format 5).
