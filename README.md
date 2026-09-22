@@ -52,7 +52,7 @@ It is not a FUSE mount, not a post-quantum suite, and not an interop layer for o
 | Binary | `geode` ([`geode-cli`](crates/geode-cli)) |
 | Library | [`geode-grotto`](crates/geode-core) (Rust import `geode_grotto`) |
 | TUI | [`geode-tui`](crates/geode-tui), default feature `tui` |
-| Version | **0.2.7** · [v0.2.7](https://github.com/Hedronite/geode/releases/tag/v0.2.7) · [CHANGELOG](CHANGELOG.md) |
+| Version | **0.2.8** · [v0.2.8](https://github.com/Hedronite/geode/releases/tag/v0.2.8) · [CHANGELOG](CHANGELOG.md) |
 | Rust | 1.85 |
 | License | [Apache-2.0](LICENSE) |
 
@@ -98,7 +98,7 @@ A `--no-default-features` build has no TUI: `geode tui` then exits 1.
 
 | Claim | Reality |
 |---|---|
-| Kernel FUSE mount | Not shipped. `geode mount` accepts read-write (omit `--read-only`) or `--read-only`, prints the UID-bypass warning, and exits 1 on Darwin. `--token` cannot mount. `geode open VAULT DST` still extracts plaintext. |
+| Kernel FUSE mount | Linux session shipped (`fuse` feature): foreground default, `--daemon` pid file, `geode unmount` via fusermount3. Darwin still exits 1. Windows is not offered. `--token` cannot mount. |
 | Post-quantum | Suite `0x01` only. No `pq` feature. |
 | Unix-socket MCP | `geode agent serve --stdio` ships. Socket transport exits 1. |
 | TUI unlock via token | The TUI is a human surface. `--token` / `GEODE_TOKEN` exist on token-gated agent verbs only. The TUI is Jev-free. |
@@ -131,7 +131,7 @@ vectors/v1/           # golden vectors: kdf, chunk, wrap, name
 
 ## Status
 
-Workspace **0.2.7** matches git tag [`v0.2.7`](https://github.com/Hedronite/geode/releases/tag/v0.2.7) and the crates.io versions of `geode-grotto` / `geode-tui` / `geode-cli`. GDE1 objects from 0.2.0 remain readable; the format is frozen at suite `0x01`.
+Workspace **0.2.8** matches git tag [`v0.2.8`](https://github.com/Hedronite/geode/releases/tag/v0.2.8) and the crates.io versions of `geode-grotto` / `geode-tui` / `geode-cli`. GDE1 objects from 0.2.0 remain readable; the format is frozen at suite `0x01`.
 
 Shipped on this tag:
 
@@ -139,7 +139,7 @@ Shipped on this tag:
 - `vault init`, `seal`, `open`, `verify`, `list`, `cat` (`--max-bytes`)
 - `--seal-names`, `snapshot create|ls`, `gc`
 - Operator TUI (`geode tui [VAULT]`, default feature `tui`)
-- `geode mount VAULT MOUNTPOINT`: omit `--read-only` for read-write, or pass `--read-only`. Live FUSE still exits 1. `--token` cannot mount
+- `geode mount VAULT MOUNTPOINT`: Linux runs a FUSE session (feature `fuse`). Omit `--read-only` for read-write. Darwin still exits 1. `--token` cannot mount
 - Agent plane: `token issue|inspect`, `agent list|read|write`, `agent serve --stdio`
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): `cargo test --workspace --locked` and `clippy -D warnings` on `ubuntu-latest`.
