@@ -113,14 +113,14 @@ enum Commands {
     /// one, or dry-run an op against it.
     Policy(PolicyArgs),
     /// Mount a vault at MOUNTPOINT (08-mount). On Linux with feature
-    /// `fuse`, this runs a real FUSE session: foreground is the default
+    /// `fuse`, this runs a real `FUSE` session: foreground is the default
     /// and blocks until unmount; `--daemon` forks and writes a pid file
     /// (08-mount 3, 6). Default is READ-WRITE: omitting `--read-only`
     /// accepts a read-write mount (copy-on-write chunk writes, manifest
     /// mutations, fsync per 08-mount 3). Pass `--read-only` for a
     /// read-only mount — the recommended default for agent-adjacent
     /// mounts (08-mount 7). Darwin is unsupported (exit 1); macOS live
-    /// FUSE is a later slice. Windows / WinFsp is not offered. Every
+    /// `FUSE` is a later slice. Windows / `WinFsp` is not offered. Every
     /// attempt prints the UID-bypass warning FIRST, before any refusal:
     ///
     ///   warning: a mount is a policy bypass for any process of that UID
