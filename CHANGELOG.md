@@ -3,7 +3,7 @@ title: Geode changelog
 type: repo-changelog
 status: current
 created: "2026-09-15"
-updated: "2026-09-21"
+updated: "2026-09-22"
 related:
   - "[[foundry/geode/geode-spec-0.0.0/SPEC]]"
   - "[[foundry/geode/geode-spec-0.0.0/12-roadmap]]"
@@ -16,6 +16,7 @@ related:
   - "[[foundry/geode/SPEC-v025]]"
   - "[[foundry/geode/SPEC-v026]]"
   - "[[foundry/geode/SPEC-v027]]"
+  - "[[foundry/geode/SPEC-v028]]"
 ---
 
 # Changelog
@@ -23,6 +24,14 @@ related:
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise). Foundry packs v021/v022 are milestones, not the git tag ([[foundry/SEMVER]]).
 
 ## [Unreleased]
+
+## [0.2.6] — 2026-09-22
+
+Compatible 0.x patch. Foundry pack **v028** (git sidecar + hooks). No format change; `GDE1` objects from 0.2.5 remain readable.
+
+### Added
+
+- `geode git init|add|status|unlock|lock`. BIND_PATHS git-mode seal. Add gitignores plaintext; lock unlinks working copies (not a crypto op). `--token` cannot git-init/add. Help documents GitHub-visible metadata (counts, sizes, tree, times, recipient key ids).
 
 ## [0.2.5] — 2026-09-21
 
