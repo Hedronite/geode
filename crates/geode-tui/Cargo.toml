@@ -22,7 +22,7 @@ default = ["tui"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:rpassword", "dep:zeroize", "dep:serde_json", "dep:blake3"]
 
 [dependencies]
-geode-grotto = { version = "0.2.6", path = "../geode-core" }
+geode-grotto = { version = "0.2.7", path = "../geode-core" }
 
 [dependencies.ratatui]
 version = "0.30"
