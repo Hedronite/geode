@@ -18,10 +18,14 @@ default = ["tui"]
 # (--no-default-features) compiles with no ratatui and answers
 # `geode tui` with exit 1.
 tui = ["dep:geode-tui"]
+# Linux FUSE (08-mount 2). Off by default so Darwin and GHA cargo test
+# stay green without /dev/fuse. fuser stays out of geode-grotto.
+fuse = ["dep:fuser"]
 
 [dependencies]
 geode-grotto = { version = "0.2.7", path = "../geode-core" }
 geode-tui = { version = "0.2.7", path = "../geode-tui", optional = true }
+fuser = { version = "0.15.1", optional = true }
 blake3 = "1"
 base64ct = { version = "1", features = ["alloc"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
