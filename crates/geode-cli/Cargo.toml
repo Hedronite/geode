@@ -18,8 +18,9 @@ default = ["tui"]
 # (--no-default-features) compiles with no ratatui and answers
 # `geode tui` with exit 1.
 tui = ["dep:geode-tui"]
-# Linux FUSE (08-mount 2). Off by default so Darwin and GHA cargo test
-# stay green without /dev/fuse. fuser stays out of geode-grotto.
+# Linux FUSE and Darwin FUSE-T / macFUSE (08-mount 2). Off by default so
+# Darwin and GHA cargo test stay green without a driver or /dev/fuse.
+# fuser stays out of geode-grotto. A missing Darwin driver exits 1.
 fuse = ["dep:fuser"]
 
 [dependencies]

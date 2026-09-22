@@ -11,8 +11,10 @@
 //! - Every mount attempt prints the UID-bypass warning BEFORE giving up
 //!   (08-mount 7: "A mount is a policy bypass for any process of that
 //!   UID" — printed every time, including on Darwin).
-//! - Darwin: the live session is unsupported and mount exits 1. Feature
-//!   `fuse` is not the default, so `cargo test` never needs `/dev/fuse`.
+//! - Darwin: a missing FUSE-T or macFUSE driver exits 1 and names both.
+//!   Unmount calls `umount`. Feature `fuse` is not the default, so
+//!   `cargo test` never needs a driver or `/dev/fuse`. Linux unmount
+//!   still calls `fusermount3 -u`.
 //! - The agent toolset has no `geode_mount` (06-agent-plane 3); nothing
 //!   here changes the MCP surface.
 
@@ -24,13 +26,19 @@ use std::path::PathBuf;
 #[cfg(all(feature = "fuse", target_os = "linux"))]
 use std::process::{Command, Stdio};
 
-use geode_grotto::{Error, Result};
+#[cfg(not(target_os = "macos"))]
+use geode_grotto::Error;
+use geode_grotto::Result;
 
 use crate::{GlobalArgs, OutMode};
 
 #[cfg(all(feature = "fuse", target_os = "linux"))]
 #[path = "../fuse_linux.rs"]
 mod fuse_linux;
+
+#[cfg(target_os = "macos")]
+#[path = "../fuse_macos.rs"]
+mod fuse_macos;
 
 /// 08-mount 7, printed on EVERY mount attempt (before giving up).
 const UID_BYPASS_WARNING: &str =
@@ -45,7 +53,7 @@ const DAEMON_CHILD: &str = "GEODE_MOUNT_DAEMON_CHILD";
 /// Omitting `--read-only` accepts a read-write mount. `--read-only` accepts
 /// a read-only mount. On Linux with feature `fuse`, foreground is the
 /// default and blocks until unmount. `--daemon` re-execs and writes a pid
-/// file. Darwin stays unsupported (exit 1).
+/// file. On Darwin, a missing FUSE-T or macFUSE driver exits 1.
 pub fn mount(
     vault: &Path,
     mountpoint: &Path,
@@ -71,7 +79,12 @@ pub fn mount(
         }
         fuse_linux::mount_foreground(vault, mountpoint, read_only, &key)
     }
-    #[cfg(not(all(feature = "fuse", target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        let _ = daemon;
+        fuse_macos::mount_foreground(vault, mountpoint, read_only, &key)
+    }
+    #[cfg(not(any(all(feature = "fuse", target_os = "linux"), target_os = "macos")))]
     {
         let _ = (vault, mountpoint, daemon, key);
         Err(Error::Format(format!(
@@ -89,7 +102,11 @@ pub fn unmount(mountpoint: &Path, global: &GlobalArgs, out: OutMode) -> Result<(
     {
         fuse_linux::unmount_mountpoint(mountpoint)
     }
-    #[cfg(not(all(feature = "fuse", target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        fuse_macos::unmount_mountpoint(mountpoint)
+    }
+    #[cfg(not(any(all(feature = "fuse", target_os = "linux"), target_os = "macos")))]
     {
         let _ = mountpoint;
         Err(Error::Format(
@@ -145,7 +162,10 @@ fn mount_id(vault: &Path) -> String {
 
 /// Mode clause after the platform refusal. Observable without a kernel:
 /// omitting `--read-only` is read-write; the flag stays read-only.
-#[cfg_attr(all(feature = "fuse", target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    any(target_os = "macos", all(feature = "fuse", target_os = "linux")),
+    allow(dead_code)
+)]
 fn accepted_mode(read_only: bool) -> &'static str {
     if read_only {
         "accepted read-only"
@@ -156,7 +176,10 @@ fn accepted_mode(read_only: bool) -> &'static str {
 
 /// The platform-specific refusal line for a mount attempt. Kept as a
 /// helper so the error text is testable without a kernel.
-#[cfg_attr(all(feature = "fuse", target_os = "linux"), allow(dead_code))]
+#[cfg_attr(
+    any(target_os = "macos", all(feature = "fuse", target_os = "linux")),
+    allow(dead_code)
+)]
 #[must_use]
 pub fn unsupported_message() -> &'static str {
     #[cfg(target_os = "macos")]

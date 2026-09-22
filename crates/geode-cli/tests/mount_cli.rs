@@ -1,5 +1,9 @@
-//! G1 (v0.2.8) — mount CLI fixtures against the shipped `geode` binary
-//! (08-mount).
+//! Mount CLI fixtures against the shipped `geode` binary (08-mount).
+//!
+//! G0 (v0.2.9): on Darwin, a missing FUSE-T or macFUSE driver exits 1 and
+//! the error names both. `--token` stays unexpected. The UID-bypass warning
+//! is still the first stderr line. Linux unmount still calls `fusermount3`
+//! with `-u` (source check; this host does not run that helper).
 //!
 //! Drives `target/debug/geode` (via `CARGO_BIN_EXE_geode`):
 //!
@@ -90,8 +94,8 @@ fn assert_live_exit_1(out: &Output, what: &str) {
     assert_eq!(out.status.code(), Some(1), "{what}: {err}");
     #[cfg(target_os = "macos")]
     assert!(
-        err.contains("unsupported on Darwin"),
-        "{what} Darwin names the unsupported platform: {err}"
+        err.contains("FUSE-T") && err.contains("macFUSE"),
+        "{what} names FUSE-T or macFUSE: {err}"
     );
     #[cfg(not(target_os = "macos"))]
     assert!(
@@ -146,6 +150,13 @@ fn mount_without_read_only_is_read_write() {
         !err.contains("only --read-only mounts are supported"),
         "bare mount must not refuse for missing --read-only: {err}"
     );
+    #[cfg(target_os = "macos")]
+    {
+        assert!(
+            err.contains("FUSE-T") && err.contains("macFUSE"),
+            "missing driver names FUSE-T or macFUSE: {err}"
+        );
+    }
     assert_no_isk(&bare, dir, "bare mount");
 }
 
@@ -278,6 +289,44 @@ fn unmount_is_documented_exit_1() {
     assert!(
         !stderr(&out).contains(WARNING),
         "unmount does not print the mount warning"
+    );
+    #[cfg(target_os = "macos")]
+    {
+        let err = stderr(&out);
+        assert!(
+            !err.contains("fusermount3"),
+            "Darwin unmount must not report fusermount3: {err}"
+        );
+    }
+}
+
+/// Linux `geode unmount` still execs `fusermount3 -u`. Darwin unmount is
+/// `umount`. The macOS session calls `MountSession`.
+#[test]
+fn linux_unmount_still_calls_fusermount3_dash_u() {
+    let linux = include_str!("../src/fuse_linux.rs");
+    let start = linux.find("fn unmount_mountpoint").expect("linux unmount");
+    let body = &linux[start..];
+    assert!(
+        body.contains("Command::new(\"fusermount3\")"),
+        "Linux unmount must still exec fusermount3"
+    );
+    assert!(
+        body.contains(".arg(\"-u\")"),
+        "Linux unmount must still pass -u"
+    );
+    let macos = include_str!("../src/fuse_macos.rs");
+    assert!(
+        !macos.contains("fusermount3"),
+        "Darwin session must not call fusermount3"
+    );
+    assert!(
+        macos.contains("Command::new(\"umount\")"),
+        "Darwin unmount uses umount"
+    );
+    assert!(
+        macos.contains("MountSession::open"),
+        "macOS session calls MountSession"
     );
 }
 
