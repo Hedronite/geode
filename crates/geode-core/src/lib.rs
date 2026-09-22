@@ -158,6 +158,7 @@ pub mod kdf;
 pub mod keyfile;
 pub mod keyring;
 pub mod manifest;
+pub mod mount_session;
 pub mod name;
 pub mod object;
 pub mod policy;
