@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Args;
-use geode_grotto::manifest::EntryKind;
+use geode_grotto::manifest::{Entry, EntryKind};
 use geode_grotto::{object, vault as corevault, Error, Result};
 
 use crate::{cmd, GlobalArgs, OutMode};
@@ -50,6 +50,22 @@ pub fn normalize_prefix(prefix: &str) -> String {
     }
 }
 
+/// Read + authenticate + decrypt one entry's plaintext object (03-format 4).
+///
+/// Only `file` / `symlink` rows name a `.gobj`; a `kind: dir` row does not
+/// (G0 v0.2.9 dir rows), so callers must not reach here for a directory.
+fn read_entry_plaintext(ctx: &cmd::VaultCtx, vault: &Path, e: &Entry) -> Result<Vec<u8>> {
+    let raw = corevault::read_object(vault, ctx.epoch, &e.object_id)?;
+    let bind: &[u8] = if e.bind { e.path.as_bytes() } else { b"" };
+    let (_, data) = object::open_object(
+        &ctx.ek,
+        &raw[..object::HEADER_SIZE],
+        &raw[object::HEADER_SIZE..],
+        bind,
+    )?;
+    Ok(data)
+}
+
 pub fn run(args: &OpenArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     let key_path = cmd::require_key(global)?;
     let isk = cmd::load_isk(&key_path)?;
@@ -74,9 +90,7 @@ pub fn run(args: &OpenArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         )
     };
     if dst_abs.starts_with(&vault_c) {
-        return Err(Error::Format(
-            "refusing to open a vault into itself".into(),
-        ));
+        return Err(Error::Format("refusing to open a vault into itself".into()));
     }
 
     let prefix = args.prefix.as_deref().map(normalize_prefix);
@@ -97,28 +111,32 @@ pub fn run(args: &OpenArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(Error::Io)?;
         }
-        let raw = corevault::read_object(&args.vault, ctx.epoch, &e.object_id)?;
-        let bind: &[u8] = if e.bind { e.path.as_bytes() } else { b"" };
-        let (_, data) = object::open_object(
-            &ctx.ek,
-            &raw[..object::HEADER_SIZE],
-            &raw[object::HEADER_SIZE..],
-            bind,
-        )?;
         match e.kind {
+            // A `kind: dir` row names no `.gobj` (03-format 5): materialize
+            // the directory and never read an object for it (G0 v0.2.9).
+            EntryKind::Dir => {
+                std::fs::create_dir_all(&target).map_err(Error::Io)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(e.mode))
+                        .map_err(Error::Io)?;
+                }
+            }
             EntryKind::File => {
+                let data = read_entry_plaintext(&ctx, &args.vault, e)?;
                 corevault::write_atomic(&target, &data)?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(
-                        &target,
-                        std::fs::Permissions::from_mode(e.mode),
-                    )
-                    .map_err(Error::Io)?;
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(e.mode))
+                        .map_err(Error::Io)?;
                 }
+                files += 1;
+                plain_bytes += data.len() as u64;
             }
             EntryKind::Symlink => {
+                let data = read_entry_plaintext(&ctx, &args.vault, e)?;
                 #[cfg(unix)]
                 {
                     let target_str = String::from_utf8_lossy(&data).into_owned();
@@ -128,11 +146,13 @@ pub fn run(args: &OpenArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
                     std::os::unix::fs::symlink(target_str, &target).map_err(Error::Io)?;
                 }
                 #[cfg(not(unix))]
-                return Err(Error::Format("symlinks unsupported on this platform".into()));
+                return Err(Error::Format(
+                    "symlinks unsupported on this platform".into(),
+                ));
+                files += 1;
+                plain_bytes += data.len() as u64;
             }
         }
-        files += 1;
-        plain_bytes += data.len() as u64;
     }
 
     cmd::emit(
