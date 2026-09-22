@@ -17,6 +17,7 @@ related:
   - "[[foundry/geode/SPEC-v026]]"
   - "[[foundry/geode/SPEC-v027]]"
   - "[[foundry/geode/SPEC-v028]]"
+  - "[[foundry/geode/SPEC-v029]]"
 ---
 
 # Changelog
@@ -24,6 +25,16 @@ related:
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise). Foundry packs v021/v022 are milestones, not the git tag ([[foundry/SEMVER]]).
 
 ## [Unreleased]
+
+## [0.2.7] — 2026-09-22
+
+Compatible 0.x patch. Foundry pack **v029** (read-write mount acceptance). No format change; `GDE1` objects from 0.2.6 remain readable. A live FUSE session is still unsupported.
+
+### Added
+
+- `geode mount` without `--read-only` is read-write. `--read-only` stays read-only and is still the recommended agent-adjacent default. Darwin live `geode mount` exits 1. `--token` cannot mount. Every mount prints the UID-bypass warning.
+- Manifest entries may be `kind: dir`. `mkdir` persists that row (no `.gobj` body). `geode open` creates the directory and does not read an object for it.
+- `geode mount --help` documents the read-write default versus `--read-only`. No key bytes in the help.
 
 ## [0.2.6] — 2026-09-22
 
