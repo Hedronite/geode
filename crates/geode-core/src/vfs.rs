@@ -317,6 +317,19 @@ fn is_a_directory(what: &str) -> Error {
     Error::Format(format!("vfs: {what} is a directory"))
 }
 
+/// Convert a byte offset / length to a `usize` index without truncating.
+///
+/// Every caller has already bounded the value to [`MAX_FILE_LEN`] (which fits a
+/// 32-bit `usize`), but an explicit fallible conversion keeps this correct on
+/// every target instead of relying on the pointer width.
+fn to_index(n: u64, what: &str) -> Result<usize> {
+    usize::try_from(n).map_err(|_| {
+        Error::Format(format!(
+            "vfs: {what} {n} does not fit this platform's usize"
+        ))
+    })
+}
+
 fn parent_of(path: &str) -> &str {
     match path.rsplit_once('/') {
         Some((p, _)) => p,
@@ -346,7 +359,6 @@ fn bind_for(entry: &Entry) -> Vec<u8> {
 }
 
 /// Slice an in-memory buffer the way [`read_range`] slices plaintext.
-#[allow(clippy::cast_possible_truncation)]
 fn slice_buffer(buf: &[u8], off: u64, len: u64) -> Result<Vec<u8>> {
     if len == 0 {
         return Ok(Vec::new());
@@ -361,7 +373,8 @@ fn slice_buffer(buf: &[u8], off: u64, len: u64) -> Result<Vec<u8>> {
         return Ok(Vec::new());
     }
     let end = off.saturating_add(len).min(total);
-    Ok(buf[off as usize..end as usize].to_vec())
+    let (lo, hi) = (to_index(off, "read offset")?, to_index(end, "read end")?);
+    Ok(buf[lo..hi].to_vec())
 }
 
 impl Vfs {
@@ -601,13 +614,14 @@ impl Vfs {
         }
         self.ensure_handle(&norm, &entry)?;
         let cs = u64::from(self.chunk_size);
+        let (off_i, end_i) = (to_index(off, "write offset")?, to_index(end, "write end")?);
         let h = self.handle_mut(&norm)?;
         let old_len = h.plain.len() as u64;
         if end > old_len {
-            h.plain.resize(end as usize, 0);
+            h.plain.resize(end_i, 0);
         }
         let start = off.min(old_len);
-        h.plain[off as usize..end as usize].copy_from_slice(data);
+        h.plain[off_i..end_i].copy_from_slice(data);
         for i in start / cs..=(end - 1) / cs {
             h.dirty_chunks.insert(i);
         }
@@ -657,6 +671,7 @@ impl Vfs {
         }
         self.ensure_handle(&norm, &entry)?;
         let cs = u64::from(self.chunk_size);
+        let len_i = to_index(len, "truncate length")?;
         let h = self.handle_mut(&norm)?;
         let old_len = h.plain.len() as u64;
         if len == old_len {
@@ -667,7 +682,7 @@ impl Vfs {
         for i in lo / cs..=(hi - 1) / cs {
             h.dirty_chunks.insert(i);
         }
-        h.plain.resize(len as usize, 0);
+        h.plain.resize(len_i, 0);
         h.dirty = true;
         self.dirty = true;
         Ok(())
@@ -784,7 +799,7 @@ impl Vfs {
             // directories have no row and ride along in the map below.
             if let Some(e) = self.manifest.entries.iter_mut().find(|e| e.path == from) {
                 debug_assert!(e.kind.is_dir(), "a dirs-map entry without a dir row");
-                e.path = to.clone();
+                e.path.clone_from(&to);
                 e.mtime_ms = now_ms;
             }
             let moved: Vec<String> = self
@@ -811,7 +826,7 @@ impl Vfs {
         } else if let Some(entry) = self.entry_at(&from) {
             debug_assert_eq!(entry.path, from);
             if let Some(e) = self.manifest.entries.iter_mut().find(|e| e.path == from) {
-                e.path = to.clone();
+                e.path.clone_from(&to);
                 e.mtime_ms = now_ms;
             }
             self.touch_dir(parent_of(&to), now_ms);
@@ -967,7 +982,7 @@ impl Vfs {
                 } else {
                     format!("{to_prefix}{}", k.strip_prefix(from_prefix).unwrap_or(""))
                 };
-                h.path = nk.clone();
+                h.path.clone_from(&nk);
                 self.open.insert(nk, h);
             }
         }
@@ -1376,10 +1391,11 @@ mod tests {
         );
 
         let new_pt = read_range(&ek(), &root, Epoch(1), new, b"", 0, total).unwrap();
+        let off_i = usize::try_from(off).unwrap();
         assert_eq!(new_pt.len(), body.len());
-        assert_eq!(&new_pt[off as usize..off as usize + 3], b"XYZ");
-        assert_eq!(&new_pt[..off as usize], &body[..off as usize]);
-        assert_eq!(&new_pt[off as usize + 3..], &body[off as usize + 3..]);
+        assert_eq!(&new_pt[off_i..off_i + 3], b"XYZ");
+        assert_eq!(&new_pt[..off_i], &body[..off_i]);
+        assert_eq!(&new_pt[off_i + 3..], &body[off_i + 3..]);
     }
 
     #[test]
@@ -1390,16 +1406,14 @@ mod tests {
         vfs.create("sparse.bin", 0o644, 0).unwrap();
         vfs.write("sparse.bin", 0, b"abc").unwrap();
         let off = u64::from(CS) + 3;
+        let off_i = usize::try_from(off).unwrap();
         vfs.write("sparse.bin", off, b"Z").unwrap();
         let oid = vfs.fsync("sparse.bin", 1).unwrap();
         let end = off + 1;
         let got = read_range(&ek(), &root, Epoch(1), oid, b"", 0, end).unwrap();
         assert_eq!(&got[..3], b"abc");
-        assert!(
-            got[3..off as usize].iter().all(|b| *b == 0),
-            "sparse hole is zero"
-        );
-        assert_eq!(got[off as usize], b'Z');
+        assert!(got[3..off_i].iter().all(|b| *b == 0), "sparse hole is zero");
+        assert_eq!(got[off_i], b'Z');
         assert_eq!(got.len() as u64, end);
     }
 
@@ -1431,12 +1445,13 @@ mod tests {
 
         // Shrink: only the chunks that lost bytes are dirty (chunks 1 and 2).
         let shrunk = u64::from(CS) + 5;
+        let shrunk_i = usize::try_from(shrunk).unwrap();
         vfs.truncate("f.bin", shrunk).unwrap();
         assert_eq!(vfs.dirty_chunks("f.bin").unwrap(), vec![1, 2]);
         let oid = vfs.fsync("f.bin", 20).unwrap();
         assert_eq!(
             read_range(&ek(), &root, Epoch(1), oid, b"", 0, shrunk).unwrap(),
-            &body[..shrunk as usize]
+            &body[..shrunk_i]
         );
         assert!(
             read_range(&ek(), &root, Epoch(1), oid, b"", shrunk, 10)
@@ -1451,8 +1466,8 @@ mod tests {
         let oid2 = vfs.fsync("f.bin", 30).unwrap();
         let got = read_range(&ek(), &root, Epoch(1), oid2, b"", 0, grown).unwrap();
         assert_eq!(got.len() as u64, grown);
-        assert_eq!(&got[..shrunk as usize], &body[..shrunk as usize]);
-        assert!(got[shrunk as usize..].iter().all(|b| *b == 0));
+        assert_eq!(&got[..shrunk_i], &body[..shrunk_i]);
+        assert!(got[shrunk_i..].iter().all(|b| *b == 0));
     }
 
     #[test]
