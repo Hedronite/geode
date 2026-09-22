@@ -112,10 +112,13 @@ enum Commands {
     /// Policy document (10-policy): show the effective policy, seal a new
     /// one, or dry-run an op against it.
     Policy(PolicyArgs),
-    /// Mount a vault read-only at MOUNTPOINT (08-mount). Foreground is the
-    /// default (`--daemon` is parsed but not honored until the FUSE session
-    /// lands). Every attempt prints the UID-bypass warning FIRST, before any
-    /// refusal:
+    /// Mount a vault at MOUNTPOINT (08-mount). Default is READ-WRITE:
+    /// omitting `--read-only` accepts a read-write mount (copy-on-write
+    /// chunk writes, manifest mutations, fsync per 08-mount 3). Pass
+    /// `--read-only` for a read-only mount — the recommended default for
+    /// agent-adjacent mounts. Foreground is the default (`--daemon` is
+    /// parsed but not honored until the FUSE session lands). Every attempt
+    /// prints the UID-bypass warning FIRST, before any refusal:
     ///
     ///   warning: a mount is a policy bypass for any process of that UID
     ///   (08-mount 5)
@@ -128,7 +131,9 @@ enum Commands {
         /// Mountpoint directory.
         #[arg(value_name = "MOUNTPOINT")]
         mountpoint: PathBuf,
-        /// Read-only mount (the only mode this pack).
+        /// Mount read-only. Omitting this flag mounts READ-WRITE;
+        /// `--read-only` is the recommended default for agent-adjacent
+        /// mounts (08-mount 7).
         #[arg(long)]
         read_only: bool,
         /// Fork to background (08-mount 3; not honored until FUSE lands).
