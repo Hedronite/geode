@@ -1,15 +1,20 @@
-//! G1 (v0.2.5) — mount CLI fixtures against the shipped `geode` binary
+//! G1 (v0.2.9) — mount CLI fixtures against the shipped `geode` binary
 //! (08-mount).
 //!
 //! Drives `target/debug/geode` (via `CARGO_BIN_EXE_geode`):
 //!
-//! 1. `mount_warns_then_refuses` — every mount attempt prints the
-//!    UID-bypass warning BEFORE giving up: without `--read-only` (usage,
-//!    exit 1) and with it (unsupported on this build, exit 1). The
-//!    warning is on stderr in both cases.
-//! 2. `unmount_is_documented_exit_1` — `geode unmount MOUNTPOINT` exists
-//!    and exits 1 (usage) until the FUSE session lands; no UID-bypass
-//!    warning (unmount removes the bypass).
+//! 1. `mount_without_read_only_is_read_write` — `geode mount VAULT MP`
+//!    with `--key` and without `--read-only` is accepted read-write.
+//!    Live FUSE still exits 1 (Darwin: unsupported). The UID-bypass
+//!    warning is on stderr. The old "only --read-only" refusal is gone.
+//! 2. `mount_read_only_stays_read_only` — `--read-only` is accepted
+//!    read-only, still exit 1, warning still printed.
+//! 3. `mount_requires_key` — missing `--key` exits 1 after the warning.
+//!    `GEODE_TOKEN` does not substitute.
+//! 4. `mount_token_cannot_mount` — `--token` is unexpected, with or
+//!    without `--key`.
+//! 5. `unmount_is_documented_exit_1` — `geode unmount MOUNTPOINT` exits 1
+//!    until the FUSE session lands; no UID-bypass warning.
 //!
 //! The MCP toolset invariant (no `geode_mount` in tools/list) is covered
 //! by `agent_plane.rs::serve_stdio_mcp`, which asserts the exact
@@ -24,48 +29,212 @@ fn geode(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_geode"))
         .args(args)
         .current_dir(dir)
+        .env_remove("GEODE_TOKEN")
+        .env_remove("GEODE_KEY_FILE")
+        .env_remove("GEODE_PASSPHRASE")
+        .env("HOME", dir)
+        .env("XDG_CONFIG_HOME", dir.join("xdg"))
+        .output()
+        .expect("spawn geode")
+}
+
+fn geode_with_token_env(dir: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_geode"))
+        .args(args)
+        .current_dir(dir)
+        .env("GEODE_TOKEN", "deadbeef")
+        .env_remove("GEODE_KEY_FILE")
+        .env_remove("GEODE_PASSPHRASE")
+        .env("HOME", dir)
+        .env("XDG_CONFIG_HOME", dir.join("xdg"))
         .output()
         .expect("spawn geode")
 }
 
 const WARNING: &str = "a mount is a policy bypass for any process of that UID";
 
+fn stderr(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+fn stdout(out: &Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn combined(out: &Output) -> String {
+    let mut s = stdout(out);
+    s.push_str(&stderr(out));
+    s
+}
+
+fn assert_warning(out: &Output, what: &str) {
+    let err = stderr(out);
+    assert!(err.contains(WARNING), "{what} warning on stderr: {err}");
+    assert!(
+        !stdout(out).contains(WARNING),
+        "{what} warning never on stdout: {}",
+        stdout(out)
+    );
+}
+
+fn assert_live_exit_1(out: &Output, what: &str) {
+    let err = stderr(out);
+    assert_eq!(out.status.code(), Some(1), "{what}: {err}");
+    #[cfg(target_os = "macos")]
+    assert!(
+        err.contains("unsupported on Darwin"),
+        "{what} Darwin names the unsupported platform: {err}"
+    );
+    #[cfg(not(target_os = "macos"))]
+    assert!(
+        err.contains("not in this build"),
+        "{what} live FUSE is not in this build: {err}"
+    );
+}
+
+fn isk_hex(dir: &Path, gkey: &str) -> String {
+    let raw = std::fs::read(dir.join(gkey)).expect("read gkey");
+    raw[6..38].iter().fold(String::new(), |mut acc, b| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
+}
+
+fn assert_no_isk(out: &Output, dir: &Path, what: &str) {
+    let text = combined(out);
+    let hex = isk_hex(dir, "k.gkey");
+    assert!(!text.contains(&hex), "{what} leaked ISK hex: {text}");
+    assert!(!text.contains("ISK"), "{what} leaked ISK marker: {text}");
+}
+
+fn setup_key(dir: &Path) {
+    let out = geode(dir, &["keygen", "k.gkey"]);
+    assert!(out.status.success(), "keygen: {}", combined(&out));
+}
+
 #[test]
-fn mount_warns_then_refuses() {
+fn mount_without_read_only_is_read_write() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_key(dir);
+
+    let bare = geode(dir, &["--key", "k.gkey", "mount", "v.geode", "mp"]);
+    assert_live_exit_1(&bare, "bare mount");
+    assert_warning(&bare, "bare mount");
+    let err = stderr(&bare);
+    assert!(
+        err.contains("accepted read-write"),
+        "omitting --read-only is read-write: {err}"
+    );
+    assert!(
+        !err.contains("accepted read-only"),
+        "bare mount must not be read-only: {err}"
+    );
+    assert!(
+        !err.contains("only --read-only mounts are supported"),
+        "bare mount must not refuse for missing --read-only: {err}"
+    );
+    assert_no_isk(&bare, dir, "bare mount");
+}
+
+#[test]
+fn mount_read_only_stays_read_only() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_key(dir);
+
+    let ro = geode(
+        dir,
+        &["--key", "k.gkey", "mount", "v.geode", "mp", "--read-only"],
+    );
+    assert_live_exit_1(&ro, "read-only mount");
+    assert_warning(&ro, "read-only mount");
+    let err = stderr(&ro);
+    assert!(
+        err.contains("accepted read-only"),
+        "--read-only stays read-only: {err}"
+    );
+    assert!(
+        !err.contains("accepted read-write"),
+        "--read-only must not be read-write: {err}"
+    );
+    assert_no_isk(&ro, dir, "read-only mount");
+}
+
+#[test]
+fn mount_requires_key() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
 
-    // Without --read-only: usage error, exit 1, warning printed first.
-    let bare = geode(dir, &["mount", "v.geode", "mp"]);
+    let no_key = geode(dir, &["mount", "v.geode", "mp"]);
     assert_eq!(
-        bare.status.code(),
+        no_key.status.code(),
         Some(1),
-        "bare mount: {}",
-        String::from_utf8_lossy(&bare.stderr)
+        "missing --key: {}",
+        stderr(&no_key)
     );
-    let stderr = String::from_utf8_lossy(&bare.stderr);
-    assert!(stderr.contains(WARNING), "warning on stderr: {stderr}");
+    assert_warning(&no_key, "missing --key");
+    let err = stderr(&no_key);
+    assert!(err.contains("missing --key"), "mount requires --key: {err}");
     assert!(
-        !String::from_utf8_lossy(&bare.stdout).contains(WARNING),
-        "warning never on stdout"
+        !err.contains("accepted read-write"),
+        "missing --key is not an accepted mount: {err}"
     );
 
-    // With --read-only: still exit 1 (no FUSE session in this build;
-    // Darwin is unsupported), but the warning is still printed.
-    let ro = geode(dir, &["mount", "v.geode", "mp", "--read-only"]);
+    // GEODE_TOKEN never substitutes for --key.
+    let token_env = geode_with_token_env(dir, &["mount", "v.geode", "mp"]);
     assert_eq!(
-        ro.status.code(),
+        token_env.status.code(),
         Some(1),
-        "read-only mount: {}",
-        String::from_utf8_lossy(&ro.stderr)
+        "GEODE_TOKEN: {}",
+        stderr(&token_env)
     );
-    let stderr = String::from_utf8_lossy(&ro.stderr);
-    assert!(stderr.contains(WARNING), "warning on stderr: {stderr}");
-    #[cfg(target_os = "macos")]
+    assert_warning(&token_env, "GEODE_TOKEN");
+    let err = stderr(&token_env);
     assert!(
-        stderr.contains("unsupported on Darwin"),
-        "Darwin names the unsupported platform: {stderr}"
+        err.contains("missing --key"),
+        "GEODE_TOKEN must not satisfy --key: {err}"
     );
+    assert!(
+        !err.contains("deadbeef"),
+        "token bytes must not be echoed: {err}"
+    );
+    assert!(
+        !err.contains("accepted read-write"),
+        "GEODE_TOKEN must not mount: {err}"
+    );
+}
+
+#[test]
+fn mount_token_cannot_mount() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_key(dir);
+
+    for (args, what) in [
+        (
+            &["mount", "v.geode", "mp", "--token", "x"][..],
+            "mount --token",
+        ),
+        (
+            &["--key", "k.gkey", "mount", "v.geode", "mp", "--token", "x"][..],
+            "mount --key --token",
+        ),
+    ] {
+        let out = geode(dir, args);
+        let text = combined(&out);
+        assert_eq!(out.status.code(), Some(1), "{what}: {text}");
+        assert!(
+            text.to_ascii_lowercase().contains("unexpected"),
+            "{what} must be unexpected --token, got: {text}"
+        );
+        assert!(
+            !text.contains("accepted read-write") && !text.contains("accepted read-only"),
+            "{what} must not accept a mount: {text}"
+        );
+        assert_no_isk(&out, dir, what);
+    }
 }
 
 #[test]
@@ -73,14 +242,9 @@ fn unmount_is_documented_exit_1() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
     let out = geode(dir, &["unmount", "mp"]);
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "unmount: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert_eq!(out.status.code(), Some(1), "unmount: {}", stderr(&out));
     assert!(
-        !String::from_utf8_lossy(&out.stderr).contains(WARNING),
+        !stderr(&out).contains(WARNING),
         "unmount does not print the mount warning"
     );
 }
@@ -91,7 +255,7 @@ fn mount_verbs_in_help() {
     let dir = tmp.path();
     let help = geode(dir, &["--help"]);
     assert!(help.status.success());
-    let text = String::from_utf8_lossy(&help.stdout);
+    let text = stdout(&help);
     assert!(text.contains("mount"), "help lists mount: {text}");
     assert!(text.contains("unmount"), "help lists unmount: {text}");
 }
