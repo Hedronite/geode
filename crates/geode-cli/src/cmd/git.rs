@@ -1,8 +1,11 @@
 //! `geode git` — git sidecar verbs (init, add, status, unlock, lock).
 //!
-//! Thin adapter over `geode_grotto::sidecar` (09-git; SPEC-v028 G1).
+//! Thin adapter over `geode_grotto::sidecar` (09-git; SPEC-v028 G1/G2).
 //! `--key` is required. `--token` is not a flag here; `GEODE_TOKEN` never
-//! substitutes. Clap help chrome is G2.
+//! substitutes.
+//!
+//! Clap help (G2a): GitHub still sees counts, sizes, tree, times, and
+//! recipient key ids. That is not plaintext. Optional hooks are local only.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,7 +26,30 @@ Ciphertext lives in vault/. GitHub still sees counts, sizes, tree, times,
 and recipient key ids. That is not plaintext.
 ";
 
+/// Shown on `geode git` and every git-verb `--help` (G2a; 09-git 7).
+const GITHUB_VISIBILITY: &str = "\
+GitHub still sees counts, sizes, tree, times, and recipient key ids. \
+That is not plaintext. Optional hooks (pre-commit / pre-push) are local \
+only; they do not enforce other clones.";
+
+const GIT_ABOUT: &str = "Git sidecar: init, add, status, unlock, lock.";
+
+const GIT_LONG_ABOUT: &str = "\
+Git sidecar (09-git): init, add, status, unlock, lock.
+
+Seals notes beside public Git. GitHub still sees counts, sizes, tree, \
+times, and recipient key ids. That is not plaintext.
+
+Optional hooks (pre-commit / pre-push) are local only; they do not \
+enforce other clones. --key is required. --token is unexpected on these \
+verbs.";
+
 #[derive(Args, Debug)]
+#[command(
+    about = GIT_ABOUT,
+    long_about = GIT_LONG_ABOUT,
+    after_help = GITHUB_VISIBILITY
+)]
 pub struct GitArgs {
     #[command(subcommand)]
     pub cmd: GitCmd,
@@ -44,9 +70,11 @@ pub enum GitCmd {
 }
 
 #[derive(Args, Debug)]
+#[command(after_help = GITHUB_VISIBILITY)]
 pub struct InitArgs {}
 
 #[derive(Args, Debug)]
+#[command(after_help = GITHUB_VISIBILITY)]
 pub struct AddArgs {
     /// Working-tree paths to seal (repo-relative).
     #[arg(value_name = "PATH", required = true)]
@@ -54,9 +82,11 @@ pub struct AddArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(after_help = GITHUB_VISIBILITY)]
 pub struct StatusArgs {}
 
 #[derive(Args, Debug)]
+#[command(after_help = GITHUB_VISIBILITY)]
 pub struct UnlockArgs {
     /// Sealed path to restore as a working copy.
     #[arg(value_name = "PATH")]
@@ -64,6 +94,7 @@ pub struct UnlockArgs {
 }
 
 #[derive(Args, Debug)]
+#[command(after_help = GITHUB_VISIBILITY)]
 pub struct LockArgs {}
 
 pub fn run(args: &GitArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
