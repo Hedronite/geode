@@ -89,6 +89,9 @@ enum Commands {
     /// Vault lifecycle (init, recipients, add-recipient, rotate).
     Vault(cmd::vault::VaultArgs),
     /// Git sidecar (init, add, status, unlock, lock).
+    ///
+    /// GitHub still sees counts, sizes, tree, times, and recipient key ids.
+    /// That is not plaintext. Optional hooks are local only.
     Git(cmd::git::GitArgs),
     /// Seal a file or tree into a vault.
     Seal(cmd::seal::SealArgs),

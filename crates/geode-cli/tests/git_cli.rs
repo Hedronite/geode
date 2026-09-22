@@ -13,6 +13,10 @@
 //!    substitutes for `--key`.
 //! 4. `git_unlock_then_lock` — unlock writes a working copy; lock unlinks
 //!    it without deleting ciphertext.
+//! 5. `git_help_names_github_visibility` — `git` / verb `--help` names
+//!    GitHub-visible metadata (G2a). No ISK.
+//! 6. `tui_token_still_unexpected` — `geode tui --token x` is unexpected
+//!    (G2b). TUI src is not edited this pack.
 //!
 //! No passphrases, no key bytes, no ISK in any captured output.
 
@@ -314,4 +318,68 @@ fn git_unlock_then_lock() {
         std::fs::read(dir.join("NOTES.md")).expect("read unlocked"),
         b"working copy\n"
     );
+}
+
+fn assert_github_visibility(text: &str, what: &str) {
+    let lower = text.to_ascii_lowercase();
+    for needle in ["counts", "sizes", "tree", "times", "recipient key"] {
+        assert!(
+            lower.contains(needle),
+            "{what} missing {needle:?}: {text}"
+        );
+    }
+    assert!(
+        lower.contains("not plaintext"),
+        "{what} must say not plaintext: {text}"
+    );
+    assert!(!text.contains("ISK"), "{what} leaked ISK: {text}");
+}
+
+#[test]
+fn git_help_names_github_visibility() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    let cases: &[&[&str]] = &[
+        &["git", "--help"],
+        &["git", "init", "--help"],
+        &["git", "add", "--help"],
+        &["git", "status", "--help"],
+        &["git", "unlock", "--help"],
+        &["git", "lock", "--help"],
+    ];
+    for args in cases {
+        let out = geode(dir, args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{}: {}",
+            args.join(" "),
+            combined(&out)
+        );
+        assert_github_visibility(&combined(&out), &args.join(" "));
+    }
+    let parent = combined(&geode(dir, &["git", "--help"]));
+    for verb in ["init", "add", "status", "unlock", "lock"] {
+        assert!(
+            parent.contains(verb),
+            "git --help must list {verb}: {parent}"
+        );
+    }
+    assert!(
+        parent.to_ascii_lowercase().contains("local"),
+        "git --help must say hooks are local: {parent}"
+    );
+}
+
+#[test]
+fn tui_token_still_unexpected() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let out = geode(tmp.path(), &["tui", "--token", "x"]);
+    let text = combined(&out);
+    assert_eq!(out.status.code(), Some(1), "tui --token: {text}");
+    assert!(
+        text.to_ascii_lowercase().contains("unexpected"),
+        "tui --token must be unexpected, got: {text}"
+    );
+    assert!(!text.contains("ISK"), "tui --token leaked ISK: {text}");
 }
