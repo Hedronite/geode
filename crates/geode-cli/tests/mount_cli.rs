@@ -1,12 +1,13 @@
-//! G1 (v0.2.9) — mount CLI fixtures against the shipped `geode` binary
+//! G1 (v0.2.8) — mount CLI fixtures against the shipped `geode` binary
 //! (08-mount).
 //!
 //! Drives `target/debug/geode` (via `CARGO_BIN_EXE_geode`):
 //!
 //! 1. `mount_without_read_only_is_read_write` — `geode mount VAULT MP`
 //!    with `--key` and without `--read-only` is accepted read-write.
-//!    Live FUSE still exits 1 (Darwin: unsupported). The UID-bypass
-//!    warning is on stderr. The old "only --read-only" refusal is gone.
+//!    Without feature `fuse` (the default) live FUSE still exits 1
+//!    (Darwin: unsupported). The UID-bypass warning is the first stderr
+//!    line. These fixtures never open `/dev/fuse`.
 //! 2. `mount_read_only_stays_read_only` — `--read-only` is accepted
 //!    read-only, still exit 1, warning still printed.
 //! 3. `mount_requires_key` — missing `--key` exits 1 after the warning.
@@ -32,6 +33,7 @@ fn geode(dir: &Path, args: &[&str]) -> Output {
         .env_remove("GEODE_TOKEN")
         .env_remove("GEODE_KEY_FILE")
         .env_remove("GEODE_PASSPHRASE")
+        .env_remove("GEODE_MOUNT_DAEMON_CHILD")
         .env("HOME", dir)
         .env("XDG_CONFIG_HOME", dir.join("xdg"))
         .output()
@@ -70,6 +72,11 @@ fn combined(out: &Output) -> String {
 fn assert_warning(out: &Output, what: &str) {
     let err = stderr(out);
     assert!(err.contains(WARNING), "{what} warning on stderr: {err}");
+    let first = err.lines().next().unwrap_or("");
+    assert!(
+        first.contains(WARNING),
+        "{what} warning is the first stderr line: {err}"
+    );
     assert!(
         !stdout(out).contains(WARNING),
         "{what} warning never on stdout: {}",
@@ -77,6 +84,7 @@ fn assert_warning(out: &Output, what: &str) {
     );
 }
 
+#[cfg_attr(all(feature = "fuse", target_os = "linux"), allow(dead_code))]
 fn assert_live_exit_1(out: &Output, what: &str) {
     let err = stderr(out);
     assert_eq!(out.status.code(), Some(1), "{what}: {err}");
@@ -113,6 +121,9 @@ fn setup_key(dir: &Path) {
     assert!(out.status.success(), "keygen: {}", combined(&out));
 }
 
+/// Valid-key mounts block when feature `fuse` is on and the target is
+/// Linux. Default `cargo test` leaves `fuse` off, so this stays kernel-free.
+#[cfg(not(all(feature = "fuse", target_os = "linux")))]
 #[test]
 fn mount_without_read_only_is_read_write() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -138,6 +149,7 @@ fn mount_without_read_only_is_read_write() {
     assert_no_isk(&bare, dir, "bare mount");
 }
 
+#[cfg(not(all(feature = "fuse", target_os = "linux")))]
 #[test]
 fn mount_read_only_stays_read_only() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -160,6 +172,26 @@ fn mount_read_only_stays_read_only() {
         "--read-only must not be read-write: {err}"
     );
     assert_no_isk(&ro, dir, "read-only mount");
+}
+
+#[cfg(not(all(feature = "fuse", target_os = "linux")))]
+#[test]
+fn mount_daemon_without_fuse_feature_exits_1() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_key(dir);
+    let out = geode(
+        dir,
+        &["--key", "k.gkey", "mount", "v.geode", "mp", "--daemon"],
+    );
+    assert_live_exit_1(&out, "daemon mount");
+    assert_warning(&out, "daemon mount");
+    let err = stderr(&out);
+    assert!(
+        err.contains("accepted read-write"),
+        "daemon without the fuse feature is still a refused RW mount: {err}"
+    );
+    assert_no_isk(&out, dir, "daemon mount");
 }
 
 #[test]
