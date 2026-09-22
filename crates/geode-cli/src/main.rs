@@ -112,16 +112,19 @@ enum Commands {
     /// Policy document (10-policy): show the effective policy, seal a new
     /// one, or dry-run an op against it.
     Policy(PolicyArgs),
-    /// Mount a vault at MOUNTPOINT (08-mount). On Linux with feature
-    /// `fuse`, this runs a real `FUSE` session: foreground is the default
-    /// and blocks until unmount; `--daemon` forks and writes a pid file
-    /// (08-mount 3, 6). Default is READ-WRITE: omitting `--read-only`
-    /// accepts a read-write mount (copy-on-write chunk writes, manifest
-    /// mutations, fsync per 08-mount 3). Pass `--read-only` for a
-    /// read-only mount — the recommended default for agent-adjacent
-    /// mounts (08-mount 7). Darwin is unsupported (exit 1); macOS live
-    /// `FUSE` is a later slice. Windows / `WinFsp` is not offered. Every
-    /// attempt prints the UID-bypass warning FIRST, before any refusal:
+    /// Mount a vault at MOUNTPOINT (08-mount). On Darwin with `FUSE-T` or
+    /// macFUSE loaded, this runs a real `FUSE` session: foreground is the
+    /// default and blocks until unmount; `--daemon` forks and writes a pid
+    /// file. With neither driver loaded, mount exits 1 and names `FUSE-T`
+    /// or macFUSE — it does not pretend the mount succeeded. On Linux with
+    /// feature `fuse`, behavior is unchanged: a real session, foreground
+    /// default, `fusermount3` unmount. Default is READ-WRITE: omitting
+    /// `--read-only` accepts a read-write mount (copy-on-write chunk
+    /// writes, manifest mutations, fsync per 08-mount 3). Pass
+    /// `--read-only` for a read-only mount — the recommended default for
+    /// agent-adjacent mounts (08-mount 7). Windows / `WinFsp` is not
+    /// offered. Every attempt prints the UID-bypass warning FIRST, before
+    /// any refusal:
     ///
     ///   warning: a mount is a policy bypass for any process of that UID
     ///   (08-mount 7)
