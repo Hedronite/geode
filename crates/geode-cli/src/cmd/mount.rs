@@ -1,20 +1,20 @@
 //! `geode mount` / `geode unmount` — mount surface (08-mount). Thin CLI
-//! adapter: the clap shape lives in `main.rs` (`MountArgs`); help prose
-//! chrome is frontend's G2.
+//! adapter: the clap shape lives in `main.rs`; help prose chrome is
+//! frontend's G2.
 //!
-//! G1 (v0.2.5): the kernel mount is not in this pack — core `vfs` is the
-//! kernel-free read path (chunk decrypt slice). What ships here is the
-//! surface contract:
+//! G1 (v0.2.9): omitting `--read-only` is read-write. `--read-only` stays
+//! read-only. `--key` is required. `--token` is not a flag on this verb
+//! and `GEODE_TOKEN` never substitutes for `--key`.
 //!
 //! - Every mount attempt prints the UID-bypass warning BEFORE giving up
 //!   (08-mount 5: "A mount is a policy bypass for any process of that
 //!   UID" — printed every time, including on Darwin).
-//! - Darwin (and any non-Linux target): mount exits 1, unsupported.
-//! - Linux: the FUSE session lands with the vfs mount work; until then
-//!   mount exits 1 (usage), after the warning.
-//! - `geode unmount MOUNTPOINT` exists and is documented; it exits 1
-//!   (usage) until the mount lands. No warning — unmount removes the
-//!   bypass, it does not create one.
+//! - Darwin (and any target in this build): the live FUSE session is
+//!   unsupported and mount exits 1 AFTER the mode is accepted. Kernel-free
+//!   tests assert that accepted mode; they do not require `/dev/fuse`.
+//! - `geode unmount MOUNTPOINT` exists and exits 1 (usage) until the FUSE
+//!   session lands. No warning — unmount removes the bypass, it does not
+//!   create one.
 //! - The agent toolset has no `geode_mount` (06-agent-plane 3); nothing
 //!   here changes the MCP surface.
 
@@ -28,9 +28,12 @@ use crate::{GlobalArgs, OutMode};
 const UID_BYPASS_WARNING: &str =
     "warning: a mount is a policy bypass for any process of that UID (08-mount 5)";
 
-/// `geode mount VAULT MOUNTPOINT` (08-mount). `--read-only` is the only
-/// mode this pack; foreground is the default (`--daemon` is parsed but
-/// not honored until the FUSE session lands).
+/// `geode mount VAULT MOUNTPOINT` (08-mount).
+///
+/// Omitting `--read-only` accepts a read-write mount. `--read-only` accepts
+/// a read-only mount. Neither mode starts a kernel session in this build:
+/// Darwin stays unsupported (exit 1), and there is no `/dev/fuse` adapter
+/// yet. Foreground is the default (`--daemon` is parsed but not honored).
 pub fn mount(
     vault: &Path,
     mountpoint: &Path,
@@ -39,16 +42,19 @@ pub fn mount(
     global: &GlobalArgs,
     out: OutMode,
 ) -> Result<()> {
-    let _ = (vault, mountpoint, daemon, global, out);
+    let _ = (vault, mountpoint, daemon, out);
     // The warning is unconditional and first: even a refused attempt must
     // leave the operator in no doubt about what a mount would mean.
     eprintln!("{UID_BYPASS_WARNING}");
-    if !read_only {
-        return Err(Error::Format(
-            "only --read-only mounts are supported in this build (08-mount)".into(),
-        ));
-    }
-    Err(Error::Format(unsupported_message().to_owned()))
+    let key = super::require_key(global)?;
+    // A path is not a key. Parse and drop it so `--key` is a real identity
+    // file; the bytes never enter the error text.
+    drop(super::load_isk(&key)?);
+    Err(Error::Format(format!(
+        "{}; {}",
+        unsupported_message(),
+        accepted_mode(read_only)
+    )))
 }
 
 /// `geode unmount MOUNTPOINT` (08-mount 3: fusermount3 / umount). No
@@ -58,6 +64,16 @@ pub fn unmount(mountpoint: &Path, global: &GlobalArgs, out: OutMode) -> Result<(
     Err(Error::Format(
         "unmount lands with the vfs FUSE session (not in this build)".into(),
     ))
+}
+
+/// Mode clause after the platform refusal. Observable without a kernel:
+/// omitting `--read-only` is read-write; the flag stays read-only.
+fn accepted_mode(read_only: bool) -> &'static str {
+    if read_only {
+        "accepted read-only"
+    } else {
+        "accepted read-write"
+    }
 }
 
 /// The platform-specific refusal line for a mount attempt. Kept as a
