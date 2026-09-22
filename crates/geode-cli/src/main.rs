@@ -88,6 +88,8 @@ enum Commands {
     Keygen(cmd::key::KeygenArgs),
     /// Vault lifecycle (init, recipients, add-recipient, rotate).
     Vault(cmd::vault::VaultArgs),
+    /// Git sidecar (init, add, status, unlock, lock).
+    Git(cmd::git::GitArgs),
     /// Seal a file or tree into a vault.
     Seal(cmd::seal::SealArgs),
     /// Open a vault out to a directory.
@@ -176,6 +178,13 @@ impl Commands {
                 cmd::vault::VaultCmd::Recipients(_) => "vault_recipients",
                 cmd::vault::VaultCmd::AddRecipient(_) => "vault_add_recipient",
                 cmd::vault::VaultCmd::Rotate(_) => "vault_rotate",
+            },
+            Self::Git(a) => match &a.cmd {
+                cmd::git::GitCmd::Init(_) => "git_init",
+                cmd::git::GitCmd::Add(_) => "git_add",
+                cmd::git::GitCmd::Status(_) => "git_status",
+                cmd::git::GitCmd::Unlock(_) => "git_unlock",
+                cmd::git::GitCmd::Lock(_) => "git_lock",
             },
             Self::Seal(_) => "seal",
             Self::Open(_) => "open",
@@ -439,6 +448,7 @@ fn main() {
     let result = match command {
         Commands::Keygen(a) => cmd::key::run(a, out),
         Commands::Vault(a) => cmd::vault::run(a, &cli.global, out),
+        Commands::Git(a) => cmd::git::run(a, &cli.global, out),
         Commands::Seal(a) => cmd::seal::run(a, &cli.global, out),
         Commands::Open(a) => cmd::open::run(a, &cli.global, out),
         Commands::Verify(a) => cmd::verify::run(a, &cli.global, out),

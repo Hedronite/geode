@@ -8,6 +8,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod agent;
+pub mod git;
 pub mod key;
 pub mod keyring;
 pub mod list;
