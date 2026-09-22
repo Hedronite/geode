@@ -133,6 +133,15 @@
 //! `manifest_mac`, so a restored snapshot re-verifies under `load_vault`.
 //! Live objects are untouched by `gc` and still open after a run.
 
+//! # v0.2.8 / G0
+//!
+//! `sidecar` module (09-git): git-mode seal with vault flag `BIND_PATHS` on.
+//! The original relative path is bound into chunk AD; a stolen object opened
+//! without that path returns `Error::AuthFail`. The sidecar index lists
+//! sealed paths. `lock` unlinks working copies listed in the index — not a
+//! crypto op. Hybrid recipients stay `Error::NotImplemented`. No ISK in
+//! errors; no new `Error` variant.
+//!
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
 #![allow(clippy::module_name_repetitions)]
@@ -155,6 +164,7 @@ pub mod policy;
 pub mod recipients;
 pub mod rotate;
 pub mod session;
+pub mod sidecar;
 pub mod snapshot;
 pub mod token;
 pub mod vault;
