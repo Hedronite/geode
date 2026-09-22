@@ -29,10 +29,13 @@
 //! [`read_all`], and [`Vfs::read_range`] on a flushed file) is unchanged and
 //! still works while a session is mounted.
 //!
-//! Directories are **implied by paths**: a GDE1 manifest entry is `file` or
-//! `symlink` (03-format 5), so an empty directory is a namespace fact with no
-//! manifest row. `mkdir` mutates the mounted namespace (`readdir` sees it,
-//! `create` inside it works) and marks the vault dirty.
+//! Directories are first-class manifest rows: `mkdir` allocates a fresh
+//! `object_id` and pushes an entry with `kind: dir`, `plain_len 0`,
+//! `chunk_count 0` (03-format 5; `schemas/vault.manifest.schema.json`). An
+//! empty-directory row names **no** `.gobj` body, so it survives unmount and
+//! a reopen lists it. A path whose parent was never `mkdir`-ed still appears
+//! as an implied directory (the ancestor set of the manifest paths) for the
+//! life of the session, but it has no row of its own.
 //!
 //! Missing path = `Error::Io(NotFound)`. Tamper / bind mismatch =
 //! `Error::AuthFail`. Namespace misuse (exists, not empty, escaping path) =
@@ -309,6 +312,11 @@ fn not_found(what: &str) -> Error {
     ))
 }
 
+/// POSIX EISDIR, expressed with the shipped `Error` variants (no new variant).
+fn is_a_directory(what: &str) -> Error {
+    Error::Format(format!("vfs: {what} is a directory"))
+}
+
 fn parent_of(path: &str) -> &str {
     match path.rsplit_once('/') {
         Some((p, _)) => p,
@@ -379,8 +387,13 @@ impl Vfs {
         }
         let mut dirs: BTreeMap<String, i64> = BTreeMap::new();
         for e in &manifest.entries {
+            if e.kind.is_dir() {
+                dirs.insert(e.path.clone(), e.mtime_ms);
+            }
+        }
+        for e in &manifest.entries {
             for a in ancestors(&e.path) {
-                dirs.insert(a, 0);
+                dirs.entry(a).or_insert(0);
             }
         }
         Ok(Self {
@@ -405,8 +418,8 @@ impl Vfs {
         &self.manifest
     }
 
-    /// File / symlink entries (sorted by path). Pending entries still carry
-    /// [`PENDING_OBJECT_ID`] until the next flush.
+    /// Manifest entries -- files, directories and symlinks (sorted by path).
+    /// A file created but not yet flushed still carries [`PENDING_OBJECT_ID`].
     #[must_use]
     pub fn list(&self) -> &[Entry] {
         &self.manifest.entries
@@ -424,7 +437,7 @@ impl Vfs {
         self.open.keys().cloned().collect()
     }
 
-    /// Look up one entry (as [`EntryKind::File`] / [`EntryKind::Symlink`]).
+    /// Look up one entry: file, directory (`kind: dir` row), or symlink.
     pub fn stat(&self, path: &str) -> Result<VfsNode> {
         let norm = norm(path)?;
         if let Some(e) = self.entry_at(&norm) {
@@ -432,6 +445,7 @@ impl Vfs {
                 path: e.path,
                 kind: match e.kind {
                     EntryKind::File => NodeKind::File,
+                    EntryKind::Dir => NodeKind::Dir,
                     EntryKind::Symlink => NodeKind::Symlink,
                 },
                 plain_len: e.plain_len,
@@ -459,7 +473,9 @@ impl Vfs {
         }
         let mut out: Vec<VfsNode> = Vec::new();
         for (d, mtime_ms) in &self.dirs {
-            if parent_of(d) == norm {
+            // A directory with its own `kind: dir` row is listed from the
+            // manifest below; this loop covers only implied directories.
+            if parent_of(d) == norm && !self.has_entry(d) {
                 out.push(VfsNode {
                     path: d.clone(),
                     kind: NodeKind::Dir,
@@ -475,6 +491,7 @@ impl Vfs {
                     path: e.path.clone(),
                     kind: match e.kind {
                         EntryKind::File => NodeKind::File,
+                        EntryKind::Dir => NodeKind::Dir,
                         EntryKind::Symlink => NodeKind::Symlink,
                     },
                     plain_len: e.plain_len,
@@ -519,11 +536,13 @@ impl Vfs {
         Ok(())
     }
 
-    /// Create a directory (mutates the mounted namespace; marks dirty).
+    /// Create a directory: push a `kind: dir` manifest row and mark dirty.
     ///
-    /// A GDE1 manifest entry is `file` or `symlink` (03-format 5), so a
-    /// directory has no manifest row -- it is implied by the paths under it.
-    pub fn mkdir(&mut self, path: &str, now_ms: i64) -> Result<()> {
+    /// The row carries a fresh `object_id` (the schema requires one) with
+    /// `plain_len 0` / `chunk_count 0`; **no** `.gobj` body is written, so an
+    /// empty directory costs no object and still survives unmount
+    /// (03-format 5; PM ruling v029).
+    pub fn mkdir(&mut self, path: &str, mode: u32, now_ms: i64) -> Result<()> {
         let norm = norm(path)?;
         if norm.is_empty() {
             return Err(Error::Format("vfs mkdir: empty path".into()));
@@ -536,7 +555,20 @@ impl Vfs {
             return Err(not_found(parent));
         }
         self.touch_dir(parent, now_ms);
-        self.dirs.insert(norm, now_ms);
+        self.dirs.insert(norm.clone(), now_ms);
+        self.manifest.entries.push(Entry {
+            path: norm,
+            path_sealed: false,
+            object_id: corevault::new_object_id()?,
+            kind: EntryKind::Dir,
+            plain_len: 0,
+            chunk_count: 0,
+            mode,
+            mtime_ms: now_ms,
+            content_root: [0u8; 32],
+            bind: false,
+        });
+        self.recompute()?;
         self.dirty = true;
         Ok(())
     }
@@ -556,6 +588,9 @@ impl Vfs {
             )));
         }
         let entry = self.entry_at(&norm).ok_or_else(|| not_found(&norm))?;
+        if entry.kind.is_dir() {
+            return Err(is_a_directory(&norm));
+        }
         let end = off
             .checked_add(n)
             .ok_or_else(|| Error::Format("vfs write offset overflow".into()))?;
@@ -586,6 +621,9 @@ impl Vfs {
     pub fn read_range(&self, path: &str, off: u64, len: u64) -> Result<Vec<u8>> {
         let norm = norm(path)?;
         let entry = self.entry_at(&norm).ok_or_else(|| not_found(&norm))?;
+        if entry.kind.is_dir() {
+            return Err(is_a_directory(&norm));
+        }
         if let Some(h) = self.open.get(&norm) {
             return slice_buffer(&h.plain, off, len);
         }
@@ -614,6 +652,9 @@ impl Vfs {
             )));
         }
         let entry = self.entry_at(&norm).ok_or_else(|| not_found(&norm))?;
+        if entry.kind.is_dir() {
+            return Err(is_a_directory(&norm));
+        }
         self.ensure_handle(&norm, &entry)?;
         let cs = u64::from(self.chunk_size);
         let h = self.handle_mut(&norm)?;
@@ -636,8 +677,9 @@ impl Vfs {
     /// (empty for a file with no open buffer).
     pub fn dirty_chunks(&self, path: &str) -> Result<Vec<u64>> {
         let norm = norm(path)?;
-        if self.entry_at(&norm).is_none() {
-            return Err(not_found(&norm));
+        let entry = self.entry_at(&norm).ok_or_else(|| not_found(&norm))?;
+        if entry.kind.is_dir() {
+            return Err(is_a_directory(&norm));
         }
         Ok(self
             .open
@@ -652,6 +694,11 @@ impl Vfs {
     pub fn fsync(&mut self, path: &str, now_ms: i64) -> Result<ObjectId> {
         let norm = norm(path)?;
         let entry = self.entry_at(&norm).ok_or_else(|| not_found(&norm))?;
+        if entry.kind.is_dir() {
+            // A `kind: dir` row names no object body: there is nothing to
+            // flush, and no `.gobj` is written for an empty directory.
+            return Ok(entry.object_id);
+        }
         let pending = entry.object_id == PENDING_OBJECT_ID;
         let dirty = self.open.get(&norm).is_some_and(|h| h.dirty);
         if !pending && !dirty {
@@ -733,6 +780,13 @@ impl Vfs {
                     e.mtime_ms = now_ms;
                 }
             }
+            // The directory's own `kind: dir` row moves with it; implied
+            // directories have no row and ride along in the map below.
+            if let Some(e) = self.manifest.entries.iter_mut().find(|e| e.path == from) {
+                debug_assert!(e.kind.is_dir(), "a dirs-map entry without a dir row");
+                e.path = to.clone();
+                e.mtime_ms = now_ms;
+            }
             let moved: Vec<String> = self
                 .dirs
                 .keys()
@@ -771,21 +825,26 @@ impl Vfs {
     }
 
     /// Unlink a file (the old `.gobj` stays; `snapshot::gc` reclaims it), or
-    /// remove an empty directory (POSIX ENOTEMPTY otherwise).
+    /// remove an empty directory -- dropping its `kind: dir` row if it has one
+    /// (POSIX ENOTEMPTY otherwise).
     pub fn unlink(&mut self, path: &str, now_ms: i64) -> Result<()> {
         let norm = norm(path)?;
         if norm.is_empty() {
             return Err(Error::Format("vfs unlink: empty path".into()));
         }
-        if self.entry_at(&norm).is_some() {
-            self.manifest.entries.retain(|e| e.path != norm);
-            self.open.remove(&norm);
-            self.touch_dir(parent_of(&norm), now_ms);
-            self.recompute()?;
-            self.dirty = true;
-            return Ok(());
+        let entry = self.entry_at(&norm);
+        let dir_row = entry.as_ref().is_some_and(|e| e.kind.is_dir());
+        if let Some(e) = entry {
+            if !e.kind.is_dir() {
+                self.manifest.entries.retain(|x| x.path != norm);
+                self.open.remove(&norm);
+                self.touch_dir(parent_of(&norm), now_ms);
+                self.recompute()?;
+                self.dirty = true;
+                return Ok(());
+            }
         }
-        if self.dirs.contains_key(&norm) {
+        if dir_row || self.dirs.contains_key(&norm) {
             let prefix = format!("{norm}/");
             let has_children = self
                 .manifest
@@ -801,8 +860,12 @@ impl Vfs {
                     "vfs unlink: {norm} is a non-empty directory"
                 )));
             }
+            if dir_row {
+                self.manifest.entries.retain(|e| e.path != norm);
+            }
             self.dirs.remove(&norm);
             self.touch_dir(parent_of(&norm), now_ms);
+            self.recompute()?;
             self.dirty = true;
             return Ok(());
         }
@@ -838,6 +901,10 @@ impl Vfs {
             .cloned()
     }
 
+    fn has_entry(&self, path: &str) -> bool {
+        self.manifest.entries.iter().any(|e| e.path == path)
+    }
+
     /// Open (or lazily load) the plaintext buffer for `path`.
     fn ensure_handle(&mut self, path: &str, entry: &Entry) -> Result<()> {
         if self.open.contains_key(path) {
@@ -867,11 +934,21 @@ impl Vfs {
             .ok_or_else(|| Error::Format(format!("vfs: {path} has no open buffer")))
     }
 
-    /// POSIX: a namespace mutation updates the parent directory's time. The
-    /// vault root is not in the map, so an empty `dir` is a no-op.
+    /// POSIX: a namespace mutation updates the parent directory's time. Both
+    /// views are stamped -- the session map and the `kind: dir` manifest row
+    /// that survives unmount. The vault root is not in the map, so an empty
+    /// `dir` is a no-op.
     fn touch_dir(&mut self, dir: &str, now_ms: i64) {
         if let Some(m) = self.dirs.get_mut(dir) {
             *m = now_ms;
+        }
+        if let Some(e) = self
+            .manifest
+            .entries
+            .iter_mut()
+            .find(|e| e.path == dir && e.kind.is_dir())
+        {
+            e.mtime_ms = now_ms;
         }
     }
 
@@ -907,11 +984,13 @@ impl Vfs {
         Ok(())
     }
 
-    /// Sum of the on-disk `.gobj` sizes for every flushed entry.
+    /// Sum of the on-disk `.gobj` sizes for every flushed file entry.
     fn cipher_bytes_total(&self) -> Result<u64> {
         let mut total = 0u64;
         for e in &self.manifest.entries {
-            if e.object_id == PENDING_OBJECT_ID {
+            // A `kind: dir` row names no `.gobj` body, and a pending file
+            // entry has not been sealed yet: neither has ciphertext bytes.
+            if e.kind.is_dir() || e.object_id == PENDING_OBJECT_ID {
                 continue;
             }
             let p = corevault::object_path(&self.root, self.epoch, &e.object_id)?;
@@ -1243,7 +1322,7 @@ mod tests {
         let (d, vid) = vfs_fixture();
         let root = d.path().join("v.geode");
         let mut vfs = open_vfs(&d, vid);
-        vfs.mkdir("docs", 0).unwrap();
+        vfs.mkdir("docs", 0o755, 0).unwrap();
         vfs.create("docs/plan.md", 0o644, 0).unwrap();
         vfs.write("docs/plan.md", 0, b"hello world").unwrap();
         // Before the flush the read is served from the open buffer.
@@ -1397,11 +1476,11 @@ mod tests {
     fn create_unlink_and_list() {
         let (d, vid) = vfs_fixture();
         let mut vfs = open_vfs(&d, vid);
-        vfs.mkdir("scratch", 0).unwrap();
+        vfs.mkdir("scratch", 0o755, 0).unwrap();
         vfs.create("scratch/a.md", 0o644, 0).unwrap();
         vfs.create("scratch/b.md", 0o644, 0).unwrap();
         let paths: Vec<String> = vfs.list().iter().map(|e| e.path.clone()).collect();
-        assert_eq!(paths, vec!["scratch/a.md", "scratch/b.md"]);
+        assert_eq!(paths, vec!["scratch", "scratch/a.md", "scratch/b.md"]);
 
         let kids: Vec<String> = vfs
             .readdir("scratch")
@@ -1413,7 +1492,7 @@ mod tests {
 
         vfs.unlink("scratch/a.md", 0).unwrap();
         let paths: Vec<String> = vfs.list().iter().map(|e| e.path.clone()).collect();
-        assert_eq!(paths, vec!["scratch/b.md"]);
+        assert_eq!(paths, vec!["scratch", "scratch/b.md"]);
         let r = vfs.unlink("scratch/a.md", 0);
         assert!(
             matches!(&r, Err(Error::Io(e)) if e.kind() == ErrorKind::NotFound),
@@ -1425,7 +1504,7 @@ mod tests {
     fn create_refuses_duplicates_and_missing_parents() {
         let (d, vid) = vfs_fixture();
         let mut vfs = open_vfs(&d, vid);
-        vfs.mkdir("a", 0).unwrap();
+        vfs.mkdir("a", 0o755, 0).unwrap();
         vfs.create("a/f", 0o644, 0).unwrap();
         assert!(vfs.create("a/f", 0o644, 0).is_err(), "EEXIST");
         assert!(vfs.create("a", 0o644, 0).is_err(), "dir exists at path");
@@ -1465,24 +1544,30 @@ mod tests {
     fn mkdir_readdir_rename_unlink_namespace() {
         let (d, vid) = vfs_fixture();
         let mut vfs = open_vfs(&d, vid);
-        vfs.mkdir("a", 0).unwrap();
-        assert!(vfs.mkdir("a", 0).is_err(), "EEXIST");
-        let r = vfs.mkdir("missing/b", 0);
+        vfs.mkdir("a", 0o755, 0).unwrap();
+        assert!(vfs.mkdir("a", 0o755, 0).is_err(), "EEXIST");
+        let r = vfs.mkdir("missing/b", 0o755, 0);
         assert!(
             matches!(&r, Err(Error::Io(e)) if e.kind() == ErrorKind::NotFound),
             "ENOENT parent, got {r:?}"
         );
 
         let root_kids = vfs.readdir("").unwrap();
-        assert_eq!(root_kids.len(), 1);
+        assert_eq!(
+            root_kids.len(),
+            1,
+            "a dir row is listed once, not once per source"
+        );
         assert_eq!(root_kids[0].path, "a");
         assert_eq!(root_kids[0].kind, NodeKind::Dir);
         assert_eq!(vfs.stat("a").unwrap().kind, NodeKind::Dir);
+        assert_eq!(vfs.list()[0].kind, EntryKind::Dir);
 
         vfs.create("a/f", 0o644, 0).unwrap();
         vfs.write("a/f", 0, b"body").unwrap();
         vfs.rename("a/f", "a/g", 5).unwrap();
-        assert_eq!(vfs.list()[0].path, "a/g");
+        let g = vfs.list().iter().find(|e| e.path == "a/g").expect("a/g");
+        assert_eq!(g.kind, EntryKind::File);
         assert_eq!(
             vfs.stat("a").unwrap().mtime_ms,
             5,
@@ -1494,9 +1579,15 @@ mod tests {
             "got {gone:?}"
         );
 
-        // Renaming the directory moves its children and re-keys the buffer.
+        // Renaming the directory moves its row, its children and re-keys the
+        // buffer.
         vfs.rename("a", "b", 6).unwrap();
-        assert_eq!(vfs.list()[0].path, "b/g");
+        assert_eq!(
+            vfs.list().iter().find(|e| e.path == "b/g").unwrap().path,
+            "b/g"
+        );
+        assert_eq!(vfs.stat("b").unwrap().kind, NodeKind::Dir);
+        assert!(vfs.list().iter().all(|e| e.path != "a" && e.path != "a/g"));
         assert_eq!(vfs.stat("b").unwrap().mtime_ms, 6);
         assert!(
             matches!(&vfs.readdir("a"), Err(Error::Io(e)) if e.kind() == ErrorKind::NotFound),
@@ -1510,6 +1601,142 @@ mod tests {
         vfs.unlink("b", 7).unwrap();
         assert!(vfs.list().is_empty());
         assert!(vfs.readdir("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn mkdir_persists_a_kind_dir_row_and_reopen_lists_it() {
+        let (d, vid) = vfs_fixture();
+        let root = d.path().join("v.geode");
+        let dir_id;
+        {
+            let mut vfs = open_vfs(&d, vid);
+            vfs.mkdir("scratch", 0o755, 5).unwrap();
+            let row = vfs
+                .list()
+                .iter()
+                .find(|e| e.path == "scratch")
+                .expect("mkdir pushes a manifest row")
+                .clone();
+            assert_eq!(row.kind, EntryKind::Dir);
+            assert_eq!(row.plain_len, 0);
+            assert_eq!(row.chunk_count, 0);
+            assert_eq!(row.mode, 0o755);
+            assert_eq!(row.mtime_ms, 5);
+            assert_ne!(
+                row.object_id, PENDING_OBJECT_ID,
+                "a dir row carries a real object_id"
+            );
+            dir_id = row.object_id;
+            vfs.unmount(6).unwrap();
+        }
+        // An empty directory names no object body: no `.gobj` is written.
+        assert!(!corevault::object_path(&root, Epoch(1), &dir_id)
+            .unwrap()
+            .exists());
+
+        let vfs2 = open_vfs(&d, vid);
+        let node = vfs2.stat("scratch").unwrap();
+        assert_eq!(node.kind, NodeKind::Dir);
+        assert_eq!(node.mtime_ms, 5);
+        let kids = vfs2.readdir("").unwrap();
+        assert_eq!(kids.len(), 1, "reopen lists the directory exactly once");
+        assert_eq!(kids[0].path, "scratch");
+        assert_eq!(kids[0].kind, NodeKind::Dir);
+
+        let on_disk = read_manifest_file(&root, Epoch(1), &manifest_key()).unwrap();
+        let row = on_disk
+            .entries
+            .iter()
+            .find(|e| e.path == "scratch")
+            .expect("the dir row persisted");
+        assert_eq!(row.kind, EntryKind::Dir);
+        assert_eq!(row.object_id, dir_id);
+        assert_eq!(row.plain_len, 0);
+        assert_eq!(row.chunk_count, 0);
+        assert_eq!(on_disk.entry_count, 1);
+        assert_eq!(on_disk.total_plain_bytes, 0);
+        assert_eq!(
+            on_disk.total_cipher_bytes, 0,
+            "a directory row contributes no ciphertext bytes"
+        );
+    }
+
+    #[test]
+    fn dir_rows_survive_rename_and_unlink_across_reopen() {
+        let (d, vid) = vfs_fixture();
+        {
+            let mut vfs = open_vfs(&d, vid);
+            vfs.mkdir("a", 0o755, 1).unwrap();
+            vfs.mkdir("a/b", 0o700, 2).unwrap();
+            vfs.rename("a", "c", 3).unwrap();
+            assert_eq!(vfs.stat("c").unwrap().kind, NodeKind::Dir);
+            assert_eq!(vfs.stat("c/b").unwrap().kind, NodeKind::Dir);
+            assert!(vfs.list().iter().all(|e| e.path != "a" && e.path != "a/b"));
+            vfs.unmount(4).unwrap();
+        }
+        let vfs2 = open_vfs(&d, vid);
+        let paths: Vec<String> = vfs2.list().iter().map(|e| e.path.clone()).collect();
+        assert_eq!(paths, vec!["c", "c/b"]);
+        let kids = vfs2.readdir("c").unwrap();
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0].path, "c/b");
+        assert_eq!(kids[0].kind, NodeKind::Dir);
+
+        // Dropping the leaf row then the parent row empties the manifest.
+        let mut vfs3 = open_vfs(&d, vid);
+        vfs3.unlink("c/b", 5).unwrap();
+        assert!(vfs3.unlink("c", 5).is_ok());
+        assert!(vfs3.list().is_empty());
+        vfs3.unmount(6).unwrap();
+        let vfs4 = open_vfs(&d, vid);
+        assert!(vfs4.list().is_empty());
+        assert!(vfs4.readdir("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn dir_rows_reject_reads_and_writes() {
+        let (d, vid) = vfs_fixture();
+        let mut vfs = open_vfs(&d, vid);
+        vfs.mkdir("d", 0o755, 0).unwrap();
+        assert!(matches!(&vfs.read_range("d", 0, 1), Err(Error::Format(_))));
+        assert!(matches!(&vfs.write("d", 0, b"x"), Err(Error::Format(_))));
+        assert!(matches!(&vfs.truncate("d", 1), Err(Error::Format(_))));
+        assert!(matches!(&vfs.dirty_chunks("d"), Err(Error::Format(_))));
+        assert!(vfs.create("d", 0o644, 0).is_err(), "EEXIST at a dir row");
+        // `fsync` on a directory is a no-op that keeps the row's object_id.
+        let id = vfs.stat("d").unwrap().object_id;
+        assert_eq!(vfs.fsync("d", 9).unwrap(), id);
+        assert_eq!(vfs.stat("d").unwrap().object_id, id);
+    }
+
+    #[test]
+    fn paths_without_dir_rows_read_as_implied_directories() {
+        let (d, vid) = vfs_fixture();
+        let root = d.path().join("v.geode");
+        {
+            let mut vfs = open_vfs(&d, vid);
+            vfs.mkdir("docs", 0o755, 0).unwrap();
+            vfs.create("docs/plan.md", 0o644, 0).unwrap();
+            vfs.write("docs/plan.md", 0, b"x").unwrap();
+            vfs.unmount(1).unwrap();
+        }
+        // A manifest written without dir rows (another tool): the ancestor is
+        // still listed as an implied directory for the session.
+        let mut m = read_manifest_file(&root, Epoch(1), &manifest_key()).unwrap();
+        m.entries.retain(|e| e.kind != EntryKind::Dir);
+        m.entry_count = 1;
+        m.root = entries_root(&m.entries);
+        m.total_plain_bytes = 1;
+        write_manifest_file(&root, Epoch(1), &m, &manifest_key()).unwrap();
+
+        let vfs2 = open_vfs(&d, vid);
+        assert_eq!(vfs2.list().len(), 1, "only the file has a row");
+        let kids = vfs2.readdir("").unwrap();
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0].path, "docs");
+        assert_eq!(kids[0].kind, NodeKind::Dir);
+        assert_eq!(vfs2.stat("docs").unwrap().kind, NodeKind::Dir);
+        assert_eq!(vfs2.read_range("docs/plan.md", 0, 1).unwrap(), b"x");
     }
 
     #[test]
@@ -1535,7 +1762,7 @@ mod tests {
         let root = d.path().join("v.geode");
         {
             let mut vfs = open_vfs(&d, vid);
-            vfs.mkdir("docs", 0).unwrap();
+            vfs.mkdir("docs", 0o755, 0).unwrap();
             vfs.create("docs/plan.md", 0o644, 0).unwrap();
             vfs.write("docs/plan.md", 0, b"hello world").unwrap();
             vfs.unmount(1_000).unwrap();
@@ -1682,7 +1909,10 @@ mod tests {
             "{}",
             vfs.create("../escape", 0o644, 0).unwrap_err()
         ));
-        msgs.push(format!("{}", vfs.mkdir("no/parent", 0).unwrap_err()));
+        msgs.push(format!("{}", vfs.mkdir("no/parent", 0o755, 0).unwrap_err()));
+        let r = vfs.mkdir("dir", 0o755, 0);
+        assert!(r.is_ok());
+        msgs.push(format!("{}", vfs.read_range("dir", 0, 1).unwrap_err()));
         msgs.push(format!("{}", vfs.read_range("missing", 0, 1).unwrap_err()));
         let ek_bytes = *ek().as_bytes();
         let ek_hex = corevault::hex_encode(&ek_bytes);
