@@ -3,7 +3,7 @@ title: Geode changelog
 type: repo-changelog
 status: current
 created: "2026-09-15"
-updated: "2026-09-22"
+updated: "2026-09-23"
 related:
   - "[[foundry/geode/geode-spec-0.0.0/SPEC]]"
   - "[[foundry/geode/geode-spec-0.0.0/12-roadmap]]"
@@ -19,6 +19,8 @@ related:
   - "[[foundry/geode/SPEC-v028]]"
   - "[[foundry/geode/SPEC-v029]]"
   - "[[foundry/geode/specs/SPEC-v030]]"
+  - "[[foundry/geode/specs/SPEC-v031]]"
+  - "[[foundry/geode/specs/SPEC-v032]]"
 ---
 
 # Changelog
@@ -26,6 +28,18 @@ related:
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise). Foundry packs v021/v022 are milestones, not the git tag ([[foundry/SEMVER]]).
 
 ## [Unreleased]
+
+## [0.2.9] — 2026-09-23
+
+Compatible 0.x patch. Foundry pack **v032** (agent Unix socket). No format change; `GDE1` objects from 0.2.8 remain readable. macOS live FUSE is not in this tag. Windows is not offered.
+
+### Added
+
+- `geode agent serve --socket PATH` serves the same newline-delimited JSON MCP frames as `--stdio` on a mode-0600 Unix socket. The parent directory must already exist. A single-component path such as `agent.sock` uses the current directory. The socket is unlinked on exit, including when chmod fails after bind.
+
+### Changed
+
+- `--stdio` and `--socket` are mutually exclusive. Passing both exits 1. Passing neither exits 1. `--stdio` alone is unchanged.
 
 ## [0.2.8] — 2026-09-22
 
