@@ -1123,6 +1123,55 @@ impl<'g> StdioServer<'g> {
         }
         Ok(())
     }
+
+    /// Unix-socket variant of the frame loop: the same newline-delimited
+    /// JSON-RPC frames, one connection at a time, bytes to the socket only.
+    fn run_loop_unix(&mut self, listener: &std::os::unix::net::UnixListener) -> Result<()> {
+        let (stream, _addr) = listener.accept().map_err(Error::Io)?;
+        let reader_stream = stream.try_clone().map_err(Error::Io)?;
+        let reader = BufReader::new(reader_stream);
+        let mut writer = std::io::BufWriter::new(stream);
+        for line in reader.lines() {
+            let line = line.map_err(Error::Io)?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let request: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(e) => {
+                    let frame = rpc_error(
+                        &serde_json::Value::Null,
+                        -32700,
+                        &format!("parse error: {e}"),
+                    );
+                    write_frame(&mut writer, &frame)?;
+                    writer.flush().map_err(Error::Io)?;
+                    continue;
+                }
+            };
+            let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            let Some(id) = request.get("id").cloned() else {
+                continue;
+            };
+            let frame = match method {
+                "initialize" => rpc_ok(
+                    &id,
+                    &serde_json::json!({
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "geode", "version": env!("CARGO_PKG_VERSION")},
+                    }),
+                ),
+                "ping" => rpc_ok(&id, &serde_json::json!({})),
+                "tools/list" => rpc_ok(&id, &serde_json::json!({"tools": self.tool_descriptors()})),
+                "tools/call" => self.tool_call(&id, request.get("params")),
+                _ => rpc_error(&id, -32601, &format!("unknown method '{method}'")),
+            };
+            write_frame(&mut writer, &frame)?;
+            writer.flush().map_err(Error::Io)?;
+        }
+        Ok(())
+    }
 }
 
 /// Write one NDJSON frame to stdout (the only bytes serve puts there).
@@ -1143,10 +1192,51 @@ fn serve(
     token_flag: Option<&str>,
     global: &GlobalArgs,
 ) -> Result<()> {
-    if !stdio {
-        let _ = socket;
-        return Err(Error::NotImplemented);
+    match (stdio, socket) {
+        (false, None) | (true, Some(_)) => Err(Error::NotImplemented),
+        (true, None) => {
+            let sealed = resolve_agent_token(token_flag)?;
+            StdioServer::new(global, sealed).run_loop()
+        }
+        (false, Some(path)) => {
+            let sealed = resolve_agent_token(token_flag)?;
+            serve_socket(global, sealed, path)
+        }
     }
-    let sealed = resolve_agent_token(token_flag)?;
-    StdioServer::new(global, sealed).run_loop()
+}
+
+/// Unix-socket MCP server: the same newline-delimited JSON-RPC frames as
+/// `--stdio`, over the socket. The parent directory must already exist;
+/// the bind fails if the socket path exists; the file gets mode 0600 and
+/// is unlinked on exit (this process unbinds its own socket).
+fn serve_socket(global: &GlobalArgs, sealed: Vec<u8>, path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    if path.exists() {
+        return Err(Error::Format(format!(
+            "socket path already exists: {}",
+            path.display()
+        )));
+    }
+    let Some(parent) = path.parent() else {
+        return Err(Error::Format(format!(
+            "socket path has no parent: {}",
+            path.display()
+        )));
+    };
+    if !parent.is_dir() {
+        return Err(Error::Format(format!(
+            "socket parent directory does not exist: {}",
+            parent.display()
+        )));
+    }
+    let listener = UnixListener::bind(path).map_err(|e| {
+        let _ = std::fs::remove_file(path);
+        Error::Format(format!("bind {}: {e}", path.display()))
+    })?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    let result = StdioServer::new(global, sealed).run_loop_unix(&listener);
+    let _ = std::fs::remove_file(path);
+    result
 }
