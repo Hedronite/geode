@@ -313,13 +313,22 @@ pub struct AgentArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentCmd {
-    /// Serve the MCP tool server (06 §3). Default transport is a Unix socket;
-    /// `--stdio` speaks MCP over stdin/stdout for Facet/agent hosts.
+    /// Serve the MCP tool server (06-agent-plane 3). One transport per
+    /// run: `--socket PATH` serves the same newline-delimited JSON MCP
+    /// frames on a mode-0600 Unix socket (parent directory must already
+    /// exist; process stdout is not an MCP stream in socket mode);
+    /// `--stdio` speaks MCP over stdin/stdout for Facet/agent hosts. The
+    /// two flags cannot be combined — `--stdio --socket PATH` exits 1,
+    /// and so does neither flag (there is no implicit default path).
+    /// No token, no server: `--token` or `$GEODE_TOKEN` is required.
     Serve {
-        /// Speak MCP over stdin/stdout (no socket).
+        /// Speak MCP over stdin/stdout (the Facet/agent host transport).
+        /// Mutually exclusive with `--socket PATH`; combining them exits 1.
         #[arg(long)]
         stdio: bool,
-        /// Unix socket path (default transport when `--stdio` is absent).
+        /// Serve MCP on a mode-0600 Unix socket at PATH — the same
+        /// newline-delimited JSON frames as `--stdio`. Mutually exclusive
+        /// with `--stdio`; one of the two is required (neither exits 1).
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
         /// Sealed agent token (hex armor or GTOK); else `$GEODE_TOKEN`.
