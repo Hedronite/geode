@@ -414,3 +414,191 @@ fn serve_stdio_mcp() {
     assert_eq!(frames[&6]["error"]["code"], -32602);
     assert_eq!(frames[&7]["error"]["code"], -32601);
 }
+
+/// One connection to the served socket: initialize, notifications/initialized,
+/// `tools/list`, `tools/call geode_list`. Returns the three response frames
+/// keyed by id, plus the entry paths from the `geode_list` result.
+fn socket_session(
+    sock: &Path,
+) -> (
+    std::collections::HashMap<i64, serde_json::Value>,
+    Vec<String>,
+) {
+    use std::io::BufRead as _;
+    let mut stream = std::os::unix::net::UnixStream::connect(sock).expect("connect");
+    let requests = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"geode_list","arguments":{"vault":"v.geode","prefix":"scratch/"}}}"#,
+        "\n",
+    );
+    stream.write_all(requests.as_bytes()).expect("write requests");
+    let mut reader = std::io::BufReader::new(stream);
+    let mut frames: std::collections::HashMap<i64, serde_json::Value> =
+        std::collections::HashMap::new();
+    let mut paths: Vec<String> = Vec::new();
+    for _ in 0..3 {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read frame");
+        let frame: serde_json::Value = serde_json::from_str(line.trim()).expect("frame json");
+        let id = frame["id"].as_i64().expect("frame id");
+        if id == 3 {
+            let text = frame["result"]["content"][0]["text"].as_str().expect("call text");
+            let doc: serde_json::Value = serde_json::from_str(text).expect("call doc");
+            assert_eq!(doc["ok"], true);
+            paths = doc["entries"]
+                .as_array()
+                .expect("entries")
+                .iter()
+                .map(|e| e["path"].as_str().expect("entry path").to_string())
+                .collect();
+        }
+        frames.insert(id, frame);
+    }
+    // Dropping `reader` closes the connection half; drop the whole stream
+    // implicitly by letting both go out of scope at return.
+    (frames, paths)
+}
+
+/// A --stdio server for the same token, speaking the same handshake and
+/// `tools/call geode_list`. Returns the `geode_list` document.
+fn stdio_list_parity(dir: &Path, token: &str) -> serde_json::Value {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_geode"))
+        .args(["--key", "k.gkey", "agent", "serve", "--stdio"])
+        .current_dir(dir)
+        .env("GEODE_TOKEN", token)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn stdio for parity");
+    let parity_req = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"geode_list","arguments":{"vault":"v.geode","prefix":"scratch/"}}}"#,
+        "\n",
+    );
+    child
+        .stdin
+        .take()
+        .expect("stdio stdin")
+        .write_all(parity_req.as_bytes())
+        .expect("write parity req");
+    let parity_out = child.wait_with_output().expect("wait stdio");
+    for line in String::from_utf8_lossy(&parity_out.stdout).lines() {
+        let frame: serde_json::Value = serde_json::from_str(line).expect("parity frame json");
+        if frame["id"].as_i64() == Some(3) {
+            let text = frame["result"]["content"][0]["text"].as_str().expect("parity text");
+            return serde_json::from_str(text).expect("parity doc");
+        }
+    }
+    panic!("parity geode_list frame not found");
+}
+
+/// G0 — `agent serve --socket agent.sock` from a temp cwd: binds with
+/// mode 0600 (parent exists, cwd-relative path), serves the same MCP
+/// toolset as `--stdio` (`tools/list` names + `tools/call geode_list`
+/// parity for the same token), keeps MCP bytes off process stdout, and
+/// unlinks the socket on exit.
+#[test]
+fn serve_socket_mcp() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_vault(dir);
+    let token = issue_token(dir, "list,read,write", "15m");
+
+    // Seed before any server runs, so the single socket listing contains
+    // the entry.
+    let seeded = geode_token(
+        dir,
+        &["--key", "k.gkey", "agent", "write", "v.geode", "scratch/s.txt"],
+        &token,
+        b"socket body\n",
+    );
+    assert_ok(&seeded, "agent write (seed)");
+
+    // No token: fail closed, exit 1, and no socket file is left behind.
+    let no_tok = geode(
+        dir,
+        &["--key", "k.gkey", "agent", "serve", "--socket", "agent.sock"],
+    );
+    assert_eq!(
+        no_tok.status.code(),
+        Some(1),
+        "serve without token: {}",
+        String::from_utf8_lossy(&no_tok.stderr)
+    );
+    assert!(!dir.join("agent.sock").exists(), "no socket without token");
+
+    // Serve from `dir` with a cwd-relative socket path (parent is Some("")
+    // — the bind must succeed).
+    let child = Command::new(env!("CARGO_BIN_EXE_geode"))
+        .args(["--key", "k.gkey", "agent", "serve", "--socket", "agent.sock"])
+        .current_dir(dir)
+        .env("GEODE_TOKEN", &token)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn serve --socket");
+
+    let sock = dir.join("agent.sock");
+    let mut bound = false;
+    for _ in 0..50 {
+        if sock.exists() {
+            bound = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(bound, "socket never bound");
+    let mode = std::os::unix::fs::MetadataExt::mode(&std::fs::metadata(&sock).expect("meta"));
+    assert_eq!(mode & 0o777, 0o600, "socket mode: {mode:o}");
+
+    let (frames, paths) = socket_session(&sock);
+    assert_eq!(frames[&1]["result"]["serverInfo"]["name"], "geode");
+    let tools = frames[&2]["result"]["tools"].as_array().expect("tools");
+    let mut names: Vec<&str> = tools
+        .iter()
+        .map(|t| t["name"].as_str().expect("tool name"))
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["geode_list", "geode_read", "geode_write"],
+        "tools/list over socket matches --stdio"
+    );
+    assert!(paths.contains(&"scratch/s.txt".to_string()), "entries: {paths:?}");
+
+    let parity_doc = stdio_list_parity(dir, &token);
+    let parity_paths: Vec<String> = parity_doc["entries"]
+        .as_array()
+        .expect("parity entries")
+        .iter()
+        .map(|e| e["path"].as_str().expect("entry path").to_string())
+        .collect();
+    assert_eq!(
+        paths, parity_paths,
+        "socket geode_list must match --stdio geode_list for the same token"
+    );
+
+    // The socket session ended (EOF) when its helpers dropped the stream:
+    // the server exits 0 and unlinks.
+    let out = child.wait_with_output().expect("wait serve");
+    assert!(
+        out.status.success(),
+        "serve exits 0 on socket EOF: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!sock.exists(), "socket must be unlinked after exit");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).trim().is_empty(),
+        "serve --socket must not write MCP frames to stdout"
+    );
+}
