@@ -1129,7 +1129,7 @@ impl<'g> StdioServer<'g> {
     fn run_loop_unix(&mut self, listener: &std::os::unix::net::UnixListener) -> Result<()> {
         let (stream, _addr) = listener.accept().map_err(Error::Io)?;
         let reader_stream = stream.try_clone().map_err(Error::Io)?;
-        let mut reader = BufReader::new(reader_stream);
+        let reader = BufReader::new(reader_stream);
         let mut writer = std::io::BufWriter::new(stream);
         for line in reader.lines() {
             let line = line.map_err(Error::Io)?;
@@ -1193,7 +1193,7 @@ fn serve(
     global: &GlobalArgs,
 ) -> Result<()> {
     match (stdio, socket) {
-        (false, None) | (true, Some(_)) => return Err(Error::NotImplemented),
+        (false, None) | (true, Some(_)) => Err(Error::NotImplemented),
         (true, None) => {
             let sealed = resolve_agent_token(token_flag)?;
             StdioServer::new(global, sealed).run_loop()
