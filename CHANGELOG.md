@@ -29,6 +29,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-09-23
+
+Contract freeze. `GDE1` objects written by 0.2.x remain readable. Suite `0x01` is unchanged. The next incompatible change to the format, the CLI verbs, the exit codes, or the MCP tools `geode_list`, `geode_read`, and `geode_write` is **2.0.0**.
+
+The public API is `geode-grotto`, the `geode` CLI, and those MCP tools on `--stdio` or `--socket PATH`.
+
+### Later
+
+- HedronDB integration and the h3s projected-token cookbook are **1.x** minors. They are additive.
+- The Darwin live FUSE mount is a **1.x.y** patch. Linux FUSE shipped in 0.2.8. Windows is not offered.
+
 ## [0.2.9] — 2026-09-23
 
 Compatible 0.x patch. Foundry pack **v032** (agent Unix socket). No format change; `GDE1` objects from 0.2.8 remain readable. macOS live FUSE is not in this tag. Windows is not offered.
