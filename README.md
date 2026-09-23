@@ -52,7 +52,7 @@ It is not a FUSE mount, not a post-quantum suite, and not an interop layer for o
 | Binary | `geode` ([`geode-cli`](crates/geode-cli)) |
 | Library | [`geode-grotto`](crates/geode-core) (Rust import `geode_grotto`) |
 | TUI | [`geode-tui`](crates/geode-tui), default feature `tui` |
-| Version | **0.2.9** · [v0.2.9](https://github.com/Hedronite/geode/releases/tag/v0.2.9) · [CHANGELOG](CHANGELOG.md) |
+| Version | **1.0.0** · [v1.0.0](https://github.com/Hedronite/geode/releases/tag/v1.0.0) · [CHANGELOG](CHANGELOG.md) |
 | Rust | 1.85 |
 | License | [Apache-2.0](LICENSE) |
 
@@ -98,7 +98,7 @@ A `--no-default-features` build has no TUI: `geode tui` then exits 1.
 
 | Claim | Reality |
 |---|---|
-| Kernel FUSE mount | Linux session shipped (`fuse` feature): foreground default, `--daemon` pid file, `geode unmount` via fusermount3. Darwin still exits 1. Windows is not offered. `--token` cannot mount. |
+| Kernel FUSE mount | Linux session shipped (`fuse` feature): foreground default, `--daemon` pid file, `geode unmount` via fusermount3. Darwin still exits 1; that fix is a 1.x.y patch. Windows is not offered. `--token` cannot mount. |
 | Post-quantum | Suite `0x01` only. No `pq` feature. |
 | Unix-socket MCP | `geode agent serve --socket PATH` and `--stdio` ship and are mutually exclusive. Combining them, or passing neither, exits 1. |
 | TUI unlock via token | The TUI is a human surface. `--token` / `GEODE_TOKEN` exist on token-gated agent verbs only. The TUI is Jev-free. |
@@ -131,7 +131,7 @@ vectors/v1/           # golden vectors: kdf, chunk, wrap, name
 
 ## Status
 
-Workspace **0.2.9** matches git tag [`v0.2.9`](https://github.com/Hedronite/geode/releases/tag/v0.2.9) and the crates.io versions of `geode-grotto` / `geode-tui` / `geode-cli`. GDE1 objects from 0.2.0 remain readable; the format is frozen at suite `0x01`.
+Workspace **1.0.0** matches git tag [`v1.0.0`](https://github.com/Hedronite/geode/releases/tag/v1.0.0) and the crates.io versions of `geode-grotto` / `geode-tui` / `geode-cli`. This tag freezes the contract. `GDE1` objects from 0.2.x remain readable. Suite `0x01` stays the suite. The next incompatible change is 2.0.0.
 
 Shipped on this tag:
 
@@ -139,12 +139,20 @@ Shipped on this tag:
 - `vault init`, `seal`, `open`, `verify`, `list`, `cat` (`--max-bytes`)
 - `--seal-names`, `snapshot create|ls`, `gc`
 - Operator TUI (`geode tui [VAULT]`, default feature `tui`)
-- `geode mount VAULT MOUNTPOINT`: Linux runs a FUSE session (feature `fuse`). Omit `--read-only` for read-write. Darwin still exits 1. `--token` cannot mount
+- `geode mount VAULT MOUNTPOINT`: Linux runs a FUSE session (feature `fuse`). Omit `--read-only` for read-write. Darwin still exits 1 (1.x.y). `--token` cannot mount
 - Agent plane: `token issue|inspect`, `agent list|read|write`, `agent serve --stdio` or `--socket PATH`
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): `cargo test --workspace --locked` and `clippy -D warnings` on `ubuntu-latest`.
 
-Known gaps are the rows in [What you do not get](#what-you-do-not-get). Do not claim a live kernel FUSE mount, a PQ suite, or TurboCrypt decryption from this repo.
+Known gaps are the rows in [What you do not get](#what-you-do-not-get). Linux FUSE is shipped. Do not claim a Darwin mount, a PQ suite, or TurboCrypt decryption from this repo.
+
+### After 1.0
+
+| Work | When |
+|---|---|
+| HedronDB hook | 1.x minor. Additive. |
+| h3s projected-token cookbook | 1.x minor. Additive. |
+| Darwin live FUSE mount | 1.x.y patch. Linux FUSE already shipped. |
 
 ## Contributing
 
