@@ -1219,11 +1219,17 @@ fn serve_socket(global: &GlobalArgs, sealed: Vec<u8>, path: &Path) -> Result<()>
             path.display()
         )));
     }
-    let Some(parent) = path.parent() else {
-        return Err(Error::Format(format!(
-            "socket path has no parent: {}",
-            path.display()
-        )));
+    // SPEC G0.1: `--socket agent.sock` (cwd-relative) has parent Some("")
+    // which is never a dir — an empty parent means ".".
+    let parent = match path.parent() {
+        Some(p) if p.as_os_str().is_empty() => Path::new("."),
+        Some(p) => p,
+        None => {
+            return Err(Error::Format(format!(
+                "socket path has no parent: {}",
+                path.display()
+            )));
+        }
     };
     if !parent.is_dir() {
         return Err(Error::Format(format!(
@@ -1235,7 +1241,15 @@ fn serve_socket(global: &GlobalArgs, sealed: Vec<u8>, path: &Path) -> Result<()>
         let _ = std::fs::remove_file(path);
         Error::Format(format!("bind {}: {e}", path.display()))
     })?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    // SPEC G0.4: after this process bound the socket, any error — including
+    // a chmod failure — must unlink PATH before returning.
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        let _ = std::fs::remove_file(path);
+        return Err(Error::Format(format!(
+            "chmod {}: {e}",
+            path.display()
+        )));
+    }
     let result = StdioServer::new(global, sealed).run_loop_unix(&listener);
     let _ = std::fs::remove_file(path);
     result
