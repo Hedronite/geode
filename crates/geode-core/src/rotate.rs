@@ -408,6 +408,7 @@ pub fn unwrap_epoch_ek(
 }
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::too_many_lines)]
     use super::*;
     use crate::chunk::DEFAULT_CHUNK_SIZE;
     use crate::kdf::{

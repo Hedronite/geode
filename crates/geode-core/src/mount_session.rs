@@ -54,6 +54,7 @@ impl MountSession {
     ///
     /// `chunk_size` comes from the vault header's `chunk_size_default`
     /// (03-format 3); `now_ms` seeds the `--sync-interval` clock.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // wire/format shape
     pub fn open(
         ek: &EpochKey,
         vault_root: &Path,

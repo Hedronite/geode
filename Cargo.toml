@@ -14,7 +14,6 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "warn"
-pedantic = "warn"
 
 # v0.2.0 adds the `tui` profile: geode-cli defaults feature `tui` on (14-tui §2).
 # `geode-grotto` still builds with no ratatui/crossterm. No `fuse` / `pq` features.

@@ -502,6 +502,7 @@ fn looks_like_gtok_hex(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::too_many_lines)]
     use super::*;
 
     fn sample() -> RemainderAsk {

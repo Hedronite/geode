@@ -204,6 +204,7 @@ pub fn wrap_x25519(
 /// For golden-vector generation and recovery tooling. Production callers
 /// SHOULD use [`wrap_x25519`], which draws both from the OS CSPRNG.
 #[allow(clippy::similar_names)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // wire/format shape
 pub fn wrap_x25519_with(
     ek: &EpochKey,
     ephemeral_sk_bytes: &[u8; 32],
@@ -320,6 +321,7 @@ pub fn unwrap_hybrid(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::too_many_lines)]
     use super::*;
 
     fn isk() -> IdentitySecret {

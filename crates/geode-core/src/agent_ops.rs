@@ -296,7 +296,7 @@ pub fn list(
 /// full plaintext, and a preview (first cap bytes; UTF-8 text preview when
 /// `mode == Text` and the preview is valid UTF-8). `Hash` mode returns only
 /// the digest.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // MCP tool entry
 pub fn read(
     ek: &EpochKey,
     vault_root: &Path,
@@ -450,6 +450,7 @@ pub fn write(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::too_many_lines)]
     use super::*;
     use crate::kdf::{Epoch, IdentitySecret, VaultId};
     use crate::manifest::Manifest;
