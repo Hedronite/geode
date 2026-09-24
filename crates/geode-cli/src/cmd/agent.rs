@@ -1245,10 +1245,7 @@ fn serve_socket(global: &GlobalArgs, sealed: Vec<u8>, path: &Path) -> Result<()>
     // a chmod failure — must unlink PATH before returning.
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
         let _ = std::fs::remove_file(path);
-        return Err(Error::Format(format!(
-            "chmod {}: {e}",
-            path.display()
-        )));
+        return Err(Error::Format(format!("chmod {}: {e}", path.display())));
     }
     let result = StdioServer::new(global, sealed).run_loop_unix(&listener);
     let _ = std::fs::remove_file(path);

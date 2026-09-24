@@ -58,7 +58,7 @@ impl Palette {
             fg: Color::Rgb(0xc8, 0xce, 0xd4),
             muted: Color::DarkGray,
             accent: Color::Rgb(0x2a, 0xb5, 0xa5), // teal crystal
-            gold: Color::Rgb(0xc8, 0xa8, 0x4e), // capstone gold
+            gold: Color::Rgb(0xc8, 0xa8, 0x4e),   // capstone gold
             red: Color::Rgb(0xd9, 0x4a, 0x4a),
         }
     }
@@ -71,7 +71,7 @@ impl Palette {
             fg: Color::Rgb(0x2a, 0x2a, 0x2a),
             muted: Color::Rgb(0x8a, 0x86, 0x7e),
             accent: Color::Rgb(0x1f, 0x8f, 0x82), // deeper teal on light
-            gold: Color::Rgb(0x9a, 0x7c, 0x2e), // deeper gold on light
+            gold: Color::Rgb(0x9a, 0x7c, 0x2e),   // deeper gold on light
             red: Color::Rgb(0xb0, 0x3a, 0x3a),
         }
     }

@@ -80,7 +80,10 @@ fn add(path: &Path, label: &str, out: OutMode) -> Result<()> {
         return Err(Error::Format("label must be 1-64 chars".into()));
     }
     let path = path.canonicalize().map_err(|e| {
-        Error::Io(std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+        Error::Io(std::io::Error::new(
+            e.kind(),
+            format!("{}: {e}", path.display()),
+        ))
     })?;
     let wrapped = is_wrapped(&path)?;
     // Deriving the key_id proves the file is a loadable GKEY. Wrapped keys
@@ -94,7 +97,8 @@ fn add(path: &Path, label: &str, out: OutMode) -> Result<()> {
     if kr.keys.iter().any(|k| k.label == label) {
         return Err(Error::Format(format!("label {label} already in keyring")));
     }
-    kr.keys.retain(|k| k.id != key_id && k.path != path.display().to_string());
+    kr.keys
+        .retain(|k| k.id != key_id && k.path != path.display().to_string());
     kr.keys.push(KeyringKey {
         id: key_id.clone(),
         path: path.display().to_string(),

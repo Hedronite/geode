@@ -71,7 +71,9 @@ fn setup_vault(dir: &Path) {
     // `scratch/` (cap 1 MiB, matching the CLI default `--max-bytes`).
     let show = geode(
         dir,
-        &["--key", "k.gkey", "--output", "json", "policy", "show", "v.geode"],
+        &[
+            "--key", "k.gkey", "--output", "json", "policy", "show", "v.geode",
+        ],
     );
     assert_ok(&show, "policy show (id)");
     let doc: serde_json::Value = serde_json::from_slice(&show.stdout).expect("show json");
@@ -206,7 +208,6 @@ fn agent_verbs_roundtrip() {
     );
     assert_ok(&r2, "agent read --token");
     assert_eq!(r2.stdout, b"hello agent\n");
-
 }
 
 #[test]
@@ -436,7 +437,9 @@ fn socket_session(
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"geode_list","arguments":{"vault":"v.geode","prefix":"scratch/"}}}"#,
         "\n",
     );
-    stream.write_all(requests.as_bytes()).expect("write requests");
+    stream
+        .write_all(requests.as_bytes())
+        .expect("write requests");
     let mut reader = std::io::BufReader::new(stream);
     let mut frames: std::collections::HashMap<i64, serde_json::Value> =
         std::collections::HashMap::new();
@@ -447,7 +450,9 @@ fn socket_session(
         let frame: serde_json::Value = serde_json::from_str(line.trim()).expect("frame json");
         let id = frame["id"].as_i64().expect("frame id");
         if id == 3 {
-            let text = frame["result"]["content"][0]["text"].as_str().expect("call text");
+            let text = frame["result"]["content"][0]["text"]
+                .as_str()
+                .expect("call text");
             let doc: serde_json::Value = serde_json::from_str(text).expect("call doc");
             assert_eq!(doc["ok"], true);
             paths = doc["entries"]
@@ -494,7 +499,9 @@ fn stdio_list_parity(dir: &Path, token: &str) -> serde_json::Value {
     for line in String::from_utf8_lossy(&parity_out.stdout).lines() {
         let frame: serde_json::Value = serde_json::from_str(line).expect("parity frame json");
         if frame["id"].as_i64() == Some(3) {
-            let text = frame["result"]["content"][0]["text"].as_str().expect("parity text");
+            let text = frame["result"]["content"][0]["text"]
+                .as_str()
+                .expect("parity text");
             return serde_json::from_str(text).expect("parity doc");
         }
     }
@@ -517,7 +524,14 @@ fn serve_socket_mcp() {
     // the entry.
     let seeded = geode_token(
         dir,
-        &["--key", "k.gkey", "agent", "write", "v.geode", "scratch/s.txt"],
+        &[
+            "--key",
+            "k.gkey",
+            "agent",
+            "write",
+            "v.geode",
+            "scratch/s.txt",
+        ],
         &token,
         b"socket body\n",
     );
@@ -526,7 +540,14 @@ fn serve_socket_mcp() {
     // No token: fail closed, exit 1, and no socket file is left behind.
     let no_tok = geode(
         dir,
-        &["--key", "k.gkey", "agent", "serve", "--socket", "agent.sock"],
+        &[
+            "--key",
+            "k.gkey",
+            "agent",
+            "serve",
+            "--socket",
+            "agent.sock",
+        ],
     );
     assert_eq!(
         no_tok.status.code(),
@@ -539,7 +560,14 @@ fn serve_socket_mcp() {
     // Serve from `dir` with a cwd-relative socket path (parent is Some("")
     // — the bind must succeed).
     let child = Command::new(env!("CARGO_BIN_EXE_geode"))
-        .args(["--key", "k.gkey", "agent", "serve", "--socket", "agent.sock"])
+        .args([
+            "--key",
+            "k.gkey",
+            "agent",
+            "serve",
+            "--socket",
+            "agent.sock",
+        ])
         .current_dir(dir)
         .env("GEODE_TOKEN", &token)
         .stdin(Stdio::piped())
@@ -574,7 +602,10 @@ fn serve_socket_mcp() {
         ["geode_list", "geode_read", "geode_write"],
         "tools/list over socket matches --stdio"
     );
-    assert!(paths.contains(&"scratch/s.txt".to_string()), "entries: {paths:?}");
+    assert!(
+        paths.contains(&"scratch/s.txt".to_string()),
+        "entries: {paths:?}"
+    );
 
     let parity_doc = stdio_list_parity(dir, &token);
     let parity_paths: Vec<String> = parity_doc["entries"]

@@ -46,7 +46,9 @@ fn check_chunk(
         let this_plain = cs.min(header.plain_len - u64::from(j) * cs);
         let rec_len = 16 + this_plain as usize;
         if j == index {
-            let rec = chunks.get(offset..offset + rec_len).ok_or(Error::AuthFail)?;
+            let rec = chunks
+                .get(offset..offset + rec_len)
+                .ok_or(Error::AuthFail)?;
             let ad = aead::ChunkAd {
                 suite: header.suite,
                 vault_id: header.vault_id,

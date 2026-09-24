@@ -18,17 +18,18 @@ fn geode(dir: &Path, args: &[&str]) -> Output {
 }
 
 fn setup_vault(dir: &Path) {
+    assert!(geode(dir, &["keygen", "k.gkey"]).status.success(), "keygen");
     assert!(
-        geode(dir, &["keygen", "k.gkey"]).status.success(),
-        "keygen"
-    );
-    assert!(
-        geode(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]).status.success(),
+        geode(dir, &["--key", "k.gkey", "vault", "init", "v.geode"])
+            .status
+            .success(),
         "vault init"
     );
     let show = geode(
         dir,
-        &["--key", "k.gkey", "--output", "json", "policy", "show", "v.geode"],
+        &[
+            "--key", "k.gkey", "--output", "json", "policy", "show", "v.geode",
+        ],
     );
     assert!(show.status.success(), "policy show");
     let doc: serde_json::Value = serde_json::from_slice(&show.stdout).expect("show json");
@@ -158,7 +159,8 @@ fn none_transport_asks_and_does_not_auto_allow() {
     assert!(stdout.contains("\"auto_allow\":false") || stdout.contains("\"auto_allow\": false"));
     assert!(stdout.contains("\"shadow\":true") || stdout.contains("\"shadow\": true"));
     assert!(
-        stdout.contains("\"status\":\"unavailable\"") || stdout.contains("\"status\": \"unavailable\"")
+        stdout.contains("\"status\":\"unavailable\"")
+            || stdout.contains("\"status\": \"unavailable\"")
     );
     assert!(!stdout.contains("sk-") && !stderr.contains("sk-"));
     assert!(!stdout.contains("GTOK") && !stderr.contains("GTOK"));

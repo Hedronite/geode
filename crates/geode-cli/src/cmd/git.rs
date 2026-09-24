@@ -392,7 +392,11 @@ fn lock(global: &GlobalArgs, out: OutMode) -> Result<()> {
         &format!(
             "unlinked {} working cop{}, {} missing",
             report.unlinked.len(),
-            if report.unlinked.len() == 1 { "y" } else { "ies" },
+            if report.unlinked.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
             report.missing.len()
         ),
     );

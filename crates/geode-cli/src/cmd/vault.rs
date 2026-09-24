@@ -261,9 +261,7 @@ fn select_keep(recs: Vec<Recipient>, drops: &[String], adds: &[PathBuf]) -> Resu
                 keep.remove(*i);
             }
             [] => {
-                return Err(Error::Format(format!(
-                    "no recipient matching {needle}"
-                )));
+                return Err(Error::Format(format!("no recipient matching {needle}")));
             }
             _ => {
                 return Err(Error::Format(format!(
@@ -287,9 +285,7 @@ fn select_keep(recs: Vec<Recipient>, drops: &[String], adds: &[PathBuf]) -> Resu
         });
     }
     if keep.is_empty() {
-        return Err(Error::Format(
-            "rotate would leave no recipients".into(),
-        ));
+        return Err(Error::Format("rotate would leave no recipients".into()));
     }
     Ok(keep)
 }

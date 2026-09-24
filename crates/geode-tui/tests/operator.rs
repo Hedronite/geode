@@ -45,7 +45,12 @@ impl Fixture {
         let root = tmp.path().to_path_buf();
         let key = root.join("id.gkey");
         let vault = root.join("notes.geode");
-        Self { _tmp: tmp, root, key, vault }
+        Self {
+            _tmp: tmp,
+            root,
+            key,
+            vault,
+        }
     }
 
     fn build(&self) -> String {
