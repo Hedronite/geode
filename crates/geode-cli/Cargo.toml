@@ -24,8 +24,8 @@ tui = ["dep:geode-tui"]
 fuse = ["dep:fuser"]
 
 [dependencies]
-geode-grotto = { version = "1.0.0", path = "../geode-core" }
-geode-tui = { version = "1.0.0", path = "../geode-tui", optional = true }
+geode-grotto = { version = "1.0.1", path = "../geode-core" }
+geode-tui = { version = "1.0.1", path = "../geode-tui", optional = true }
 fuser = { version = "0.15.1", optional = true }
 blake3 = "1"
 base64ct = { version = "1", features = ["alloc"] }
