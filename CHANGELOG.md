@@ -3,7 +3,7 @@ title: Geode changelog
 type: repo-changelog
 status: current
 created: "2026-09-15"
-updated: "2026-09-23"
+updated: "2026-09-25"
 related:
   - "[[foundry/geode/geode-spec-0.0.0/SPEC]]"
   - "[[foundry/geode/geode-spec-0.0.0/12-roadmap]]"
@@ -28,6 +28,20 @@ related:
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise). Foundry packs v021/v022 are milestones, not the git tag ([[foundry/SEMVER]]).
 
 ## [Unreleased]
+
+## [1.0.1] — 2026-09-25
+
+Compatible 1.x patch on the 1.0 contract (foundry [[foundry/SEMVER]]). CLI verbs, exit codes, MCP tools `geode_list` / `geode_read` / `geode_write`, and GDE1 suite `0x01` are unchanged. `GDE1` objects written by 1.0.0 remain readable.
+
+### Fixed
+
+- Linux FUSE intern path: inherent helpers take the existing `Node` type (trait `Filesystem` methods stay clippy-exempt).
+- TUI tests that spawn the `geode` binary locate it when `cargo llvm-cov` uses a separate target directory (one-level scan of `target/`).
+- GitHub Actions: install FFI sysdeps before `--all-features`; MSRV 1.89 (lock-graph max, including target-gated deps); feature-matrix; record-only coverage whose artifacts must be nonempty. No job-level `RUSTFLAGS=-D warnings`. No `--fail-under-lines`.
+
+### Changed
+
+- rust-tops kit drop-in (`clippy.toml`, nextest, mutants, crap, deny, instance yaml) and grotto property tests. Production density extracts group the same seal/read fields; on-disk format and CLI surface are unchanged.
 
 ## [1.0.0] — 2026-09-23
 
@@ -189,7 +203,9 @@ First release. Conformance profile **`core`** ([[foundry/geode/geode-spec-0.0.0/
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/VirtualMachinist/geode/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/Hedronite/geode/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/Hedronite/geode/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/Hedronite/geode/compare/v0.2.9...v1.0.0
 [0.2.4]: https://github.com/VirtualMachinist/geode/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/VirtualMachinist/geode/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/VirtualMachinist/geode/compare/v0.2.1...v0.2.2

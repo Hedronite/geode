@@ -52,7 +52,7 @@ It is not a FUSE mount, not a post-quantum suite, and not an interop layer for o
 | Binary | `geode` ([`geode-cli`](crates/geode-cli)) |
 | Library | [`geode-grotto`](crates/geode-core) (Rust import `geode_grotto`) |
 | TUI | [`geode-tui`](crates/geode-tui), default feature `tui` |
-| Version | **1.0.0** · [v1.0.0](https://github.com/Hedronite/geode/releases/tag/v1.0.0) · [CHANGELOG](CHANGELOG.md) |
+| Version | **1.0.1** · [v1.0.1](https://github.com/Hedronite/geode/releases/tag/v1.0.1) · [CHANGELOG](CHANGELOG.md) |
 | Rust | 1.89 |
 | License | [Apache-2.0](LICENSE) |
 
@@ -131,7 +131,7 @@ vectors/v1/           # golden vectors: kdf, chunk, wrap, name
 
 ## Status
 
-Workspace **1.0.0** matches git tag [`v1.0.0`](https://github.com/Hedronite/geode/releases/tag/v1.0.0) and the crates.io versions of `geode-grotto` / `geode-tui` / `geode-cli`. This tag freezes the contract. `GDE1` objects from 0.2.x remain readable. Suite `0x01` stays the suite. The next incompatible change is 2.0.0.
+Workspace **1.0.1** matches git tag [`v1.0.1`](https://github.com/Hedronite/geode/releases/tag/v1.0.1) and the crates.io versions of `geode-grotto` / `geode-tui` / `geode-cli`. Compatible patch on the 1.0 contract. `GDE1` objects from 1.0.0 remain readable. Suite `0x01` stays the suite. The next incompatible change to the format, CLI verbs, exit codes, or MCP tools is 2.0.0.
 
 Shipped on this tag:
 

@@ -952,7 +952,7 @@ dependencies = [
 
 [[package]]
 name = "geode-cli"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "base64ct",
  "blake3",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "geode-grotto"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "aegis",
  "aes 0.8.4",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "geode-tui"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "blake3",
  "crossterm",
