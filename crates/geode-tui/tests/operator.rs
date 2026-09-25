@@ -21,15 +21,32 @@ use std::fmt::Write as _;
 
 /// Path to the built `geode` binary (same fallback as the CLI tests).
 fn geode_bin() -> PathBuf {
+    let mut tried: Vec<String> = Vec::new();
     for key in ["CARGO_BIN_EXE_GEO_DE", "CARGO_BIN_EXE_geode"] {
         if let Ok(p) = std::env::var(key) {
-            return PathBuf::from(p);
+            let pb = PathBuf::from(&p);
+            tried.push(format!("{key}={p}"));
+            if pb.is_file() {
+                return pb;
+            }
         }
     }
-    PathBuf::from(format!(
+    if let Ok(td) = std::env::var("CARGO_TARGET_DIR") {
+        let pb = PathBuf::from(&td).join("debug/geode");
+        tried.push(format!("CARGO_TARGET_DIR/debug/geode={}", pb.display()));
+        if pb.is_file() {
+            return pb;
+        }
+    }
+    let pb = PathBuf::from(format!(
         "{}/../../target/debug/geode",
         env!("CARGO_MANIFEST_DIR")
-    ))
+    ));
+    tried.push(format!("manifest fallback={}", pb.display()));
+    if pb.is_file() {
+        return pb;
+    }
+    panic!("geode binary not found; tried:\n  {}", tried.join("\n  "));
 }
 
 struct Fixture {

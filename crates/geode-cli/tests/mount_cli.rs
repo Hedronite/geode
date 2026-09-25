@@ -88,7 +88,6 @@ fn assert_warning(out: &Output, what: &str) {
     );
 }
 
-#[cfg_attr(all(feature = "fuse", target_os = "linux"), allow(dead_code))]
 #[allow(dead_code)]
 fn assert_live_exit_1(out: &Output, what: &str) {
     let err = stderr(out);
