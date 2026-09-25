@@ -222,11 +222,13 @@ pub fn seal(
     let object_id = vault::new_object_id()?;
     let sealed = object::seal_object(
         ek,
-        vault_id,
-        epoch,
-        object_id,
-        DEFAULT_CHUNK_SIZE,
-        &bind,
+        &object::ObjectSpec {
+            vault_id,
+            epoch,
+            object_id,
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            path_bind: &bind,
+        },
         plaintext,
     )?;
     vault::write_object(

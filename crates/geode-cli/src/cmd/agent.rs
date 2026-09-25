@@ -735,6 +735,17 @@ fn mcp_error_code(err: &Error) -> &'static str {
     }
 }
 
+/// One authenticated agent-plane tool call (06-agent-plane 3/4).
+struct AgentCall<'a> {
+    facet_events: bool,
+    ctx: &'a cmd::VaultCtx,
+    claims: &'a Token,
+    sealed: &'a [u8],
+    now: i64,
+    vault: &'a str,
+    args: &'a serde_json::Value,
+}
+
 /// The stdio MCP server (06-agent-plane 3). One process, one token; EK is
 /// unwrapped once per vault and cached — the ISK is dropped after each
 /// unwrap and never held across requests.
@@ -901,57 +912,56 @@ impl<'g> StdioServer<'g> {
         // op); the claims drive the default prefix and Facet events.
         let claims = token::inspect(&self.sealed, &ctx.ek, now)?;
         match name {
-            "geode_list" => Self::list_tool(
-                self.facet_events,
+            "geode_list" => Self::list_tool(&AgentCall {
+                facet_events: self.facet_events,
                 ctx,
-                &claims,
-                &self.sealed,
+                claims: &claims,
+                sealed: &self.sealed,
                 now,
                 vault,
                 args,
-            ),
-            "geode_read" => Self::read_tool(
-                self.facet_events,
+            }),
+            "geode_read" => Self::read_tool(&AgentCall {
+                facet_events: self.facet_events,
                 ctx,
-                &claims,
-                &self.sealed,
+                claims: &claims,
+                sealed: &self.sealed,
                 now,
                 vault,
                 args,
-            ),
-            "geode_write" => Self::write_tool(
-                self.facet_events,
+            }),
+            "geode_write" => Self::write_tool(&AgentCall {
+                facet_events: self.facet_events,
                 ctx,
-                &claims,
-                &self.sealed,
+                claims: &claims,
+                sealed: &self.sealed,
                 now,
                 vault,
                 args,
-            ),
+            }),
             other => Err(Error::Format(format!("unknown tool '{other}'"))),
         }
     }
 
     /// `geode_list` (06-agent-plane 3): entries under a covered prefix.
-    #[allow(clippy::too_many_arguments)]
-    fn list_tool(
-        facet_events: bool,
-        ctx: &cmd::VaultCtx,
-        claims: &Token,
-        sealed: &[u8],
-        now: i64,
-        vault: &str,
-        args: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let prefix = match args.get("prefix").and_then(|p| p.as_str()) {
+    fn list_tool(call: &AgentCall<'_>) -> Result<serde_json::Value> {
+        let prefix = match call.args.get("prefix").and_then(|p| p.as_str()) {
             Some(p) => p.to_owned(),
-            None => claims
+            None => call
+                .claims
                 .allow_prefix
                 .first()
                 .cloned()
                 .ok_or_else(|| Error::Format("token grants no prefix to list".into()))?,
         };
-        let entries = agent_ops::list(&ctx.ek, Path::new(vault), sealed, now, &prefix, false)?;
+        let entries = agent_ops::list(
+            &call.ctx.ek,
+            Path::new(call.vault),
+            call.sealed,
+            call.now,
+            &prefix,
+            false,
+        )?;
         let files: Vec<serde_json::Value> = entries
             .iter()
             .map(|e| {
@@ -962,8 +972,15 @@ impl<'g> StdioServer<'g> {
                 })
             })
             .collect();
-        Self::facet_event(facet_events, ctx, claims, "list", &prefix, None);
-        let jev = remainder_annotation("list", &prefix, claims, args, None);
+        Self::facet_event(
+            call.facet_events,
+            call.ctx,
+            call.claims,
+            "list",
+            &prefix,
+            None,
+        );
+        let jev = remainder_annotation("list", &prefix, call.claims, call.args, None);
         Ok(with_jev(
             serde_json::json!({
                 "ok": true,
@@ -977,22 +994,22 @@ impl<'g> StdioServer<'g> {
     }
 
     /// `geode_read` (06-agent-plane 4): body, capped preview, or hash only.
-    #[allow(clippy::too_many_arguments)]
-    fn read_tool(
-        facet_events: bool,
-        ctx: &cmd::VaultCtx,
-        claims: &Token,
-        sealed: &[u8],
-        now: i64,
-        vault: &str,
-        args: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let path = args
+    fn read_tool(call: &AgentCall<'_>) -> Result<serde_json::Value> {
+        let path = call
+            .args
             .get("path")
             .and_then(|p| p.as_str())
             .ok_or_else(|| Error::Format("missing argument 'path'".into()))?;
-        let max_bytes = args.get("max_bytes").and_then(serde_json::Value::as_u64);
-        let mode = match args.get("mode").and_then(|m| m.as_str()).unwrap_or("text") {
+        let max_bytes = call
+            .args
+            .get("max_bytes")
+            .and_then(serde_json::Value::as_u64);
+        let mode = match call
+            .args
+            .get("mode")
+            .and_then(|m| m.as_str())
+            .unwrap_or("text")
+        {
             "text" => ReadMode::Text,
             "hex" => ReadMode::Hex,
             "hash" => ReadMode::Hash,
@@ -1001,41 +1018,40 @@ impl<'g> StdioServer<'g> {
             }
         };
         let outcome = agent_ops::read(
-            &ctx.ek,
-            Path::new(vault),
-            sealed,
-            now,
+            &call.ctx.ek,
+            Path::new(call.vault),
+            call.sealed,
+            call.now,
             path,
             max_bytes,
             mode,
             false,
         )?;
-        Self::facet_event(facet_events, ctx, claims, "read", &outcome.path, None);
+        Self::facet_event(
+            call.facet_events,
+            call.ctx,
+            call.claims,
+            "read",
+            &outcome.path,
+            None,
+        );
         let mut doc = read_doc(&outcome, mode);
         doc["ok"] = serde_json::json!(true);
         doc["verb"] = serde_json::json!("read");
         Ok(with_jev(
             doc,
-            remainder_annotation("read", &outcome.path, claims, args, None),
+            remainder_annotation("read", &outcome.path, call.claims, call.args, None),
         ))
     }
 
     /// `geode_write` (06-agent-plane 3, 4): seal `body`/`body_hex` at path.
-    #[allow(clippy::too_many_arguments)]
-    fn write_tool(
-        facet_events: bool,
-        ctx: &cmd::VaultCtx,
-        claims: &Token,
-        sealed: &[u8],
-        now: i64,
-        vault: &str,
-        args: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let path = args
+    fn write_tool(call: &AgentCall<'_>) -> Result<serde_json::Value> {
+        let path = call
+            .args
             .get("path")
             .and_then(|p| p.as_str())
             .ok_or_else(|| Error::Format("missing argument 'path'".into()))?;
-        let body: Vec<u8> = match (args.get("body"), args.get("body_hex")) {
+        let body: Vec<u8> = match (call.args.get("body"), call.args.get("body_hex")) {
             (Some(b), None) => b
                 .as_str()
                 .ok_or_else(|| Error::Format("'body' must be a string".into()))?
@@ -1058,11 +1074,19 @@ impl<'g> StdioServer<'g> {
                 ));
             }
         };
-        let outcome = agent_ops::write(&ctx.ek, Path::new(vault), sealed, now, path, &body, false)?;
+        let outcome = agent_ops::write(
+            &call.ctx.ek,
+            Path::new(call.vault),
+            call.sealed,
+            call.now,
+            path,
+            &body,
+            false,
+        )?;
         Self::facet_event(
-            facet_events,
-            ctx,
-            claims,
+            call.facet_events,
+            call.ctx,
+            call.claims,
             "write",
             &outcome.path,
             Some(&outcome.content_root),
@@ -1076,7 +1100,7 @@ impl<'g> StdioServer<'g> {
                 "object_id": cmd::hex(&outcome.object_id.0),
                 "content_root": cmd::hex(&outcome.content_root),
             }),
-            remainder_annotation("write", &outcome.path, claims, args, Some(&body)),
+            remainder_annotation("write", &outcome.path, call.claims, call.args, Some(&body)),
         ))
     }
 

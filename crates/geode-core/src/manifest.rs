@@ -202,6 +202,19 @@ fn mac_with(manifest_key: &[u8; 32], ad: &[u8], body: &[u8]) -> [u8; 16] {
 mod tests {
     use super::*;
 
+    /// SPEC §4.6: canonical form must be a fixed point. Non-integer floats are
+    /// out of scope until RS-10; this counterexample lives ignored (OS-03).
+    #[test]
+    #[ignore = "RS-10: canonicalize is not idempotent on non-integer floats (owner grotto)"]
+    fn canonicalize_float_not_idempotent() {
+        let raw = br#"508808808808044004444"#;
+        let v: serde_json::Value = serde_json::from_slice(raw).unwrap();
+        let once = canonicalize(&v).unwrap();
+        let reparsed: serde_json::Value = serde_json::from_slice(&once).unwrap();
+        let twice = canonicalize(&reparsed).unwrap();
+        assert_eq!(once, twice, "canonical form must be a fixed point");
+    }
+
     #[test]
     fn canonicalize_sorts_keys() {
         let v: serde_json::Value = serde_json::json!({"b":1,"a":2,"c":3});

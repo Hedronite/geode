@@ -189,11 +189,13 @@ mod r_apply_oracle_tests {
         let plain = b"oracle-chunk-bytes";
         let sealed = object::seal_object(
             &ek,
-            VaultId([1u8; 16]),
-            Epoch(1),
-            oid,
-            geode_grotto::chunk::DEFAULT_CHUNK_SIZE,
-            b"",
+            &object::ObjectSpec {
+                vault_id: VaultId([1u8; 16]),
+                epoch: Epoch(1),
+                object_id: oid,
+                chunk_size: geode_grotto::chunk::DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
             plain,
         )
         .unwrap();

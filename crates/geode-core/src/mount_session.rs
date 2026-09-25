@@ -307,7 +307,17 @@ mod tests {
         let new = s.fsync("big.bin", 3).unwrap();
         assert_ne!(new, old, "flush allocates a fresh object_id");
         assert_eq!(s.read_all("big.bin").unwrap(), want);
-        let old_pt = vfs::read_range(&ek(), &root, Epoch(1), old, b"", 0, total).unwrap();
+        let old_pt = vfs::read_range(
+            &ek(),
+            &vfs::ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: old,
+                path_bind: b"",
+            },
+            vfs::ByteRange::new(0, total),
+        )
+        .unwrap();
         assert_eq!(
             old_pt, body,
             "the superseded .gobj still reads its old body"

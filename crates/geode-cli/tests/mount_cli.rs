@@ -89,6 +89,7 @@ fn assert_warning(out: &Output, what: &str) {
 }
 
 #[cfg_attr(all(feature = "fuse", target_os = "linux"), allow(dead_code))]
+#[allow(dead_code)]
 fn assert_live_exit_1(out: &Output, what: &str) {
     let err = stderr(out);
     assert_eq!(out.status.code(), Some(1), "{what}: {err}");
@@ -120,21 +121,43 @@ fn assert_no_isk(out: &Output, dir: &Path, what: &str) {
     assert!(!text.contains("ISK"), "{what} leaked ISK marker: {text}");
 }
 
+fn mountpoint(dir: &Path) -> std::path::PathBuf {
+    let mp = dir.join("mp");
+    std::fs::create_dir_all(&mp).expect("mountpoint");
+    mp
+}
+
 fn setup_key(dir: &Path) {
     let out = geode(dir, &["keygen", "k.gkey"]);
     assert!(out.status.success(), "keygen: {}", combined(&out));
 }
 
+#[allow(dead_code)]
+fn setup_vault(dir: &Path) {
+    setup_key(dir);
+    let out = geode(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]);
+    assert!(out.status.success(), "vault init: {}", combined(&out));
+}
+
 /// Valid-key mounts block when feature `fuse` is on and the target is
 /// Linux. Default `cargo test` leaves `fuse` off, so this stays kernel-free.
-#[cfg(not(all(feature = "fuse", target_os = "linux")))]
+#[cfg(not(feature = "fuse"))]
 #[test]
 fn mount_without_read_only_is_read_write() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
-    setup_key(dir);
+    setup_vault(dir);
 
-    let bare = geode(dir, &["--key", "k.gkey", "mount", "v.geode", "mp"]);
+    let bare = geode(
+        dir,
+        &[
+            "--key",
+            "k.gkey",
+            "mount",
+            "v.geode",
+            mountpoint(dir).to_str().unwrap(),
+        ],
+    );
     assert_live_exit_1(&bare, "bare mount");
     assert_warning(&bare, "bare mount");
     let err = stderr(&bare);
@@ -160,16 +183,23 @@ fn mount_without_read_only_is_read_write() {
     assert_no_isk(&bare, dir, "bare mount");
 }
 
-#[cfg(not(all(feature = "fuse", target_os = "linux")))]
+#[cfg(not(feature = "fuse"))]
 #[test]
 fn mount_read_only_stays_read_only() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
-    setup_key(dir);
+    setup_vault(dir);
 
     let ro = geode(
         dir,
-        &["--key", "k.gkey", "mount", "v.geode", "mp", "--read-only"],
+        &[
+            "--key",
+            "k.gkey",
+            "mount",
+            "v.geode",
+            mountpoint(dir).to_str().unwrap(),
+            "--read-only",
+        ],
     );
     assert_live_exit_1(&ro, "read-only mount");
     assert_warning(&ro, "read-only mount");
@@ -185,15 +215,22 @@ fn mount_read_only_stays_read_only() {
     assert_no_isk(&ro, dir, "read-only mount");
 }
 
-#[cfg(not(all(feature = "fuse", target_os = "linux")))]
+#[cfg(not(feature = "fuse"))]
 #[test]
 fn mount_daemon_without_fuse_feature_exits_1() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
-    setup_key(dir);
+    setup_vault(dir);
     let out = geode(
         dir,
-        &["--key", "k.gkey", "mount", "v.geode", "mp", "--daemon"],
+        &[
+            "--key",
+            "k.gkey",
+            "mount",
+            "v.geode",
+            mountpoint(dir).to_str().unwrap(),
+            "--daemon",
+        ],
     );
     assert_live_exit_1(&out, "daemon mount");
     assert_warning(&out, "daemon mount");
@@ -210,7 +247,10 @@ fn mount_requires_key() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
 
-    let no_key = geode(dir, &["mount", "v.geode", "mp"]);
+    let no_key = geode(
+        dir,
+        &["mount", "v.geode", mountpoint(dir).to_str().unwrap()],
+    );
     assert_eq!(
         no_key.status.code(),
         Some(1),
@@ -226,7 +266,10 @@ fn mount_requires_key() {
     );
 
     // GEODE_TOKEN never substitutes for --key.
-    let token_env = geode_with_token_env(dir, &["mount", "v.geode", "mp"]);
+    let token_env = geode_with_token_env(
+        dir,
+        &["mount", "v.geode", mountpoint(dir).to_str().unwrap()],
+    );
     assert_eq!(
         token_env.status.code(),
         Some(1),
@@ -257,11 +300,25 @@ fn mount_token_cannot_mount() {
 
     for (args, what) in [
         (
-            &["mount", "v.geode", "mp", "--token", "x"][..],
+            &[
+                "mount",
+                "v.geode",
+                mountpoint(dir).to_str().unwrap(),
+                "--token",
+                "x",
+            ][..],
             "mount --token",
         ),
         (
-            &["--key", "k.gkey", "mount", "v.geode", "mp", "--token", "x"][..],
+            &[
+                "--key",
+                "k.gkey",
+                "mount",
+                "v.geode",
+                mountpoint(dir).to_str().unwrap(),
+                "--token",
+                "x",
+            ][..],
             "mount --key --token",
         ),
     ] {

@@ -11,7 +11,7 @@ cargo-mutants = "27.1.0"
 cargo-crap = "0.5.0"
 cargo-deny = "0.20.2"
 cargo-fuzz = "0.13.2"
-nightly = "MISSING"
+nightly = "1.100.0-nightly"
 
 [auto8]
 measured = "2026-09-24"

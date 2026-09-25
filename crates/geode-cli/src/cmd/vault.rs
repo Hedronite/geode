@@ -352,21 +352,27 @@ fn rotate(args: &RotateArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         objects = rotate::reseal(
             &args.dir,
             ctx.vault_id,
-            ctx.epoch,
-            &outcome.old_ek,
-            outcome.new_epoch,
-            &outcome.new_ek,
-            &generator,
-            generated_at,
+            &rotate::EpochKeys {
+                old_epoch: ctx.epoch,
+                old_ek: &outcome.old_ek,
+                new_epoch: outcome.new_epoch,
+                new_ek: &outcome.new_ek,
+            },
+            &rotate::RotationStamp {
+                generator: &generator,
+                generated_at,
+            },
         )?;
     }
     let policy_resealed = rotate::reseal_policy(
         &args.dir,
         ctx.vault_id,
-        ctx.epoch,
-        &outcome.old_ek,
-        outcome.new_epoch,
-        &outcome.new_ek,
+        &rotate::EpochKeys {
+            old_epoch: ctx.epoch,
+            old_ek: &outcome.old_ek,
+            new_epoch: outcome.new_epoch,
+            new_ek: &outcome.new_ek,
+        },
     )?;
     bump_header_epoch(&args.dir, outcome.new_epoch, &outcome.new_ek, ctx.vault_id)?;
     drop(isk);

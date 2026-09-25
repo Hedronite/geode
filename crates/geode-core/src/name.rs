@@ -61,11 +61,11 @@ pub const NAME_ENCODING: &str = "base32hex";
 const HCTR2_BLOCK: usize = 16;
 
 /// Build the HCTR2 tweak: `vault_id || le32(epoch) || parent_id` (36 bytes).
-fn build_tweak(vault_id: &VaultId, epoch: Epoch, parent_id: &[u8; 16]) -> Vec<u8> {
-    let mut t = Vec::with_capacity(16 + 4 + 16);
-    t.extend_from_slice(&vault_id.0);
-    t.extend_from_slice(&epoch.0.to_le_bytes());
-    t.extend_from_slice(parent_id);
+fn build_tweak(vault_id: &VaultId, epoch: Epoch, parent_id: &[u8; 16]) -> [u8; 36] {
+    let mut t = [0u8; 36];
+    t[..16].copy_from_slice(&vault_id.0);
+    t[16..20].copy_from_slice(&epoch.0.to_le_bytes());
+    t[20..36].copy_from_slice(parent_id);
     t
 }
 
@@ -82,9 +82,9 @@ fn name_pad(
     h.update(parent_id);
     h.update(component);
     let mut xof = h.finalize_xof();
-    let mut pad = vec![0u8; pad_len];
-    xof.fill(&mut pad);
-    pad
+    let mut buf = [0u8; 255];
+    xof.fill(&mut buf[..pad_len]);
+    buf[..pad_len].to_vec()
 }
 
 fn base32hex_encoding() -> &'static data_encoding::Encoding {

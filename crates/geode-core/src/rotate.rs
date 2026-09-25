@@ -42,7 +42,7 @@ use crate::kdf::{
     VaultId,
 };
 use crate::manifest::{entries_root, Manifest};
-use crate::object::{open_object, seal_object, HEADER_SIZE};
+use crate::object::{open_object, seal_object, ObjectSpec, HEADER_SIZE};
 use crate::recipients::{self, wrap_symmetric, wrap_x25519, Recipient, Recipients};
 use crate::snapshot::{read_manifest_file, write_manifest_file};
 use crate::vault::{self, hex_encode, init_vault_dir, write_atomic};
@@ -207,6 +207,22 @@ pub fn rotate_epoch(
     commit_rotation(vault_root, plan.vault_id, &outcome, generator, generated_at)?;
     Ok(outcome)
 }
+/// The EK pair of an epoch rotation (04-vault 6; 02-cryptography 3).
+#[derive(Debug)]
+pub struct EpochKeys<'a> {
+    pub old_epoch: Epoch,
+    pub old_ek: &'a EpochKey,
+    pub new_epoch: Epoch,
+    pub new_ek: &'a EpochKey,
+}
+
+/// Provenance stamped into a rewritten manifest.
+#[derive(Debug)]
+pub struct RotationStamp<'a> {
+    pub generator: &'a str,
+    pub generated_at: i64,
+}
+
 // ---- Reseal (G0c) ----
 
 /// Reseal all objects referenced by the old-epoch manifest under the new EK
@@ -219,35 +235,30 @@ pub fn rotate_epoch(
 /// Old-epoch objects remain on disk until `snapshot::gc`.
 ///
 /// Returns the count of rewritten objects. Errors never contain ISK.
-#[allow(clippy::too_many_arguments, clippy::similar_names)]
 pub fn reseal(
     vault_root: &Path,
     vault_id: VaultId,
-    old_epoch: Epoch,
-    old_ek: &EpochKey,
-    new_epoch: Epoch,
-    new_ek: &EpochKey,
-    generator: &str,
-    generated_at: i64,
+    keys: &EpochKeys<'_>,
+    stamp: &RotationStamp<'_>,
 ) -> Result<u64> {
-    let old_mk = derive_manifest_key(old_ek, vault_id, old_epoch);
-    let old_manifest = read_manifest_file(vault_root, old_epoch, &old_mk)?;
+    let old_mk = derive_manifest_key(keys.old_ek, vault_id, keys.old_epoch);
+    let old_manifest = read_manifest_file(vault_root, keys.old_epoch, &old_mk)?;
     if old_manifest.entries.is_empty() {
-        let new_mk = derive_manifest_key(new_ek, vault_id, new_epoch);
+        let new_mk = derive_manifest_key(keys.new_ek, vault_id, keys.new_epoch);
         let m = Manifest {
             vault_id,
-            epoch: new_epoch,
+            epoch: keys.new_epoch,
             suite: crate::SUITE_0X01,
             flags: old_manifest.flags,
-            generated_at,
-            generator: generator.to_string(),
+            generated_at: stamp.generated_at,
+            generator: stamp.generator.to_string(),
             root: entries_root(&[])?,
             entry_count: 0,
             total_plain_bytes: 0,
             total_cipher_bytes: 0,
             entries: vec![],
         };
-        write_manifest_file(vault_root, new_epoch, &m, &new_mk)?;
+        write_manifest_file(vault_root, keys.new_epoch, &m, &new_mk)?;
         return Ok(0);
     }
 
@@ -255,7 +266,7 @@ pub fn reseal(
         Vec::with_capacity(old_manifest.entries.len());
     let mut count = 0u64;
     for old_entry in &old_manifest.entries {
-        let raw = vault::read_object(vault_root, old_epoch, &old_entry.object_id)?;
+        let raw = vault::read_object(vault_root, keys.old_epoch, &old_entry.object_id)?;
         if raw.len() < HEADER_SIZE {
             return Err(Error::AuthFail);
         }
@@ -265,20 +276,22 @@ pub fn reseal(
             b""
         };
         let (_old_hdr, plaintext) =
-            open_object(old_ek, &raw[..HEADER_SIZE], &raw[HEADER_SIZE..], bind)?;
+            open_object(keys.old_ek, &raw[..HEADER_SIZE], &raw[HEADER_SIZE..], bind)?;
         let new_oid = vault::new_object_id()?;
         let sealed = seal_object(
-            new_ek,
-            vault_id,
-            new_epoch,
-            new_oid,
-            DEFAULT_CHUNK_SIZE,
-            bind,
+            keys.new_ek,
+            &ObjectSpec {
+                vault_id,
+                epoch: keys.new_epoch,
+                object_id: new_oid,
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: bind,
+            },
             &plaintext,
         )?;
         vault::write_object(
             vault_root,
-            new_epoch,
+            keys.new_epoch,
             &new_oid,
             &sealed.header.to_bytes(),
             &sealed.chunks,
@@ -299,14 +312,14 @@ pub fn reseal(
         count += 1;
     }
 
-    let new_mk = derive_manifest_key(new_ek, vault_id, new_epoch);
+    let new_mk = derive_manifest_key(keys.new_ek, vault_id, keys.new_epoch);
     let manifest = Manifest {
         vault_id,
-        epoch: new_epoch,
+        epoch: keys.new_epoch,
         suite: crate::SUITE_0X01,
         flags: old_manifest.flags,
-        generated_at,
-        generator: generator.to_string(),
+        generated_at: stamp.generated_at,
+        generator: stamp.generator.to_string(),
         root: entries_root(&new_entries)?,
         entry_count: u32::try_from(new_entries.len()).unwrap_or(u32::MAX),
         total_plain_bytes: new_entries.iter().map(|e| e.plain_len).sum(),
@@ -321,7 +334,7 @@ pub fn reseal(
             ),
         entries: new_entries,
     };
-    write_manifest_file(vault_root, new_epoch, &manifest, &new_mk)?;
+    write_manifest_file(vault_root, keys.new_epoch, &manifest, &new_mk)?;
     Ok(count)
 }
 
@@ -333,22 +346,14 @@ pub fn reseal(
 /// re-seals it under the new `MetaKey` with the new epoch in the AD. A vault
 /// with no sealed policy (default policy) is a no-op returning `false`;
 /// a successful re-seal returns `true`. Tamper / wrong key => [`Error::AuthFail`].
-#[allow(clippy::too_many_arguments, clippy::similar_names)]
-pub fn reseal_policy(
-    vault_root: &Path,
-    vault_id: VaultId,
-    old_epoch: Epoch,
-    old_ek: &EpochKey,
-    new_epoch: Epoch,
-    new_ek: &EpochKey,
-) -> Result<bool> {
-    let old_meta = derive_meta_key(old_ek, vault_id, old_epoch);
-    let new_meta = derive_meta_key(new_ek, vault_id, new_epoch);
+pub fn reseal_policy(vault_root: &Path, vault_id: VaultId, keys: &EpochKeys<'_>) -> Result<bool> {
+    let old_meta = derive_meta_key(keys.old_ek, vault_id, keys.old_epoch);
+    let new_meta = derive_meta_key(keys.new_ek, vault_id, keys.new_epoch);
     if !crate::policy::policy_path(vault_root).exists() {
         return Ok(false);
     }
-    let policy = crate::policy::load_policy(vault_root, &old_meta, vault_id, old_epoch)?;
-    crate::policy::seal_policy(vault_root, &policy, &new_meta, vault_id, new_epoch)?;
+    let policy = crate::policy::load_policy(vault_root, &old_meta, vault_id, keys.old_epoch)?;
+    crate::policy::seal_policy(vault_root, &policy, &new_meta, vault_id, keys.new_epoch)?;
     Ok(true)
 }
 
@@ -415,7 +420,7 @@ mod tests {
         derive_key_id, derive_manifest_key, derive_meta_key, IdentitySecret, ObjectId,
     };
     use crate::manifest::{Entry, EntryKind, Manifest};
-    use crate::object::{open_object, seal_object};
+    use crate::object::{open_object, seal_object, ObjectSpec};
     use crate::policy::{self, default_policy, evaluate, Op, PrincipalId, Verdict};
     use crate::recipients::{wrap_symmetric, wrap_x25519, Recipients};
     use crate::vault::{init_vault_dir, new_object_id, write_atomic, write_object};
@@ -463,11 +468,13 @@ mod tests {
         let oid = new_object_id().unwrap();
         let sealed = seal_object(
             &ek,
-            vid,
-            epoch,
-            oid,
-            DEFAULT_CHUNK_SIZE,
-            b"",
+            &ObjectSpec {
+                vault_id: vid,
+                epoch,
+                object_id: oid,
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
             b"alpha-secret",
         )
         .unwrap();
@@ -679,12 +686,16 @@ mod tests {
         let n = reseal(
             &root,
             vault_id(),
-            Epoch(1),
-            &out.old_ek,
-            out.new_epoch,
-            &out.new_ek,
-            GEN,
-            GEN_AT,
+            &EpochKeys {
+                old_epoch: Epoch(1),
+                old_ek: &out.old_ek,
+                new_epoch: out.new_epoch,
+                new_ek: &out.new_ek,
+            },
+            &RotationStamp {
+                generator: GEN,
+                generated_at: GEN_AT,
+            },
         )
         .unwrap();
         assert_eq!(n, 1);
@@ -724,12 +735,16 @@ mod tests {
         reseal(
             &root,
             vault_id(),
-            Epoch(1),
-            &out.old_ek,
-            out.new_epoch,
-            &out.new_ek,
-            GEN,
-            GEN_AT,
+            &EpochKeys {
+                old_epoch: Epoch(1),
+                old_ek: &out.old_ek,
+                new_epoch: out.new_epoch,
+                new_ek: &out.new_ek,
+            },
+            &RotationStamp {
+                generator: GEN,
+                generated_at: GEN_AT,
+            },
         )
         .unwrap();
 
@@ -789,10 +804,12 @@ mod tests {
         let did = reseal_policy(
             &root,
             vid,
-            Epoch(1),
-            &out.old_ek,
-            out.new_epoch,
-            &out.new_ek,
+            &EpochKeys {
+                old_epoch: Epoch(1),
+                old_ek: &out.old_ek,
+                new_epoch: out.new_epoch,
+                new_ek: &out.new_ek,
+            },
         )
         .unwrap();
         assert!(did);
@@ -819,7 +836,17 @@ mod tests {
         let ek1 = crate::kdf::derive_epoch_key(&isk(), vid, Epoch(1), "test").unwrap();
         let ek2 = crate::kdf::derive_epoch_key(&isk(), vid, Epoch(2), "test").unwrap();
         // No policy.json.sealed on disk.
-        let did = reseal_policy(&root, vid, Epoch(1), &ek1, Epoch(2), &ek2).unwrap();
+        let did = reseal_policy(
+            &root,
+            vid,
+            &EpochKeys {
+                old_epoch: Epoch(1),
+                old_ek: &ek1,
+                new_epoch: Epoch(2),
+                new_ek: &ek2,
+            },
+        )
+        .unwrap();
         assert!(!did);
     }
 

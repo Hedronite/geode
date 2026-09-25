@@ -241,6 +241,50 @@ fn verify_json_mac(
     Ok(())
 }
 
+fn load_header(root: &Path, isk: &IdentitySecret) -> Result<(VaultId, Epoch, [u8; 16])> {
+    let header = read_json(&root.join("header.json"))?;
+    let mut vid = [0u8; 16];
+    unhex(json_str(&header, "vault_id")?, &mut vid)?;
+    let vault_id = VaultId(vid);
+    let epoch = Epoch(
+        u32::try_from(json_u64(&header, "epoch")?)
+            .map_err(|_| Error::Format("epoch overflow".into()))?,
+    );
+    let key_id = kdf::derive_key_id(isk)?;
+    Ok((vault_id, epoch, key_id.0))
+}
+
+fn load_recipients_for(
+    root: &Path,
+    isk: &IdentitySecret,
+    vault_id: VaultId,
+    epoch: Epoch,
+    key_id: [u8; 16],
+) -> Result<EpochKey> {
+    let rec_text = std::fs::read_to_string(root.join("recipients.json")).map_err(Error::Io)?;
+    let recs: Recipients = serde_json::from_str(&rec_text)
+        .map_err(|e| Error::Format(format!("recipients.json: {e}")))?;
+    for r in &recs.recipients {
+        if let Recipient::Symmetric { key_id: kid, .. } = r {
+            if kid.0 == key_id {
+                return recipients::unwrap_symmetric(r, isk, vault_id, epoch);
+            }
+        }
+    }
+    Err(Error::AuthFail)
+}
+
+fn load_manifest(root: &Path, ek: &EpochKey, vault_id: VaultId, epoch: Epoch) -> Result<Manifest> {
+    let mk = kdf::derive_manifest_key(ek, vault_id, epoch);
+    let mjson = read_json(&manifest_path(root, epoch))?;
+    verify_json_mac(&mk, &mjson, "manifest_mac")?;
+    let mut body = mjson;
+    if let Some(o) = body.as_object_mut() {
+        o.remove("manifest_mac");
+    }
+    serde_json::from_value(body).map_err(|e| Error::Format(format!("manifest.json: {e}")))
+}
+
 /// Load a vault: sentinel, `header.json`, `recipients.json`, manifest — all
 /// authenticated. Failure to authenticate is `Error::AuthFail` (exit 2).
 pub fn load_vault(root: &Path, isk: &IdentitySecret) -> Result<VaultCtx> {
@@ -251,46 +295,17 @@ pub fn load_vault(root: &Path, isk: &IdentitySecret) -> Result<VaultCtx> {
             root.display()
         )));
     }
+    let (vault_id, epoch, key_id) = load_header(root, isk)?;
     let header = read_json(&root.join("header.json"))?;
-    let mut vid = [0u8; 16];
-    unhex(json_str(&header, "vault_id")?, &mut vid)?;
-    let vault_id = VaultId(vid);
-    let epoch = Epoch(
-        u32::try_from(json_u64(&header, "epoch")?)
-            .map_err(|_| Error::Format("epoch overflow".into()))?,
-    );
-    let key_id = kdf::derive_key_id(isk)?;
-
-    let rec_text = std::fs::read_to_string(root.join("recipients.json")).map_err(Error::Io)?;
-    let recs: Recipients = serde_json::from_str(&rec_text)
-        .map_err(|e| Error::Format(format!("recipients.json: {e}")))?;
-    let mut ek = None;
-    for r in &recs.recipients {
-        if let Recipient::Symmetric { key_id: kid, .. } = r {
-            if *kid == key_id {
-                ek = Some(recipients::unwrap_symmetric(r, isk, vault_id, epoch)?);
-                break;
-            }
-        }
-    }
-    // Not a recipient of this vault: same family as a bad key.
-    let ek = ek.ok_or(Error::AuthFail)?;
-
+    let ek = load_recipients_for(root, isk, vault_id, epoch, key_id)?;
     let mk = kdf::derive_manifest_key(&ek, vault_id, epoch);
     verify_json_mac(&mk, &header, "header_mac")?;
-    let mjson = read_json(&manifest_path(root, epoch))?;
-    verify_json_mac(&mk, &mjson, "manifest_mac")?;
-    let mut body = mjson;
-    if let Some(o) = body.as_object_mut() {
-        o.remove("manifest_mac");
-    }
-    let manifest: Manifest =
-        serde_json::from_value(body).map_err(|e| Error::Format(format!("manifest.json: {e}")))?;
+    let manifest = load_manifest(root, &ek, vault_id, epoch)?;
     Ok(VaultCtx {
         root: root.to_path_buf(),
         vault_id,
         epoch,
-        key_id,
+        key_id: kdf::KeyId(key_id),
         ek,
         manifest,
     })

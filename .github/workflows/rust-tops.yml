@@ -74,7 +74,8 @@ jobs:
         with:
           name: lcov
           path: target/coverage/lcov.info
-      - run: cargo install --locked cargo-crap && cargo crap --format json --output target/crap.json
+      - run: cargo install --locked cargo-crap && cargo crap --format json --lcov target/coverage/lcov.info --output target/crap.json
+          test -s target/crap.json
       - uses: actions/upload-artifact@v4
         with:
           name: crap

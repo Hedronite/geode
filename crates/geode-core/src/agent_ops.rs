@@ -398,11 +398,13 @@ pub fn write(
     let oid = corevault::new_object_id()?;
     let sealed = object::seal_object(
         ek,
-        token.vault_id,
-        token.epoch,
-        oid,
-        DEFAULT_CHUNK_SIZE,
-        b"",
+        &object::ObjectSpec {
+            vault_id: token.vault_id,
+            epoch: token.epoch,
+            object_id: oid,
+            chunk_size: DEFAULT_CHUNK_SIZE,
+            path_bind: b"",
+        },
         body,
     )?;
     let header_bytes = sealed.header.to_bytes();
@@ -497,11 +499,13 @@ mod tests {
             let oid = corevault::new_object_id().unwrap();
             let sealed = object::seal_object(
                 &ek(),
-                VaultId([0x01; 16]),
-                Epoch(1),
-                oid,
-                DEFAULT_CHUNK_SIZE,
-                b"",
+                &object::ObjectSpec {
+                    vault_id: VaultId([0x01; 16]),
+                    epoch: Epoch(1),
+                    object_id: oid,
+                    chunk_size: DEFAULT_CHUNK_SIZE,
+                    path_bind: b"",
+                },
                 body,
             )
             .unwrap();

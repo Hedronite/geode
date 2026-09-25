@@ -213,11 +213,13 @@ pub fn run(args: &SealArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         let oid = corevault::new_object_id()?;
         let sealed = object::seal_object(
             &ctx.ek,
-            ctx.vault_id,
-            ctx.epoch,
-            oid,
-            chunk::DEFAULT_CHUNK_SIZE,
-            b"",
+            &object::ObjectSpec {
+                vault_id: ctx.vault_id,
+                epoch: ctx.epoch,
+                object_id: oid,
+                chunk_size: chunk::DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
             &data,
         )?;
         let header_bytes = sealed.header.to_bytes();
