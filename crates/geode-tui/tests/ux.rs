@@ -17,15 +17,41 @@ use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
 fn geode_bin() -> PathBuf {
+    let mut tried: Vec<String> = Vec::new();
     for key in ["CARGO_BIN_EXE_GEO_DE", "CARGO_BIN_EXE_geode"] {
         if let Ok(p) = std::env::var(key) {
-            return PathBuf::from(p);
+            let pb = PathBuf::from(&p);
+            tried.push(format!("{key}={p}"));
+            if pb.is_file() {
+                return pb;
+            }
         }
     }
-    PathBuf::from(format!(
-        "{}/../../target/debug/geode",
-        env!("CARGO_MANIFEST_DIR")
-    ))
+    if let Ok(td) = std::env::var("CARGO_TARGET_DIR") {
+        let pb = PathBuf::from(&td).join("debug/geode");
+        tried.push(format!("CARGO_TARGET_DIR/debug/geode={}", pb.display()));
+        if pb.is_file() {
+            return pb;
+        }
+    }
+    let target_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    let default_pb = target_root.join("debug/geode");
+    tried.push(format!("manifest fallback={}", default_pb.display()));
+    if default_pb.is_file() {
+        return default_pb;
+    }
+    if let Ok(entries) = std::fs::read_dir(&target_root) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let pb = entry.path().join("debug/geode");
+                tried.push(format!("target scan={}", pb.display()));
+                if pb.is_file() {
+                    return pb;
+                }
+            }
+        }
+    }
+    panic!("geode binary not found; tried:\n  {}", tried.join("\n  "));
 }
 
 struct Fixture {
