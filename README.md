@@ -16,7 +16,7 @@
   <a href="https://github.com/VirtualMachinist/geode/releases/tag/v0.2.4"><img src="https://img.shields.io/github/v/release/VirtualMachinist/geode?style=flat&colorA=252220&colorB=2AB5A5&label=Geode" alt="Geode latest release"></a>
   <a href="https://crates.io/crates/geode-grotto"><img src="https://img.shields.io/crates/v/geode-grotto?style=flat&colorA=252220&colorB=2AB5A5" alt="geode-grotto on crates.io"></a>
   <a href="https://crates.io/crates/geode-cli"><img src="https://img.shields.io/crates/v/geode-cli?style=flat&colorA=252220&colorB=2AB5A5" alt="geode-cli on crates.io"></a>
-  <a href="https://rustup.rs"><img src="https://img.shields.io/badge/Rust-1.85-F46623?style=flat&colorA=252220&logo=rust&logoColor=white" alt="Rust 1.85"></a>
+  <a href="https://rustup.rs"><img src="https://img.shields.io/badge/Rust-1.89-F46623?style=flat&colorA=252220&logo=rust&logoColor=white" alt="Rust 1.89"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-2AB5A5?style=flat&colorA=252220" alt="Apache-2.0 license"></a>
 </p>
 
@@ -53,12 +53,12 @@ It is not a FUSE mount, not a post-quantum suite, and not an interop layer for o
 | Library | [`geode-grotto`](crates/geode-core) (Rust import `geode_grotto`) |
 | TUI | [`geode-tui`](crates/geode-tui), default feature `tui` |
 | Version | **1.0.0** · [v1.0.0](https://github.com/Hedronite/geode/releases/tag/v1.0.0) · [CHANGELOG](CHANGELOG.md) |
-| Rust | 1.85 |
+| Rust | 1.89 |
 | License | [Apache-2.0](LICENSE) |
 
 ## Quick start
 
-Rust **1.85+**. Install the CLI from crates.io, or run it from this repo.
+Rust **1.89+**. Install the CLI from crates.io, or run it from this repo.
 
 ```sh
 cargo install geode-cli
@@ -163,7 +163,7 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Rust **1.85**. Release notes live in [CHANGELOG.md](CHANGELOG.md). Conformance vectors live in [`vectors/v1/`](vectors/v1).
+Rust **1.89**. Release notes live in [CHANGELOG.md](CHANGELOG.md). Conformance vectors live in [`vectors/v1/`](vectors/v1).
 
 ## Credits and license
 

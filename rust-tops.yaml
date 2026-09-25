@@ -9,7 +9,7 @@ crate:
   name: geode
   class: parser-codec
   edition: "2021"
-  msrv: "1.85"
+  msrv: "1.89"
   unsafe_policy: forbid
   # G-P2 overlays (schema 1.0 has no per-path class field):
   #   crates/geode-core => parser-codec (library-core MUSTs union)

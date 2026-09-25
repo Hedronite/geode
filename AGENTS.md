@@ -1,6 +1,6 @@
 # Agent standing orders (Rust-TOPS 1.0) — geode
 
-Goal: correct, dense, fast Rust. MSRV 1.85 · edition 2021 · unsafe forbid.
+Goal: correct, dense, fast Rust. MSRV 1.89 · edition 2021 · unsafe forbid.
 
 Crates: geode-grotto = parser-codec (95/90). geode = binary-cli (+ fuse/agent service overlays).
 geode_tui = binary-cli journeys + library-util floors on non-render modules.
