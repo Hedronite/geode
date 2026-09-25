@@ -368,7 +368,7 @@ fn linux_unmount_execs_fusermount3_dash_u() {
     std::fs::write(
         &bin,
         format!(
-            "#!/bin/sh\nprintf %s\n \"$@\" > {}\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nexit 0\n",
             log.display()
         ),
     )

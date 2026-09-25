@@ -497,7 +497,7 @@ fn reject_secret_text(text: &str, field: &str) -> Result<()> {
 
 fn looks_like_gtok_hex(s: &str) -> bool {
     let t = s.trim();
-    t.len() >= 8 && t.len() % 2 == 0 && t.to_ascii_lowercase().starts_with("47544f4b")
+    t.len() >= 8 && t.len().is_multiple_of(2) && t.to_ascii_lowercase().starts_with("47544f4b")
 }
 
 #[cfg(test)]

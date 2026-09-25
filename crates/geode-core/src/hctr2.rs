@@ -95,7 +95,7 @@ impl Hctr2 {
         // Length block: bin(2*|T|_bits + c), c = 2 if |M| % 16 == 0 else 3,
         // encoded as a 128-bit little-endian integer.
         let len_bits = u128::try_from(tweak.len()).unwrap() * 8;
-        let lb_val = if msg.len() % BLOCK == 0 {
+        let lb_val = if msg.len().is_multiple_of(BLOCK) {
             2 * len_bits + 2
         } else {
             2 * len_bits + 3
@@ -108,8 +108,8 @@ impl Hctr2 {
         // body(M): full blocks, then (if unaligned) a final block = tail || 0x01.
         let nfull = (msg.len() / BLOCK) * BLOCK;
         let (full, tail) = msg.split_at(nfull);
-        for chunk in full.chunks_exact(BLOCK) {
-            p.proc_block(chunk.try_into().unwrap());
+        for chunk in full.as_chunks::<BLOCK>().0 {
+            p.proc_block(chunk.into());
         }
         if !tail.is_empty() {
             let mut blk = [0u8; BLOCK];

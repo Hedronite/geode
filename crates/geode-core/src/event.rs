@@ -75,7 +75,7 @@ fn is_forbidden_field(name: &str) -> bool {
 /// magic. Catches raw `GTOK` / `.gkey` bytes smuggled as a hex value.
 fn looks_like_sealed_material(s: &str) -> bool {
     let trimmed = s.trim();
-    if trimmed.len() < 8 || trimmed.len() % 2 != 0 {
+    if trimmed.len() < 8 || !trimmed.len().is_multiple_of(2) {
         return false;
     }
     if !trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
