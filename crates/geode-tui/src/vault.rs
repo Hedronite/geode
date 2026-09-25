@@ -467,6 +467,18 @@ pub struct Preview {
     pub hash: [u8; 32],
 }
 
+impl Default for Preview {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            bytes: zeroize::Zeroizing::new(Vec::new()),
+            plain_len: 0,
+            truncated: false,
+            hash: [0u8; 32],
+        }
+    }
+}
+
 /// Preview one object: read, authenticate (open), and bound to `max_bytes`.
 /// Binary detection (14-tui §8.4): a non-UTF-8 prefix renders as hex in
 /// the pane; the buffer here is raw bytes — the draw layer decides text

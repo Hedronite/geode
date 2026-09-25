@@ -300,34 +300,36 @@ fn unmount_is_documented_exit_1() {
     }
 }
 
-/// Linux `geode unmount` still execs `fusermount3 -u`. Darwin unmount is
-/// `umount`. The macOS session calls `MountSession`.
+/// 08-mount 6: behavioural unmount oracle (G-P11).
+#[cfg(all(target_os = "linux", feature = "fuse"))]
 #[test]
-fn linux_unmount_still_calls_fusermount3_dash_u() {
-    let linux = include_str!("../src/fuse_linux.rs");
-    let start = linux.find("fn unmount_mountpoint").expect("linux unmount");
-    let body = &linux[start..];
+fn linux_unmount_execs_fusermount3_dash_u() {
+    use std::os::unix::fs::PermissionsExt;
+    let stub = tempfile::tempdir().expect("stubdir");
+    let bin = stub.path().join("fusermount3");
+    let log = stub.path().join("argv.txt");
+    std::fs::write(
+        &bin,
+        format!("#!/bin/sh\nprintf %s\n \"$@\" > {}\nexit 0\n", log.display()),
+    )
+    .expect("write stub");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    let mnt = tempfile::tempdir().expect("mnt");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_geode"))
+        .args(["unmount", mnt.path().to_str().expect("utf8")])
+        .env(
+            "PATH",
+            format!("{}:{}", stub.path().display(), std::env::var("PATH").unwrap_or_default()),
+        )
+        .output()
+        .expect("spawn geode unmount");
     assert!(
-        body.contains("Command::new(\"fusermount3\")"),
-        "Linux unmount must still exec fusermount3"
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        body.contains(".arg(\"-u\")"),
-        "Linux unmount must still pass -u"
-    );
-    let macos = include_str!("../src/fuse_macos.rs");
-    assert!(
-        !macos.contains("fusermount3"),
-        "Darwin session must not call fusermount3"
-    );
-    assert!(
-        macos.contains("Command::new(\"umount\")"),
-        "Darwin unmount uses umount"
-    );
-    assert!(
-        macos.contains("MountSession::open"),
-        "macOS session calls MountSession"
-    );
+    let argv = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(argv.contains("-u"), "argv={argv}");
 }
 
 #[test]

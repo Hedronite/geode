@@ -44,6 +44,11 @@ const DEFAULT_MAX_BYTES: u64 = 1_048_576;
 
 /// MCP protocol version the stdio server speaks.
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MAX_JSON_RPC_FRAME_BYTES: usize = 1 << 20;
+
+fn rpc_line_too_large(line: &str) -> bool {
+    line.len() > MAX_JSON_RPC_FRAME_BYTES
+}
 
 /// 06-agent-plane 6.5: 128 tool calls / 10 s per token. The ceiling is
 /// env-overridable (`GEODE_AGENT_RATE_MAX`); the window is not.
@@ -835,18 +840,23 @@ impl<'g> StdioServer<'g> {
         if !enabled {
             return;
         }
-        let mut doc = serde_json::json!({
-            "schema": "geode.event.v1",
-            "verb": op,
-            "vault_id": cmd::hex(&ctx.vault_id.0),
-            "epoch": ctx.epoch.0,
-            "principal": claims.principal_id.0,
-            "path": path,
+        let doc = geode_grotto::event::build_facet_event(
+            &cmd::hex(&ctx.vault_id.0),
+            ctx.epoch.0,
+            op,
+            &claims.principal_id.0,
+            path,
+            content_root.map(|r| cmd::hex(r)).as_deref(),
+            None,
+        )
+        .unwrap_or_else(|_| {
+            serde_json::json!({
+                "schema": "geode.event.v1",
+                "verb": op,
+                "ok": false,
+                "error": {"code": "event_rejected", "message": "event payload rejected"},
+            })
         });
-        if let Some(root) = content_root {
-            doc["content_root"] = serde_json::json!(cmd::hex(root));
-        }
-        if let Err(e) = geode_grotto::event::assert_event_safe(&doc) { eprintln!("facet rejected: {e}"); return; }
         eprintln!("{doc}");
     }
 
@@ -1092,6 +1102,15 @@ impl<'g> StdioServer<'g> {
             if line.trim().is_empty() {
                 continue;
             }
+            if rpc_line_too_large(&line) {
+                let frame = rpc_error(
+                    &serde_json::Value::Null,
+                    -32600,
+                    "frame exceeds 1 MiB cap",
+                );
+                write_frame(&mut stdout, &frame)?;
+                continue;
+            }
             let request: serde_json::Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1137,6 +1156,16 @@ impl<'g> StdioServer<'g> {
         for line in reader.lines() {
             let line = line.map_err(Error::Io)?;
             if line.trim().is_empty() {
+                continue;
+            }
+            if rpc_line_too_large(&line) {
+                let frame = rpc_error(
+                    &serde_json::Value::Null,
+                    -32600,
+                    "frame exceeds 1 MiB cap",
+                );
+                write_frame(&mut writer, &frame)?;
+                writer.flush().map_err(Error::Io)?;
                 continue;
             }
             let request: serde_json::Value = match serde_json::from_str(&line) {
@@ -1239,6 +1268,14 @@ fn serve_socket(global: &GlobalArgs, sealed: Vec<u8>, path: &Path) -> Result<()>
             "socket parent directory does not exist: {}",
             parent.display()
         )));
+    }
+    {
+        let meta = std::fs::metadata(parent).map_err(Error::Io)?;
+        let mode = meta.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| Error::Format(format!("chmod {}: {e}", parent.display())))?;
+        }
     }
     let listener = UnixListener::bind(path).map_err(|e| {
         let _ = std::fs::remove_file(path);
