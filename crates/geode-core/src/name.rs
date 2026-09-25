@@ -396,4 +396,15 @@ mod tests {
         let r = open_name(&nk(), &vid(), EP, &ROOT_PARENT, &base32hex_encode(&ct));
         assert!(matches!(r, Err(Error::AuthFail)));
     }
+
+    use proptest::prelude::*;
+    proptest! {
+        #[test]
+        fn rp3_name_roundtrip(comp in prop::collection::vec(any::<u8>(),1..64).prop_filter("utf8",|v| std::str::from_utf8(v).is_ok())) {
+            let c = std::str::from_utf8(&comp).unwrap(); prop_assume!(c.len()<=255);
+            let nk=[0x5a;32]; let vid=VaultId([0x11;16]); let parent=[0u8;16];
+            let sealed = seal_name(&nk,&vid,Epoch(1),&parent,c).unwrap();
+            prop_assert_eq!(open_name(&nk,&vid,Epoch(1),&parent,&sealed).unwrap(), c);
+        }
+    }
 }

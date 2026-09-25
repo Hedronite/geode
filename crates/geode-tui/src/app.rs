@@ -1031,7 +1031,6 @@ fn event_loop(term: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> {
     }
 }
 
-
 #[cfg(test)]
 mod reducer_tests {
     use super::*;

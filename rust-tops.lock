@@ -7,10 +7,11 @@ rustfmt = "1.98.0"
 msrv = "1.85.0"
 cargo-nextest = "0.9.146"
 cargo-llvm-cov = "cargo-llvm-cov"
-cargo-mutants = "MISSING"
+cargo-mutants = "27.1.0"
 cargo-crap = "0.5.0"
 cargo-deny = "0.20.2"
-cargo-fuzz = "MISSING"
+cargo-fuzz = "0.13.2"
+nightly = "MISSING"
 
 [auto8]
 measured = "2026-09-24"

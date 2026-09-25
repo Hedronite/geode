@@ -1,4 +1,4 @@
-//! Zeroize discipline (02-cryptography 10, SPEC 3.10).
+//! Zeroize discipline (02-cryptography §11, SPEC 3.10).
 //!
 //! Secret material is held in types that zeroize on drop. `Debug` redacts.
 
@@ -42,8 +42,9 @@ impl std::fmt::Debug for Secret32 {
     }
 }
 
-
-/// Constant-time equality for tags/checksums.
+/// Constant-time equality for tags/checksums (02-cryptography §11.2).
+///
+/// Returns `false` when slice lengths differ.
 #[must_use]
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     use subtle::ConstantTimeEq as _;
@@ -63,5 +64,15 @@ mod tests {
         let mut s = Secret32::new_unchecked([0xde; 32]);
         s.zeroize();
         assert_eq!(s.as_bytes(), &[0u8; 32]);
+    }
+
+    #[test]
+    fn ct_eq_matches_and_rejects() {
+        let a = [1u8; 16];
+        let mut b = a;
+        assert!(ct_eq(&a, &b));
+        b[15] ^= 0x01;
+        assert!(!ct_eq(&a, &b));
+        assert!(!ct_eq(&a, &[1u8; 15]));
     }
 }

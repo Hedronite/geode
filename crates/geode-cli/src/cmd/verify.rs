@@ -112,7 +112,7 @@ pub fn run(args: &VerifyArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         let header = ObjectHeader::from_bytes(header_bytes)?;
         // Header tag (every mode).
         let want = object::compute_header_tag(&ctx.ek, &header);
-        if want != header.header_tag {
+        if !geode_grotto::zero::ct_eq(&want, &header.header_tag) {
             return Err(Error::AuthFail);
         }
         // Manifest/header consistency (every mode).
@@ -173,4 +173,38 @@ pub fn run(args: &VerifyArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         ),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod r_apply_oracle_tests {
+    use super::*;
+    use geode_grotto::kdf::ObjectId;
+    use geode_grotto::kdf::{Epoch, EpochKey, VaultId};
+    use geode_grotto::object;
+
+    #[test]
+    fn check_chunk_rejects_flipped_ciphertext_bit() {
+        let ek = EpochKey::from_bytes([9u8; 32]);
+        let oid = ObjectId([3u8; 16]);
+        let plain = b"oracle-chunk-bytes";
+        let sealed = object::seal_object(
+            &ek,
+            VaultId([1u8; 16]),
+            Epoch(1),
+            oid,
+            geode_grotto::chunk::DEFAULT_CHUNK_SIZE,
+            b"",
+            plain,
+        )
+        .unwrap();
+        let header = sealed.header;
+        let mut chunks = sealed.chunks;
+        if let Some(b) = chunks.get_mut(20) {
+            *b ^= 1;
+        }
+        assert!(matches!(
+            check_chunk(&ek, &header, &chunks, 0, b""),
+            Err(Error::AuthFail)
+        ));
+    }
 }

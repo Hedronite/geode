@@ -46,6 +46,31 @@ const DEFAULT_MAX_BYTES: u64 = 1_048_576;
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_JSON_RPC_FRAME_BYTES: usize = 1 << 20;
 
+#[cfg(unix)]
+pub(crate) fn ensure_private_parent(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(parent) = path.parent() else {
+        return Err(Error::Format("socket path has no parent".into()));
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        parent
+    };
+    if !parent.is_dir() {
+        return Err(Error::Format(format!(
+            "socket parent directory does not exist: {}",
+            parent.display()
+        )));
+    }
+    let meta = std::fs::metadata(parent).map_err(Error::Io)?;
+    if meta.permissions().mode() & 0o077 != 0 {
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| Error::Format(format!("chmod {}: {e}", parent.display())))?;
+    }
+    Ok(())
+}
+
 fn rpc_line_too_large(line: &str) -> bool {
     line.len() > MAX_JSON_RPC_FRAME_BYTES
 }
@@ -97,12 +122,14 @@ pub fn run(args: &AgentArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
             intent,
             body_digest,
         } => scope(
-            path,
-            op,
-            allow_prefix,
-            principal,
-            intent.as_deref(),
-            body_digest.as_deref(),
+            &ScopeRequest {
+                path,
+                op,
+                allow_prefix,
+                principal,
+                intent: intent.as_deref(),
+                body_digest: body_digest.as_deref(),
+            },
             out,
         ),
     }
@@ -592,24 +619,25 @@ fn write(
     Ok(())
 }
 
+struct ScopeRequest<'a> {
+    path: &'a str,
+    op: &'a str,
+    allow_prefix: &'a [String],
+    principal: &'a str,
+    intent: Option<&'a str>,
+    body_digest: Option<&'a str>,
+}
+
 /// `geode agent scope` — named remainder ask. No vault, no token, no key.
 /// Code owns prefix / `..`; Jev classifies the rest in shadow.
-fn scope(
-    path: &str,
-    op: &str,
-    allow_prefix: &[String],
-    principal: &str,
-    intent: Option<&str>,
-    body_digest: Option<&str>,
-    out: OutMode,
-) -> Result<()> {
+fn scope(req: &ScopeRequest<'_>, out: OutMode) -> Result<()> {
     let ask = geode_grotto::jev::RemainderAsk {
-        verb: op.to_ascii_lowercase(),
-        path: path.to_owned(),
-        principal: principal.to_owned(),
-        allow_prefix: allow_prefix.to_vec(),
-        intent: intent.unwrap_or("").to_owned(),
-        body_digest: body_digest.map(str::to_owned),
+        verb: req.op.to_ascii_lowercase(),
+        path: req.path.to_owned(),
+        principal: req.principal.to_owned(),
+        allow_prefix: req.allow_prefix.to_vec(),
+        intent: req.intent.unwrap_or("").to_owned(),
+        body_digest: req.body_digest.map(str::to_owned),
     };
     let decision = geode_grotto::jev::ask(&ask, &geode_grotto::jev::Transport::resolve_cli())?;
     let extra = serde_json::to_value(&decision)
@@ -1103,11 +1131,7 @@ impl<'g> StdioServer<'g> {
                 continue;
             }
             if rpc_line_too_large(&line) {
-                let frame = rpc_error(
-                    &serde_json::Value::Null,
-                    -32600,
-                    "frame exceeds 1 MiB cap",
-                );
+                let frame = rpc_error(&serde_json::Value::Null, -32600, "frame exceeds 1 MiB cap");
                 write_frame(&mut stdout, &frame)?;
                 continue;
             }
@@ -1159,11 +1183,7 @@ impl<'g> StdioServer<'g> {
                 continue;
             }
             if rpc_line_too_large(&line) {
-                let frame = rpc_error(
-                    &serde_json::Value::Null,
-                    -32600,
-                    "frame exceeds 1 MiB cap",
-                );
+                let frame = rpc_error(&serde_json::Value::Null, -32600, "frame exceeds 1 MiB cap");
                 write_frame(&mut writer, &frame)?;
                 writer.flush().map_err(Error::Io)?;
                 continue;
@@ -1251,32 +1271,7 @@ fn serve_socket(global: &GlobalArgs, sealed: Vec<u8>, path: &Path) -> Result<()>
             path.display()
         )));
     }
-    // SPEC G0.1: `--socket agent.sock` (cwd-relative) has parent Some("")
-    // which is never a dir — an empty parent means ".".
-    let parent = match path.parent() {
-        Some(p) if p.as_os_str().is_empty() => Path::new("."),
-        Some(p) => p,
-        None => {
-            return Err(Error::Format(format!(
-                "socket path has no parent: {}",
-                path.display()
-            )));
-        }
-    };
-    if !parent.is_dir() {
-        return Err(Error::Format(format!(
-            "socket parent directory does not exist: {}",
-            parent.display()
-        )));
-    }
-    {
-        let meta = std::fs::metadata(parent).map_err(Error::Io)?;
-        let mode = meta.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| Error::Format(format!("chmod {}: {e}", parent.display())))?;
-        }
-    }
+    ensure_private_parent(path)?;
     let listener = UnixListener::bind(path).map_err(|e| {
         let _ = std::fs::remove_file(path);
         Error::Format(format!("bind {}: {e}", path.display()))
@@ -1290,4 +1285,33 @@ fn serve_socket(global: &GlobalArgs, sealed: Vec<u8>, path: &Path) -> Result<()>
     let result = StdioServer::new(global, sealed).run_loop_unix(&listener);
     let _ = std::fs::remove_file(path);
     result
+}
+
+#[cfg(test)]
+mod r_apply_tests {
+    use super::*;
+    #[test]
+    fn rpc_frame_cap_is_exclusive_at_the_boundary() {
+        assert!(!rpc_line_too_large(
+            &"x".repeat(MAX_JSON_RPC_FRAME_BYTES - 1)
+        ));
+        assert!(!rpc_line_too_large(&"x".repeat(MAX_JSON_RPC_FRAME_BYTES)));
+        assert!(rpc_line_too_large(
+            &"x".repeat(MAX_JSON_RPC_FRAME_BYTES + 1)
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn parent_with_group_bits_is_tightened_to_0700() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sockdir");
+        std::fs::create_dir_all(&dir).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_private_parent(&dir.join("agent.sock")).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
 }

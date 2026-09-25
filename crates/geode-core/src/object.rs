@@ -175,6 +175,7 @@ pub struct SealedObject {
     pub content_root: [u8; 32],
 }
 
+#[allow(clippy::too_many_arguments)] // wire layout args; density split is Phase O / scar_guard
 #[allow(clippy::cast_possible_truncation)]
 pub fn seal_object(
     ek: &EpochKey,
@@ -472,5 +473,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pt, b"movable");
+    }
+
+    use crate::chunk::ALLOWED_CHUNK_SIZES;
+    use proptest::prelude::*;
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+        #[test]
+        fn rp1_seal_open_is_identity(n in 0usize..=65536, fill in any::<u8>(), cs_idx in 0usize..ALLOWED_CHUNK_SIZES.len()) {
+            let cs = ALLOWED_CHUNK_SIZES[cs_idx]; let plain = vec![fill; n]; let ek = ek();
+            let sealed = seal_object(&ek, VaultId([1;16]), Epoch(1), oid(), cs, b"bind", &plain).unwrap();
+            let (_, got) = open_object(&ek, &sealed.header.to_bytes(), &sealed.chunks, b"bind").unwrap();
+            prop_assert_eq!(got, plain);
+        }
+        #[test]
+        fn rp6_path_bind_is_committed(plain in prop::collection::vec(any::<u8>(),0..256), bind in prop::collection::vec(any::<u8>(),1..16), other in prop::collection::vec(any::<u8>(),1..16)) {
+            prop_assume!(bind != other); let ek = ek();
+            let sealed = seal_object(&ek, VaultId([1;16]), Epoch(1), oid(), DEFAULT_CHUNK_SIZE, &bind, &plain).unwrap();
+            let hdr = sealed.header.to_bytes();
+            prop_assert!(open_object(&ek, &hdr, &sealed.chunks, &bind).is_ok());
+            prop_assert!(matches!(open_object(&ek, &hdr, &sealed.chunks, &other), Err(Error::AuthFail)));
+        }
     }
 }

@@ -92,7 +92,7 @@ pub fn load_isk(path: &Path) -> Result<IdentitySecret> {
             let mut isk = [0u8; 32];
             isk.copy_from_slice(&raw[6..38]);
             let sum = blake3::hash(&isk);
-            if raw[38..54] != sum.as_bytes()[..16] {
+            if !geode_grotto::zero::ct_eq(&raw[38..54], &sum.as_bytes()[..16]) {
                 return Err(Error::AuthFail);
             }
             let id = IdentitySecret::from_bytes(isk);
@@ -365,10 +365,12 @@ pub fn fail(out: OutMode, verb: &str, err: &Error) -> ! {
     match out {
         OutMode::Json => {
             let doc = geode_grotto::event::build_error_event(verb, code, &err.to_string())
-                .unwrap_or_else(|_| serde_json::json!({
-                    "ok": false, "verb": verb, "schema": "geode.event.v1",
-                    "error": {"code": code, "message": "redacted: event safety check failed"},
-                }));
+                .unwrap_or_else(|_| {
+                    serde_json::json!({
+                        "ok": false, "verb": verb, "schema": "geode.event.v1",
+                        "error": {"code": code, "message": "redacted: event safety check failed"},
+                    })
+                });
             println!("{doc}");
         }
         OutMode::Text => eprintln!("{}", crate::output::human_error(verb, err)),
@@ -389,5 +391,32 @@ fn map_error(err: &Error) -> (&'static str, i32) {
         Error::PolicyDeny => ("policy_deny", exit::POLICY),
         Error::TokenInvalid => ("token_invalid", exit::TOKEN),
         Error::Locked => ("locked", exit::LOCKED),
+    }
+}
+
+#[cfg(test)]
+mod r_apply_oracle_tests {
+    use super::*;
+    use geode_grotto::manifest;
+
+    #[test]
+    fn verify_json_mac_rejects_tampered_manifest_mac() {
+        let mk = [7u8; 32];
+        let body = serde_json::json!({"schema": "geode.manifest.v1", "entries": []});
+        let canon = manifest::canonicalize(&body).unwrap();
+        let mac = manifest::manifest_mac(&mk, &canon).unwrap();
+        let mut doc = body.as_object().unwrap().clone();
+        doc.insert("manifest_mac".into(), serde_json::json!(hex(&mac)));
+        let mut val = serde_json::Value::Object(doc);
+        let obj = val.as_object_mut().unwrap();
+        let mac_str = obj["manifest_mac"].as_str().unwrap();
+        let mut bytes = [0u8; 16];
+        unhex(mac_str, &mut bytes).unwrap();
+        bytes[0] ^= 1;
+        obj.insert("manifest_mac".into(), serde_json::json!(hex(&bytes)));
+        assert!(matches!(
+            verify_json_mac(&mk, &val, "manifest_mac"),
+            Err(Error::AuthFail)
+        ));
     }
 }

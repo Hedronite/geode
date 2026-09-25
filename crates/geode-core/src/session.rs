@@ -121,7 +121,7 @@ impl Session {
     /// origin, paralleling [`Self::unlock_at`]. Wrong passphrase or tampered
     /// wrap surfaces `Error::AuthFail`; ISK is zeroized before the session
     /// is returned (same contract as [`Self::unlock_at`]).
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // wire/format shape
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // wire/format shape
     pub fn unlock_wrapped_at(
         wrapped: &WrappedKey,
         passphrase: &[u8],

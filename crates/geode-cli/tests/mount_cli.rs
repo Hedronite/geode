@@ -310,7 +310,10 @@ fn linux_unmount_execs_fusermount3_dash_u() {
     let log = stub.path().join("argv.txt");
     std::fs::write(
         &bin,
-        format!("#!/bin/sh\nprintf %s\n \"$@\" > {}\nexit 0\n", log.display()),
+        format!(
+            "#!/bin/sh\nprintf %s\n \"$@\" > {}\nexit 0\n",
+            log.display()
+        ),
     )
     .expect("write stub");
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
@@ -319,7 +322,11 @@ fn linux_unmount_execs_fusermount3_dash_u() {
         .args(["unmount", mnt.path().to_str().expect("utf8")])
         .env(
             "PATH",
-            format!("{}:{}", stub.path().display(), std::env::var("PATH").unwrap_or_default()),
+            format!(
+                "{}:{}",
+                stub.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
         )
         .output()
         .expect("spawn geode unmount");

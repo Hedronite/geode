@@ -124,10 +124,13 @@ fn write_string(s: &str, out: &mut Vec<u8>) {
 
 /// Merkle root over manifest entries (02-cryptography 8).
 pub fn entries_root(entries: &[Entry]) -> Result<[u8; 32]> {
-    if entries.is_empty() { return Ok([0u8; 32]); }
+    if entries.is_empty() {
+        return Ok([0u8; 32]);
+    }
     let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(entries.len());
     for e in entries {
-        let val = serde_json::to_value(e).map_err(|e| Error::Format(format!("entry serialize: {e}")))?;
+        let val =
+            serde_json::to_value(e).map_err(|e| Error::Format(format!("entry serialize: {e}")))?;
         let canon = canonicalize(&val)?;
         leaves.push(*blake3::hash(&canon).as_bytes());
     }
@@ -253,5 +256,32 @@ mod tests {
         };
         let r = entries_root(&[e]).unwrap();
         assert_ne!(r, [0u8; 32]);
+    }
+
+    use proptest::prelude::*;
+    fn arb_json() -> impl Strategy<Value = serde_json::Value> {
+        prop_oneof![
+            any::<i64>().prop_map(serde_json::Value::from),
+            Just(serde_json::Value::Null)
+        ]
+    }
+    proptest! {
+        #[test]
+        fn rp2_canonicalize_is_idempotent(v in arb_json()) {
+            let once = canonicalize(&v).unwrap();
+            let reparsed: serde_json::Value = serde_json::from_slice(&once).unwrap();
+            prop_assert_eq!(canonicalize(&reparsed).unwrap(), once);
+        }
+        #[test]
+        fn rp7_entries_root_is_a_set_function(paths in prop::collection::vec(r"[a-z]{1,6}\.md", 1..4), mtime in any::<i64>()) {
+            let mk = |p:&str,m:i64| Entry { path:p.to_string(), path_sealed:false, object_id:ObjectId([0;16]), kind:EntryKind::File, plain_len:3, chunk_count:1, mode:0o644, mtime_ms:m, content_root:[0;32], bind:false };
+            let mut a: Vec<Entry> = paths.iter().map(|p| mk(p,mtime)).collect();
+            a.sort_by(|x, y| x.path.cmp(&y.path));
+            a.dedup_by(|x, y| x.path == y.path);
+            let mut b: Vec<Entry> = paths.iter().rev().map(|p| mk(p, mtime)).collect();
+            b.sort_by(|x, y| x.path.cmp(&y.path));
+            b.dedup_by(|x, y| x.path == y.path);
+            prop_assert_eq!(entries_root(&a).unwrap(), entries_root(&b).unwrap());
+        }
     }
 }

@@ -104,6 +104,7 @@ pub const PENDING_OBJECT_ID: ObjectId = ObjectId([0u8; 16]);
 /// - `len > MAX_READ_LEN` -> `Error::Format` (caller should page).
 ///
 /// No ISK or key bytes appear in any error `Display`. No new `Error` variant.
+#[allow(clippy::too_many_arguments)] // wire layout args; density split is Phase O / scar_guard
 #[allow(clippy::cast_possible_truncation)]
 pub fn read_range(
     ek: &EpochKey,

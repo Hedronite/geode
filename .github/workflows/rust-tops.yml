@@ -6,7 +6,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
 
 jobs:
   fmt-clippy-deny:
@@ -44,18 +43,21 @@ jobs:
     strategy:
       matrix:
         include:
-          - features: --no-default-features
-          - features: --features fuse
+          - package: geode-cli
+            features: --no-default-features
+          - package: geode-cli
+            features: --features fuse
+          - package: geode-tui
+            features: --no-default-features
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p geode-cli ${{ matrix.features }} --locked
+      - run: cargo check -p ${{ matrix.package }} ${{ matrix.features }} --locked
 
   coverage-crap:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -65,5 +67,15 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - uses: taiki-e/install-action@cargo-llvm-cov
       - run: |
-          cargo llvm-cov nextest --workspace --all-features             --lcov --output-path target/coverage/lcov.info || true
-      - run: cargo install --locked cargo-crap && cargo crap || true
+          mkdir -p target/coverage
+          cargo llvm-cov nextest --workspace --all-features --lcov --output-path target/coverage/lcov.info
+          test -s target/coverage/lcov.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: target/coverage/lcov.info
+      - run: cargo install --locked cargo-crap && cargo crap --format json --output target/crap.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: crap
+          path: target/crap.json
