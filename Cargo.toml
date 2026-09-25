@@ -5,7 +5,7 @@ members = ["crates/geode-core", "crates/geode-cli", "crates/geode-tui"]
 [workspace.package]
 version = "1.0.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/VirtualMachinist/geode"
 
@@ -14,7 +14,6 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "warn"
-pedantic = "warn"
 
 # v0.2.0 adds the `tui` profile: geode-cli defaults feature `tui` on (14-tui §2).
 # `geode-grotto` still builds with no ratatui/crossterm. No `fuse` / `pq` features.

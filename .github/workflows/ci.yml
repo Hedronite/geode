@@ -1,3 +1,5 @@
+# Core-profile lane: no --all-features. Does not compile fuse or the
+# Linux keyring chain. rust-tops.yml is the real gate for those claims.
 name: ci
 
 on:

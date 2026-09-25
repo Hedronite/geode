@@ -364,4 +364,27 @@ mod tests {
         );
         assert!(matches!(r, Err(Error::Format(_))), "got {r:?}");
     }
+
+    use proptest::prelude::*;
+    fn tw(nb: i64, na: i64) -> Token {
+        Token {
+            token_id: TokenId([0x31; 16]),
+            vault_id: VaultId([1; 16]),
+            epoch: Epoch(1),
+            principal_id: PrincipalId("agent:test".into()),
+            not_before: nb,
+            not_after: na,
+            allow_ops: vec![Op::Read],
+            allow_prefix: vec!["scratch/".into()],
+            max_bytes: 4096,
+        }
+    }
+    proptest! {
+        #[test]
+        fn rp5_ttl_window_is_inclusive(nb in 0i64..1000, len in 0i64..1000, outside in 1i64..100) {
+            let na=nb+len; let ek=EpochKey::from_bytes([0x07;32]); let sealed=issue(&tw(nb,na),&ek).unwrap();
+            prop_assert!(inspect(&sealed,&ek,nb).is_ok()); prop_assert!(inspect(&sealed,&ek,na).is_ok());
+            prop_assert!(matches!(inspect(&sealed,&ek,na+outside), Err(Error::TokenInvalid)));
+        }
+    }
 }

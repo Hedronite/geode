@@ -44,6 +44,36 @@ const DEFAULT_MAX_BYTES: u64 = 1_048_576;
 
 /// MCP protocol version the stdio server speaks.
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+const MAX_JSON_RPC_FRAME_BYTES: usize = 1 << 20;
+
+#[cfg(unix)]
+pub(crate) fn ensure_private_parent(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(parent) = path.parent() else {
+        return Err(Error::Format("socket path has no parent".into()));
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        parent
+    };
+    if !parent.is_dir() {
+        return Err(Error::Format(format!(
+            "socket parent directory does not exist: {}",
+            parent.display()
+        )));
+    }
+    let meta = std::fs::metadata(parent).map_err(Error::Io)?;
+    if meta.permissions().mode() & 0o077 != 0 {
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| Error::Format(format!("chmod {}: {e}", parent.display())))?;
+    }
+    Ok(())
+}
+
+fn rpc_line_too_large(line: &str) -> bool {
+    line.len() > MAX_JSON_RPC_FRAME_BYTES
+}
 
 /// 06-agent-plane 6.5: 128 tool calls / 10 s per token. The ceiling is
 /// env-overridable (`GEODE_AGENT_RATE_MAX`); the window is not.
@@ -92,12 +122,14 @@ pub fn run(args: &AgentArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
             intent,
             body_digest,
         } => scope(
-            path,
-            op,
-            allow_prefix,
-            principal,
-            intent.as_deref(),
-            body_digest.as_deref(),
+            &ScopeRequest {
+                path,
+                op,
+                allow_prefix,
+                principal,
+                intent: intent.as_deref(),
+                body_digest: body_digest.as_deref(),
+            },
             out,
         ),
     }
@@ -587,24 +619,25 @@ fn write(
     Ok(())
 }
 
+struct ScopeRequest<'a> {
+    path: &'a str,
+    op: &'a str,
+    allow_prefix: &'a [String],
+    principal: &'a str,
+    intent: Option<&'a str>,
+    body_digest: Option<&'a str>,
+}
+
 /// `geode agent scope` — named remainder ask. No vault, no token, no key.
 /// Code owns prefix / `..`; Jev classifies the rest in shadow.
-fn scope(
-    path: &str,
-    op: &str,
-    allow_prefix: &[String],
-    principal: &str,
-    intent: Option<&str>,
-    body_digest: Option<&str>,
-    out: OutMode,
-) -> Result<()> {
+fn scope(req: &ScopeRequest<'_>, out: OutMode) -> Result<()> {
     let ask = geode_grotto::jev::RemainderAsk {
-        verb: op.to_ascii_lowercase(),
-        path: path.to_owned(),
-        principal: principal.to_owned(),
-        allow_prefix: allow_prefix.to_vec(),
-        intent: intent.unwrap_or("").to_owned(),
-        body_digest: body_digest.map(str::to_owned),
+        verb: req.op.to_ascii_lowercase(),
+        path: req.path.to_owned(),
+        principal: req.principal.to_owned(),
+        allow_prefix: req.allow_prefix.to_vec(),
+        intent: req.intent.unwrap_or("").to_owned(),
+        body_digest: req.body_digest.map(str::to_owned),
     };
     let decision = geode_grotto::jev::ask(&ask, &geode_grotto::jev::Transport::resolve_cli())?;
     let extra = serde_json::to_value(&decision)
@@ -702,6 +735,17 @@ fn mcp_error_code(err: &Error) -> &'static str {
     }
 }
 
+/// One authenticated agent-plane tool call (06-agent-plane 3/4).
+struct AgentCall<'a> {
+    facet_events: bool,
+    ctx: &'a cmd::VaultCtx,
+    claims: &'a Token,
+    sealed: &'a [u8],
+    now: i64,
+    vault: &'a str,
+    args: &'a serde_json::Value,
+}
+
 /// The stdio MCP server (06-agent-plane 3). One process, one token; EK is
 /// unwrapped once per vault and cached — the ISK is dropped after each
 /// unwrap and never held across requests.
@@ -742,8 +786,10 @@ impl<'g> StdioServer<'g> {
         Ok(ctxs.get(&path).expect("inserted above"))
     }
 
-    /// 06-agent-plane 6.5 sliding window. Returns false when the caller is
-    /// over the limit for the current window.
+    /// 06-agent-plane 6 item 5: 128 tool calls / 10 s per token, configurable
+    /// (`GEODE_AGENT_RATE_MAX`). This is a **fixed** window that resets after
+    /// `RATE_WINDOW_SECS`; a true sliding window is not implemented.
+    /// Returns false when the caller is over the limit for the current window.
     fn rate_allow(&mut self) -> bool {
         let max = std::env::var("GEODE_AGENT_RATE_MAX")
             .ok()
@@ -833,17 +879,23 @@ impl<'g> StdioServer<'g> {
         if !enabled {
             return;
         }
-        let mut doc = serde_json::json!({
-            "schema": "geode.event.v1",
-            "verb": op,
-            "vault_id": cmd::hex(&ctx.vault_id.0),
-            "epoch": ctx.epoch.0,
-            "principal": claims.principal_id.0,
-            "path": path,
+        let doc = geode_grotto::event::build_facet_event(
+            &cmd::hex(&ctx.vault_id.0),
+            ctx.epoch.0,
+            op,
+            &claims.principal_id.0,
+            path,
+            content_root.map(|r| cmd::hex(r)).as_deref(),
+            None,
+        )
+        .unwrap_or_else(|_| {
+            serde_json::json!({
+                "schema": "geode.event.v1",
+                "verb": op,
+                "ok": false,
+                "error": {"code": "event_rejected", "message": "event payload rejected"},
+            })
         });
-        if let Some(root) = content_root {
-            doc["content_root"] = serde_json::json!(cmd::hex(root));
-        }
         eprintln!("{doc}");
     }
 
@@ -860,57 +912,56 @@ impl<'g> StdioServer<'g> {
         // op); the claims drive the default prefix and Facet events.
         let claims = token::inspect(&self.sealed, &ctx.ek, now)?;
         match name {
-            "geode_list" => Self::list_tool(
-                self.facet_events,
+            "geode_list" => Self::list_tool(&AgentCall {
+                facet_events: self.facet_events,
                 ctx,
-                &claims,
-                &self.sealed,
+                claims: &claims,
+                sealed: &self.sealed,
                 now,
                 vault,
                 args,
-            ),
-            "geode_read" => Self::read_tool(
-                self.facet_events,
+            }),
+            "geode_read" => Self::read_tool(&AgentCall {
+                facet_events: self.facet_events,
                 ctx,
-                &claims,
-                &self.sealed,
+                claims: &claims,
+                sealed: &self.sealed,
                 now,
                 vault,
                 args,
-            ),
-            "geode_write" => Self::write_tool(
-                self.facet_events,
+            }),
+            "geode_write" => Self::write_tool(&AgentCall {
+                facet_events: self.facet_events,
                 ctx,
-                &claims,
-                &self.sealed,
+                claims: &claims,
+                sealed: &self.sealed,
                 now,
                 vault,
                 args,
-            ),
+            }),
             other => Err(Error::Format(format!("unknown tool '{other}'"))),
         }
     }
 
     /// `geode_list` (06-agent-plane 3): entries under a covered prefix.
-    #[allow(clippy::too_many_arguments)]
-    fn list_tool(
-        facet_events: bool,
-        ctx: &cmd::VaultCtx,
-        claims: &Token,
-        sealed: &[u8],
-        now: i64,
-        vault: &str,
-        args: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let prefix = match args.get("prefix").and_then(|p| p.as_str()) {
+    fn list_tool(call: &AgentCall<'_>) -> Result<serde_json::Value> {
+        let prefix = match call.args.get("prefix").and_then(|p| p.as_str()) {
             Some(p) => p.to_owned(),
-            None => claims
+            None => call
+                .claims
                 .allow_prefix
                 .first()
                 .cloned()
                 .ok_or_else(|| Error::Format("token grants no prefix to list".into()))?,
         };
-        let entries = agent_ops::list(&ctx.ek, Path::new(vault), sealed, now, &prefix, false)?;
+        let entries = agent_ops::list(
+            &call.ctx.ek,
+            Path::new(call.vault),
+            call.sealed,
+            call.now,
+            &prefix,
+            false,
+        )?;
         let files: Vec<serde_json::Value> = entries
             .iter()
             .map(|e| {
@@ -921,8 +972,15 @@ impl<'g> StdioServer<'g> {
                 })
             })
             .collect();
-        Self::facet_event(facet_events, ctx, claims, "list", &prefix, None);
-        let jev = remainder_annotation("list", &prefix, claims, args, None);
+        Self::facet_event(
+            call.facet_events,
+            call.ctx,
+            call.claims,
+            "list",
+            &prefix,
+            None,
+        );
+        let jev = remainder_annotation("list", &prefix, call.claims, call.args, None);
         Ok(with_jev(
             serde_json::json!({
                 "ok": true,
@@ -936,22 +994,22 @@ impl<'g> StdioServer<'g> {
     }
 
     /// `geode_read` (06-agent-plane 4): body, capped preview, or hash only.
-    #[allow(clippy::too_many_arguments)]
-    fn read_tool(
-        facet_events: bool,
-        ctx: &cmd::VaultCtx,
-        claims: &Token,
-        sealed: &[u8],
-        now: i64,
-        vault: &str,
-        args: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let path = args
+    fn read_tool(call: &AgentCall<'_>) -> Result<serde_json::Value> {
+        let path = call
+            .args
             .get("path")
             .and_then(|p| p.as_str())
             .ok_or_else(|| Error::Format("missing argument 'path'".into()))?;
-        let max_bytes = args.get("max_bytes").and_then(serde_json::Value::as_u64);
-        let mode = match args.get("mode").and_then(|m| m.as_str()).unwrap_or("text") {
+        let max_bytes = call
+            .args
+            .get("max_bytes")
+            .and_then(serde_json::Value::as_u64);
+        let mode = match call
+            .args
+            .get("mode")
+            .and_then(|m| m.as_str())
+            .unwrap_or("text")
+        {
             "text" => ReadMode::Text,
             "hex" => ReadMode::Hex,
             "hash" => ReadMode::Hash,
@@ -960,41 +1018,40 @@ impl<'g> StdioServer<'g> {
             }
         };
         let outcome = agent_ops::read(
-            &ctx.ek,
-            Path::new(vault),
-            sealed,
-            now,
+            &call.ctx.ek,
+            Path::new(call.vault),
+            call.sealed,
+            call.now,
             path,
             max_bytes,
             mode,
             false,
         )?;
-        Self::facet_event(facet_events, ctx, claims, "read", &outcome.path, None);
+        Self::facet_event(
+            call.facet_events,
+            call.ctx,
+            call.claims,
+            "read",
+            &outcome.path,
+            None,
+        );
         let mut doc = read_doc(&outcome, mode);
         doc["ok"] = serde_json::json!(true);
         doc["verb"] = serde_json::json!("read");
         Ok(with_jev(
             doc,
-            remainder_annotation("read", &outcome.path, claims, args, None),
+            remainder_annotation("read", &outcome.path, call.claims, call.args, None),
         ))
     }
 
     /// `geode_write` (06-agent-plane 3, 4): seal `body`/`body_hex` at path.
-    #[allow(clippy::too_many_arguments)]
-    fn write_tool(
-        facet_events: bool,
-        ctx: &cmd::VaultCtx,
-        claims: &Token,
-        sealed: &[u8],
-        now: i64,
-        vault: &str,
-        args: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let path = args
+    fn write_tool(call: &AgentCall<'_>) -> Result<serde_json::Value> {
+        let path = call
+            .args
             .get("path")
             .and_then(|p| p.as_str())
             .ok_or_else(|| Error::Format("missing argument 'path'".into()))?;
-        let body: Vec<u8> = match (args.get("body"), args.get("body_hex")) {
+        let body: Vec<u8> = match (call.args.get("body"), call.args.get("body_hex")) {
             (Some(b), None) => b
                 .as_str()
                 .ok_or_else(|| Error::Format("'body' must be a string".into()))?
@@ -1017,11 +1074,19 @@ impl<'g> StdioServer<'g> {
                 ));
             }
         };
-        let outcome = agent_ops::write(&ctx.ek, Path::new(vault), sealed, now, path, &body, false)?;
+        let outcome = agent_ops::write(
+            &call.ctx.ek,
+            Path::new(call.vault),
+            call.sealed,
+            call.now,
+            path,
+            &body,
+            false,
+        )?;
         Self::facet_event(
-            facet_events,
-            ctx,
-            claims,
+            call.facet_events,
+            call.ctx,
+            call.claims,
             "write",
             &outcome.path,
             Some(&outcome.content_root),
@@ -1035,7 +1100,7 @@ impl<'g> StdioServer<'g> {
                 "object_id": cmd::hex(&outcome.object_id.0),
                 "content_root": cmd::hex(&outcome.content_root),
             }),
-            remainder_annotation("write", &outcome.path, claims, args, Some(&body)),
+            remainder_annotation("write", &outcome.path, call.claims, call.args, Some(&body)),
         ))
     }
 
@@ -1089,6 +1154,11 @@ impl<'g> StdioServer<'g> {
             if line.trim().is_empty() {
                 continue;
             }
+            if rpc_line_too_large(&line) {
+                let frame = rpc_error(&serde_json::Value::Null, -32600, "frame exceeds 1 MiB cap");
+                write_frame(&mut stdout, &frame)?;
+                continue;
+            }
             let request: serde_json::Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(e) => {
@@ -1134,6 +1204,12 @@ impl<'g> StdioServer<'g> {
         for line in reader.lines() {
             let line = line.map_err(Error::Io)?;
             if line.trim().is_empty() {
+                continue;
+            }
+            if rpc_line_too_large(&line) {
+                let frame = rpc_error(&serde_json::Value::Null, -32600, "frame exceeds 1 MiB cap");
+                write_frame(&mut writer, &frame)?;
+                writer.flush().map_err(Error::Io)?;
                 continue;
             }
             let request: serde_json::Value = match serde_json::from_str(&line) {
@@ -1219,24 +1295,7 @@ fn serve_socket(global: &GlobalArgs, sealed: Vec<u8>, path: &Path) -> Result<()>
             path.display()
         )));
     }
-    // SPEC G0.1: `--socket agent.sock` (cwd-relative) has parent Some("")
-    // which is never a dir — an empty parent means ".".
-    let parent = match path.parent() {
-        Some(p) if p.as_os_str().is_empty() => Path::new("."),
-        Some(p) => p,
-        None => {
-            return Err(Error::Format(format!(
-                "socket path has no parent: {}",
-                path.display()
-            )));
-        }
-    };
-    if !parent.is_dir() {
-        return Err(Error::Format(format!(
-            "socket parent directory does not exist: {}",
-            parent.display()
-        )));
-    }
+    ensure_private_parent(path)?;
     let listener = UnixListener::bind(path).map_err(|e| {
         let _ = std::fs::remove_file(path);
         Error::Format(format!("bind {}: {e}", path.display()))
@@ -1245,12 +1304,38 @@ fn serve_socket(global: &GlobalArgs, sealed: Vec<u8>, path: &Path) -> Result<()>
     // a chmod failure — must unlink PATH before returning.
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
         let _ = std::fs::remove_file(path);
-        return Err(Error::Format(format!(
-            "chmod {}: {e}",
-            path.display()
-        )));
+        return Err(Error::Format(format!("chmod {}: {e}", path.display())));
     }
     let result = StdioServer::new(global, sealed).run_loop_unix(&listener);
     let _ = std::fs::remove_file(path);
     result
+}
+
+#[cfg(test)]
+mod r_apply_tests {
+    use super::*;
+    #[test]
+    fn rpc_frame_cap_is_exclusive_at_the_boundary() {
+        assert!(!rpc_line_too_large(
+            &"x".repeat(MAX_JSON_RPC_FRAME_BYTES - 1)
+        ));
+        assert!(!rpc_line_too_large(&"x".repeat(MAX_JSON_RPC_FRAME_BYTES)));
+        assert!(rpc_line_too_large(
+            &"x".repeat(MAX_JSON_RPC_FRAME_BYTES + 1)
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn parent_with_group_bits_is_tightened_to_0700() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sockdir");
+        std::fs::create_dir_all(&dir).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ensure_private_parent(&dir.join("agent.sock")).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
 }

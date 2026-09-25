@@ -1,0 +1,101 @@
+# Geode rust-tops instance (Phase F apply)
+protocol:
+  id: rust-tops
+  version: "1.0.0"
+  spec_uri: "vault:agents/mail_room/Ali.Evan/rust-tops/RUST_TOPS.md"
+  adopted: "2026-09-24"
+
+crate:
+  name: geode
+  class: parser-codec
+  edition: "2021"
+  msrv: "1.89"
+  unsafe_policy: forbid
+  # G-P2 overlays (schema 1.0 has no per-path class field):
+  #   crates/geode-core => parser-codec (library-core MUSTs union)
+  #   crates/geode-cli => binary-cli; binary-service on fuse_linux/fuse_macos/agent serve
+  #   crates/geode-tui => binary-cli journeys + library-util floors on non-render modules
+  hot_paths:
+    - crates/geode-core/src/vfs.rs::read_range
+    - crates/geode-core/src/aead.rs::open_chunk
+    - crates/geode-core/src/aead.rs::seal_chunk
+    - crates/geode-core/src/name.rs::seal_name
+    - crates/geode-core/src/hctr2.rs::Hctr2::encrypt
+    - crates/geode-core/src/manifest.rs::entries_root
+
+goals:
+  correctness: behavior matches 02-cryptography / 03-format / 08-mount invariants
+  density: fewest necessary production lines
+  performance: no unexplained regression on hot_paths
+
+layers:
+  - { id: static-lint, enabled: true, tier: 0, runner: "cargo fmt/clippy/deny", scope: workspace }
+  - { id: unit, enabled: true, tier: 0, runner: "cargo nextest", scope: lib }
+  - { id: doc, enabled: true, tier: 0, runner: "cargo test --doc", scope: lib }
+  - { id: integration, enabled: true, tier: 1, runner: "cargo nextest", scope: tests }
+  - { id: acceptance, enabled: true, tier: 1, runner: "CARGO_BIN_EXE_geode journeys", scope: tests }
+  - { id: coverage, enabled: true, tier: 0, runner: cargo-llvm-cov, scope: workspace }
+  - { id: crap, enabled: true, tier: 0, runner: cargo-crap, scope: workspace }
+  - { id: mutation, enabled: true, tier: 1, runner: cargo-mutants, scope: diff }
+  - { id: property, enabled: true, tier: 1, runner: proptest, scope: lib }
+  - { id: fuzz, enabled: true, tier: 3, runner: cargo-fuzz, scope: lib }
+  - { id: formal-kani, enabled: false, tier: 4, runner: cargo-kani, scope: hot-paths }
+  - { id: security-advisory, enabled: true, tier: 0, runner: cargo-deny, scope: workspace }
+
+gates:
+  lint:
+    clippy_deny: [warnings, clippy::correctness, clippy::suspicious, clippy::perf, clippy::complexity, clippy::dbg_macro]
+    fmt_check: true
+    cognitive_complexity_max: 12
+    too_many_lines_max: 40
+    too_many_arguments_max: 6
+  unit:
+    must_pass: true
+    allow_ignored: false
+    nextest_profile: ci
+  coverage:
+    tool: cargo-llvm-cov
+    line_min_pct: 95
+    region_min_pct: 90
+    branch_min_pct: null
+    per_file_line_min_pct: 90
+  crap:
+    tool: cargo-crap
+    formula: "CC^2 * (1 - cov)^3 + CC"
+    threshold_production: 6
+    threshold_agent: 6
+    threshold_human: 4
+    classic_crappy: 30
+    fail_on: any-over-threshold
+    scar_guard: true
+  mutation:
+    tool: cargo-mutants
+    scope: diff
+    kill_rate_min_pct: 95
+    unexplained_survivors_max: 0
+    timeout_multiplier: 2
+
+density:
+  production_sloc_policy: minimum necessary lines preserving named invariants
+  max_fn_sloc: 40
+  max_fn_cc: 8
+  allow_long_table_functions: true
+
+agent:
+  guidelines_file: AGENTS.md
+  may_run_tools: true
+  must_not_write_tests_from_impl: true
+  must_not_split_for_crap_alone: true
+  required_before_pr: [fmt, clippy, nextest]
+
+exemptions:
+  - path: crates/geode-core/src/hctr2.rs
+    layer: mutation
+    reason: KAT absent (A-01 PJ)
+    owner: rust-ops/pm
+    expires: "2026-12-31"
+  - path: crates/geode-cli/src/fuse_macos.rs
+    layer: acceptance
+    reason: no macOS runner (S-01)
+    owner: rust-ops/pm
+    expires: "2026-12-31"

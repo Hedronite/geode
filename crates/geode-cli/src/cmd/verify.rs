@@ -46,7 +46,9 @@ fn check_chunk(
         let this_plain = cs.min(header.plain_len - u64::from(j) * cs);
         let rec_len = 16 + this_plain as usize;
         if j == index {
-            let rec = chunks.get(offset..offset + rec_len).ok_or(Error::AuthFail)?;
+            let rec = chunks
+                .get(offset..offset + rec_len)
+                .ok_or(Error::AuthFail)?;
             let ad = aead::ChunkAd {
                 suite: header.suite,
                 vault_id: header.vault_id,
@@ -110,7 +112,7 @@ pub fn run(args: &VerifyArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         let header = ObjectHeader::from_bytes(header_bytes)?;
         // Header tag (every mode).
         let want = object::compute_header_tag(&ctx.ek, &header);
-        if want != header.header_tag {
+        if !geode_grotto::zero::ct_eq(&want, &header.header_tag) {
             return Err(Error::AuthFail);
         }
         // Manifest/header consistency (every mode).
@@ -171,4 +173,40 @@ pub fn run(args: &VerifyArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         ),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod r_apply_oracle_tests {
+    use super::*;
+    use geode_grotto::kdf::ObjectId;
+    use geode_grotto::kdf::{Epoch, EpochKey, VaultId};
+    use geode_grotto::object;
+
+    #[test]
+    fn check_chunk_rejects_flipped_ciphertext_bit() {
+        let ek = EpochKey::from_bytes([9u8; 32]);
+        let oid = ObjectId([3u8; 16]);
+        let plain = b"oracle-chunk-bytes";
+        let sealed = object::seal_object(
+            &ek,
+            &object::ObjectSpec {
+                vault_id: VaultId([1u8; 16]),
+                epoch: Epoch(1),
+                object_id: oid,
+                chunk_size: geode_grotto::chunk::DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
+            plain,
+        )
+        .unwrap();
+        let header = sealed.header;
+        let mut chunks = sealed.chunks;
+        if let Some(b) = chunks.get_mut(20) {
+            *b ^= 1;
+        }
+        assert!(matches!(
+            check_chunk(&ek, &header, &chunks, 0, b""),
+            Err(Error::AuthFail)
+        ));
+    }
 }

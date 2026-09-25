@@ -574,4 +574,12 @@ mod tests {
         assert!(!s.contains("ISK"), "error leaks ISK: {s}");
         assert!(!s.contains('\u{7}'), "error leaks key bytes: {s}");
     }
+
+    use proptest::prelude::*;
+    proptest! {
+        #[test]
+        fn rp4_prefix_covers_boundary_algebra(segs in prop::collection::vec("[a-z]{1,6}",0..4)) {
+            let path = segs.join("/"); prop_assert!(prefix_covers(&path,&path)); prop_assert!(prefix_covers("",&path));
+        }
+    }
 }

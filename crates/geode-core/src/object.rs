@@ -175,21 +175,23 @@ pub struct SealedObject {
     pub content_root: [u8; 32],
 }
 
+/// Per-object header/chunk AD identity (02-cryptography 4.3 / 03-format 2).
+#[derive(Debug, Clone)]
+pub struct ObjectSpec<'a> {
+    pub vault_id: VaultId,
+    pub epoch: Epoch,
+    pub object_id: ObjectId,
+    pub chunk_size: u32,
+    pub path_bind: &'a [u8],
+}
+
 #[allow(clippy::cast_possible_truncation)]
-pub fn seal_object(
-    ek: &EpochKey,
-    vault_id: VaultId,
-    epoch: Epoch,
-    object_id: ObjectId,
-    chunk_size: u32,
-    path_bind: &[u8],
-    plaintext: &[u8],
-) -> Result<SealedObject> {
+pub fn seal_object(ek: &EpochKey, spec: &ObjectSpec<'_>, plaintext: &[u8]) -> Result<SealedObject> {
     assert_suite(SUITE_0X01)?;
-    let cs = if chunk_size == 0 {
+    let cs = if spec.chunk_size == 0 {
         DEFAULT_CHUNK_SIZE
     } else {
-        chunk_size
+        spec.chunk_size
     };
     validate_chunk_size(cs)?;
     let n = chunk_count(plaintext.len() as u64, cs);
@@ -201,13 +203,13 @@ pub fn seal_object(
         let pt = &plaintext[offset..end];
         let ad = ChunkAd {
             suite: SUITE_0X01,
-            vault_id,
-            epoch,
-            object_id,
+            vault_id: spec.vault_id,
+            epoch: spec.epoch,
+            object_id: spec.object_id,
             chunk_index: u64::from(i),
             plain_len: u64::try_from(plaintext.len()).unwrap_or(u64::MAX),
             chunk_size: cs,
-            path_bind: path_bind.to_vec(),
+            path_bind: spec.path_bind.to_vec(),
         };
         let sealed = seal_chunk(ek, &ad, pt)?;
         let mut tag = [0u8; 16];
@@ -222,13 +224,13 @@ pub fn seal_object(
         suite: SUITE_0X01,
         kind: KIND_FILE,
         flags: 0,
-        vault_id,
-        epoch,
-        object_id,
+        vault_id: spec.vault_id,
+        epoch: spec.epoch,
+        object_id: spec.object_id,
         chunk_size: cs,
         plain_len: u64::try_from(plaintext.len()).unwrap_or(u64::MAX),
         chunk_count: n,
-        path_bind_hash: path_bind_hash(path_bind),
+        path_bind_hash: path_bind_hash(spec.path_bind),
         header_tag: [0u8; 16],
     };
     header.header_tag = compute_header_tag(ek, &header);
@@ -248,8 +250,7 @@ pub fn open_object(
 ) -> Result<(ObjectHeader, Vec<u8>)> {
     let header = ObjectHeader::from_bytes(header_bytes)?;
     let want = compute_header_tag(ek, &header);
-    // TODO(G5): constant-time compare. Correct for G2; harden later.
-    if want != header.header_tag {
+    if !crate::zero::ct_eq(&want, &header.header_tag) {
         return Err(Error::AuthFail);
     }
     let effective_bind: Vec<u8> = if header.path_bind_hash == [0u8; 32] {
@@ -311,11 +312,13 @@ mod tests {
         let ek = ek();
         let sealed = seal_object(
             &ek,
-            VaultId([0x01; 16]),
-            Epoch(1),
-            oid(),
-            DEFAULT_CHUNK_SIZE,
-            b"",
+            &ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid(),
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
             b"hello world",
         )
         .unwrap();
@@ -330,11 +333,13 @@ mod tests {
         let ek = ek();
         let sealed = seal_object(
             &ek,
-            VaultId([0x01; 16]),
-            Epoch(1),
-            oid(),
-            DEFAULT_CHUNK_SIZE,
-            b"",
+            &ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid(),
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
             b"",
         )
         .unwrap();
@@ -349,7 +354,18 @@ mod tests {
         let ek = ek();
         let cs = 64 << 10;
         let pt = vec![0x5a; (cs as usize) * 3 + 10];
-        let sealed = seal_object(&ek, VaultId([0x01; 16]), Epoch(1), oid(), cs, b"", &pt).unwrap();
+        let sealed = seal_object(
+            &ek,
+            &ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid(),
+                chunk_size: cs,
+                path_bind: b"",
+            },
+            &pt,
+        )
+        .unwrap();
         assert_eq!(sealed.header.chunk_count, 4);
         let (_, opened) = open_object(&ek, &sealed.header.to_bytes(), &sealed.chunks, b"").unwrap();
         assert_eq!(opened, pt);
@@ -360,11 +376,13 @@ mod tests {
         let ek = ek();
         let sealed = seal_object(
             &ek,
-            VaultId([0x01; 16]),
-            Epoch(1),
-            oid(),
-            DEFAULT_CHUNK_SIZE,
-            b"",
+            &ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid(),
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
             b"hello world",
         )
         .unwrap();
@@ -379,11 +397,13 @@ mod tests {
         let ek = ek();
         let sealed = seal_object(
             &ek,
-            VaultId([0x01; 16]),
-            Epoch(1),
-            oid(),
-            DEFAULT_CHUNK_SIZE,
-            b"",
+            &ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid(),
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
             b"hello world",
         )
         .unwrap();
@@ -398,11 +418,13 @@ mod tests {
         let ek = ek();
         let sealed = seal_object(
             &ek,
-            VaultId([0x01; 16]),
-            Epoch(1),
-            oid(),
-            DEFAULT_CHUNK_SIZE,
-            b"",
+            &ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid(),
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
             b"hello world",
         )
         .unwrap();
@@ -417,11 +439,13 @@ mod tests {
         let ek = ek();
         let sealed = seal_object(
             &ek,
-            VaultId([0x01; 16]),
-            Epoch(1),
-            oid(),
-            DEFAULT_CHUNK_SIZE,
-            b"docs/plan.md",
+            &ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid(),
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: b"docs/plan.md",
+            },
             b"secret plan",
         )
         .unwrap();
@@ -455,11 +479,13 @@ mod tests {
         let ek = ek();
         let sealed = seal_object(
             &ek,
-            VaultId([0x01; 16]),
-            Epoch(1),
-            oid(),
-            DEFAULT_CHUNK_SIZE,
-            b"",
+            &ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid(),
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
             b"movable",
         )
         .unwrap();
@@ -473,5 +499,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(pt, b"movable");
+    }
+
+    use crate::chunk::ALLOWED_CHUNK_SIZES;
+    use proptest::prelude::*;
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+        #[test]
+        fn rp1_seal_open_is_identity(n in 0usize..=65536, fill in any::<u8>(), cs_idx in 0usize..ALLOWED_CHUNK_SIZES.len()) {
+            let cs = ALLOWED_CHUNK_SIZES[cs_idx]; let plain = vec![fill; n]; let ek = ek();
+            let sealed = seal_object(&ek, &ObjectSpec { vault_id: VaultId([1;16]), epoch: Epoch(1), object_id: oid(), chunk_size: cs, path_bind: b"bind" }, &plain).unwrap();
+            let (_, got) = open_object(&ek, &sealed.header.to_bytes(), &sealed.chunks, b"bind").unwrap();
+            prop_assert_eq!(got, plain);
+        }
+        #[test]
+        fn rp6_path_bind_is_committed(plain in prop::collection::vec(any::<u8>(),0..256), bind in prop::collection::vec(any::<u8>(),1..16), other in prop::collection::vec(any::<u8>(),1..16)) {
+            prop_assume!(bind != other); let ek = ek();
+            let sealed = seal_object(&ek, &ObjectSpec { vault_id: VaultId([1;16]), epoch: Epoch(1), object_id: oid(), chunk_size: DEFAULT_CHUNK_SIZE, path_bind: &bind }, &plain).unwrap();
+            let hdr = sealed.header.to_bytes();
+            prop_assert!(open_object(&ek, &hdr, &sealed.chunks, &bind).is_ok());
+            prop_assert!(matches!(open_object(&ek, &hdr, &sealed.chunks, &other), Err(Error::AuthFail)));
+        }
     }
 }

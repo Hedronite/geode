@@ -104,31 +104,75 @@ pub const PENDING_OBJECT_ID: ObjectId = ObjectId([0u8; 16]);
 /// - `len > MAX_READ_LEN` -> `Error::Format` (caller should page).
 ///
 /// No ISK or key bytes appear in any error `Display`. No new `Error` variant.
+/// One object's vault location + path bind (03-format 4; 02-cryptography 4.3).
+#[derive(Debug)]
+pub struct ObjectRef<'a> {
+    pub vault_root: &'a Path,
+    pub epoch: Epoch,
+    pub object_id: ObjectId,
+    pub path_bind: &'a [u8],
+}
+
+/// Request plaintext bytes `[off, off + len)` capped at [`MAX_READ_LEN`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteRange {
+    pub off: u64,
+    pub len: u64,
+}
+
+impl ByteRange {
+    #[must_use]
+    pub const fn new(off: u64, len: u64) -> Self {
+        Self { off, len }
+    }
+
+    #[must_use]
+    pub const fn all() -> Self {
+        Self {
+            off: 0,
+            len: MAX_READ_LEN,
+        }
+    }
+}
+
+struct ChunkWindow {
+    first: u64,
+    last: u64,
+    local_off: usize,
+    want_len: usize,
+}
+
+fn chunk_window(off: u64, end: u64, chunk_size: u64, chunk_count: u64) -> Option<ChunkWindow> {
+    if chunk_size == 0 {
+        return None;
+    }
+    let first = off / chunk_size;
+    if first >= chunk_count {
+        return None;
+    }
+    let last = ((end.saturating_sub(1)) / chunk_size).min(chunk_count.saturating_sub(1));
+    Some(ChunkWindow {
+        first,
+        last,
+        local_off: (off - first * chunk_size) as usize,
+        want_len: (end - off) as usize,
+    })
+}
+
 #[allow(clippy::cast_possible_truncation)]
-pub fn read_range(
-    ek: &EpochKey,
-    vault_root: &Path,
-    epoch: Epoch,
-    object_id: ObjectId,
-    path_bind: &[u8],
-    off: u64,
-    len: u64,
-) -> Result<Vec<u8>> {
-    if len == 0 {
+pub fn read_range(ek: &EpochKey, obj: &ObjectRef<'_>, range: ByteRange) -> Result<Vec<u8>> {
+    if range.len == 0 {
         return Ok(Vec::new());
     }
-    if len > MAX_READ_LEN {
+    if range.len > MAX_READ_LEN {
         return Err(Error::Format(format!(
-            "read_range len {len} exceeds MAX_READ_LEN {MAX_READ_LEN}; page the read"
+            "read_range len {} exceeds MAX_READ_LEN {MAX_READ_LEN}; page the read",
+            range.len
         )));
     }
 
-    // Read the whole object file (header + chunk records). The *decryption*
-    // is bounded to the touched chunks; the *read* is the whole file because
-    // the chunk records are contiguous and we must seek forward from chunk
-    // 0 to find chunk `i` (no per-chunk index on disk). A future index is
-    // out of scope for G0.
-    let raw = corevault::read_object(vault_root, epoch, &object_id)?;
+    // Reads the whole `.gobj` file; decryption touches only the chunk window (A-1/S-03).
+    let raw = corevault::read_object(obj.vault_root, obj.epoch, &obj.object_id)?;
     if raw.len() < HEADER_SIZE {
         return Err(Error::Format(format!(
             "object file too short: {} < {HEADER_SIZE}",
@@ -138,25 +182,21 @@ pub fn read_range(
     let (header_bytes, chunk_bytes) = raw.split_at(HEADER_SIZE);
     let header = ObjectHeader::from_bytes(header_bytes)?;
 
-    // Header tag (every read).
     let want = compute_header_tag(ek, &header);
-    // TODO(G5): constant-time compare. Correct for G0; harden later.
-    if want != header.header_tag {
+    if !crate::zero::ct_eq(&want, &header.header_tag) {
         return Err(Error::AuthFail);
     }
-    if header.object_id != object_id {
+    if header.object_id != obj.object_id {
         return Err(Error::AuthFail);
     }
 
-    // Path bind: if the header was sealed with a bind, the caller MUST supply
-    // the matching path. A moved object fails open (02 4.3).
     let effective_bind: Vec<u8> = if header.path_bind_hash == [0u8; 32] {
         Vec::new()
     } else {
-        if header.path_bind_hash != path_bind_hash(path_bind) {
+        if header.path_bind_hash != path_bind_hash(obj.path_bind) {
             return Err(Error::AuthFail);
         }
-        path_bind.to_vec()
+        obj.path_bind.to_vec()
     };
 
     let cs = u64::from(header.chunk_size);
@@ -164,8 +204,8 @@ pub fn read_range(
         return Err(Error::Format("chunk_size 0 in header".into()));
     }
     let plain_len = header.plain_len;
-
-    // Clamp the range to the plaintext.
+    let off = range.off;
+    let len = range.len;
     if off >= plain_len {
         return Ok(Vec::new());
     }
@@ -173,23 +213,14 @@ pub fn read_range(
     if end <= off {
         return Ok(Vec::new());
     }
-    let want_len = end - off;
-
-    let first_chunk = off / cs;
-    let last_chunk = (end - 1) / cs;
     let chunk_count = u64::from(header.chunk_count);
-    if first_chunk >= chunk_count {
+    let Some(win) = chunk_window(off, end, cs, chunk_count) else {
         return Ok(Vec::new());
-    }
-    let last_chunk = last_chunk.min(chunk_count.saturating_sub(1));
+    };
 
-    // Walk chunk records from 0 to last_chunk, decrypting only the touched
-    // ones. Records are `tag(16) || ciphertext` with
-    // `ct_len = min(chunk_size, remaining_plain)`.
-    let mut decrypted: Vec<u8> = Vec::new();
+    let mut out = Vec::with_capacity(win.want_len);
     let mut offset = 0usize;
-    let mut touched_started = false;
-    for i in 0..=last_chunk {
+    for i in 0..=win.last {
         if offset + 16 > chunk_bytes.len() {
             return Err(Error::AuthFail);
         }
@@ -200,10 +231,7 @@ pub fn read_range(
             return Err(Error::AuthFail);
         }
         let rec = &chunk_bytes[offset..offset + rec_len];
-        if i >= first_chunk {
-            if !touched_started {
-                touched_started = true;
-            }
+        if i >= win.first {
             let ad = ChunkAd {
                 suite: header.suite,
                 vault_id: header.vault_id,
@@ -212,33 +240,33 @@ pub fn read_range(
                 chunk_index: i,
                 plain_len: header.plain_len,
                 chunk_size: header.chunk_size,
+                // 12.5: clone per touched chunk; hoist after a bench exists.
                 path_bind: effective_bind.clone(),
             };
             let pt = open_chunk(ek, &ad, rec)?;
-            decrypted.extend_from_slice(&pt);
+            if i == win.first && i == win.last {
+                let end_i = win.local_off + win.want_len;
+                out.extend_from_slice(&pt[win.local_off..end_i.min(pt.len())]);
+            } else if i == win.first {
+                out.extend_from_slice(&pt[win.local_off..]);
+            } else if i == win.last {
+                let take = win.want_len.saturating_sub(out.len());
+                out.extend_from_slice(&pt[..take.min(pt.len())]);
+            } else {
+                out.extend_from_slice(&pt);
+            }
+            if out.len() >= win.want_len {
+                break;
+            }
         }
         offset += rec_len;
     }
-
-    // Slice within the touched-chunk plaintext.
-    let local_off = (off - first_chunk * cs) as usize;
-    let local_end = local_off + want_len as usize;
-    if local_end > decrypted.len() {
-        return Err(Error::AuthFail);
-    }
-    Ok(decrypted[local_off..local_end].to_vec())
+    out.truncate(win.want_len);
+    Ok(out)
 }
 
-/// `read_range` at offset 0 -- convenience for whole-object reads that
-/// still only decrypt touched chunks (here, all of them).
-pub fn read_all(
-    ek: &EpochKey,
-    vault_root: &Path,
-    epoch: Epoch,
-    object_id: ObjectId,
-    path_bind: &[u8],
-) -> Result<Vec<u8>> {
-    read_range(ek, vault_root, epoch, object_id, path_bind, 0, MAX_READ_LEN)
+pub fn read_all(ek: &EpochKey, obj: &ObjectRef<'_>) -> Result<Vec<u8>> {
+    read_range(ek, obj, ByteRange::all())
 }
 
 // ---------------------------------------------------------------------------
@@ -647,12 +675,13 @@ impl Vfs {
         let bind = bind_for(&entry);
         self::read_range(
             &self.ek,
-            &self.root,
-            self.epoch,
-            entry.object_id,
-            &bind,
-            off,
-            len,
+            &ObjectRef {
+                vault_root: &self.root,
+                epoch: self.epoch,
+                object_id: entry.object_id,
+                path_bind: &bind,
+            },
+            ByteRange::new(off, len),
         )
     }
 
@@ -729,11 +758,13 @@ impl Vfs {
         let bind = bind_for(&entry);
         let sealed = object::seal_object(
             &self.ek,
-            self.vault_id,
-            self.epoch,
-            oid,
-            self.chunk_size,
-            &bind,
+            &object::ObjectSpec {
+                vault_id: self.vault_id,
+                epoch: self.epoch,
+                object_id: oid,
+                chunk_size: self.chunk_size,
+                path_bind: &bind,
+            },
             &plain,
         )?;
         corevault::write_object(
@@ -929,7 +960,15 @@ impl Vfs {
             Vec::new()
         } else {
             let bind = bind_for(entry);
-            self::read_all(&self.ek, &self.root, self.epoch, entry.object_id, &bind)?
+            self::read_all(
+                &self.ek,
+                &ObjectRef {
+                    vault_root: &self.root,
+                    epoch: self.epoch,
+                    object_id: entry.object_id,
+                    path_bind: &bind,
+                },
+            )?
         };
         self.open.insert(
             path.to_string(),
@@ -993,7 +1032,7 @@ impl Vfs {
         self.manifest.entries.sort_by(|a, b| a.path.cmp(&b.path));
         self.manifest.entry_count = u32::try_from(self.manifest.entries.len())
             .map_err(|_| Error::Format("entry_count overflow".into()))?;
-        self.manifest.root = entries_root(&self.manifest.entries);
+        self.manifest.root = entries_root(&self.manifest.entries)?;
         self.manifest.total_plain_bytes = self.manifest.entries.iter().map(|e| e.plain_len).sum();
         self.manifest.total_cipher_bytes = self.cipher_bytes_total()?;
         Ok(())
@@ -1044,6 +1083,7 @@ impl Vfs {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::too_many_lines)]
     use super::*;
     use crate::chunk::DEFAULT_CHUNK_SIZE;
     use crate::kdf::{Epoch, IdentitySecret, VaultId};
@@ -1071,11 +1111,13 @@ mod tests {
         let oid = corevault::new_object_id().unwrap();
         let sealed = object::seal_object(
             &ek(),
-            VaultId([0x01; 16]),
-            Epoch(1),
-            oid,
-            chunk_size,
-            b"",
+            &object::ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid,
+                chunk_size,
+                path_bind: b"",
+            },
             body,
         )
         .unwrap();
@@ -1097,7 +1139,7 @@ mod tests {
             flags: 0,
             generated_at: 0,
             generator: "test".into(),
-            root: entries_root(&[]),
+            root: entries_root(&[]).unwrap(),
             entry_count: 0,
             total_plain_bytes: 0,
             total_cipher_bytes: 0,
@@ -1122,7 +1164,17 @@ mod tests {
         let body = b"hello world";
         let (d, oid) = fixture(body, DEFAULT_CHUNK_SIZE);
         let root = d.path().join("v.geode");
-        let got = read_range(&ek(), &root, Epoch(1), oid, b"", 0, body.len() as u64).unwrap();
+        let got = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(0, body.len() as u64),
+        )
+        .unwrap();
         assert_eq!(got, body);
     }
 
@@ -1132,7 +1184,17 @@ mod tests {
         let body = vec![0x5a; cs as usize];
         let (d, oid) = fixture(&body, cs);
         let root = d.path().join("v.geode");
-        let got = read_range(&ek(), &root, Epoch(1), oid, b"", 0, u64::from(cs)).unwrap();
+        let got = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(0, u64::from(cs)),
+        )
+        .unwrap();
         assert_eq!(got, body);
     }
 
@@ -1142,7 +1204,17 @@ mod tests {
         let body = b"hello world";
         let (d, oid) = fixture(body, DEFAULT_CHUNK_SIZE);
         let root = d.path().join("v.geode");
-        let got = read_range(&ek(), &root, Epoch(1), oid, b"", 4, 4).unwrap();
+        let got = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(4, 4),
+        )
+        .unwrap();
         assert_eq!(got, b"o wo");
     }
 
@@ -1159,7 +1231,17 @@ mod tests {
         let off = u64::from(cs) + 100;
         let len: u64 = u64::from(cs) - 50 + 5;
         let want = &body[off as usize..(off + len) as usize];
-        let got = read_range(&ek(), &root, Epoch(1), oid, b"", off, len).unwrap();
+        let got = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(off, len),
+        )
+        .unwrap();
         assert_eq!(got, want);
         assert_eq!(got.len() as u64, len);
     }
@@ -1169,7 +1251,17 @@ mod tests {
         let body = b"hello world";
         let (d, oid) = fixture(body, DEFAULT_CHUNK_SIZE);
         let root = d.path().join("v.geode");
-        let got = read_range(&ek(), &root, Epoch(1), oid, b"", 4, 100).unwrap();
+        let got = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(4, 100),
+        )
+        .unwrap();
         assert_eq!(got, b"o world");
     }
 
@@ -1178,7 +1270,17 @@ mod tests {
         let body = b"hello world";
         let (d, oid) = fixture(body, DEFAULT_CHUNK_SIZE);
         let root = d.path().join("v.geode");
-        let got = read_range(&ek(), &root, Epoch(1), oid, b"", 100, 10).unwrap();
+        let got = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(100, 10),
+        )
+        .unwrap();
         assert!(got.is_empty());
     }
 
@@ -1187,7 +1289,17 @@ mod tests {
         let body = b"hello world";
         let (d, oid) = fixture(body, DEFAULT_CHUNK_SIZE);
         let root = d.path().join("v.geode");
-        let got = read_range(&ek(), &root, Epoch(1), oid, b"", 0, 0).unwrap();
+        let got = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(0, 0),
+        )
+        .unwrap();
         assert!(got.is_empty());
     }
 
@@ -1197,7 +1309,16 @@ mod tests {
         let root = d.path().join("v.geode");
         corevault::init_vault_dir(&root, VaultId([0x01; 16]), Epoch(1)).unwrap();
         let oid = corevault::new_object_id().unwrap();
-        let r = read_range(&ek(), &root, Epoch(1), oid, b"", 0, 10);
+        let r = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(0, 10),
+        );
         assert!(
             matches!(&r, Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound),
             "got {r:?}"
@@ -1213,7 +1334,16 @@ mod tests {
         let mut raw = std::fs::read(&p).unwrap();
         raw[HEADER_SIZE + 16] ^= 0x01;
         std::fs::write(&p, &raw).unwrap();
-        let r = read_range(&ek(), &root, Epoch(1), oid, b"", 0, body.len() as u64);
+        let r = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(0, body.len() as u64),
+        );
         assert!(matches!(r, Err(Error::AuthFail)), "got {r:?}");
     }
 
@@ -1226,7 +1356,16 @@ mod tests {
         let mut raw = std::fs::read(&p).unwrap();
         raw[92] ^= 0x01;
         std::fs::write(&p, &raw).unwrap();
-        let r = read_range(&ek(), &root, Epoch(1), oid, b"", 0, body.len() as u64);
+        let r = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(0, body.len() as u64),
+        );
         assert!(matches!(r, Err(Error::AuthFail)), "got {r:?}");
     }
 
@@ -1237,7 +1376,16 @@ mod tests {
         let root = d.path().join("v.geode");
         let mut other = oid;
         other.0[0] ^= 0x01;
-        let r = read_range(&ek(), &root, Epoch(1), other, b"", 0, body.len() as u64);
+        let r = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: other,
+                path_bind: b"",
+            },
+            ByteRange::new(0, body.len() as u64),
+        );
         assert!(
             matches!(&r, Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound),
             "got {r:?}"
@@ -1254,11 +1402,13 @@ mod tests {
         let oid = corevault::new_object_id().unwrap();
         let sealed = object::seal_object(
             &ek(),
-            VaultId([0x01; 16]),
-            Epoch(1),
-            oid,
-            cs,
-            b"docs/plan.md",
+            &object::ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid,
+                chunk_size: cs,
+                path_bind: b"docs/plan.md",
+            },
             &body,
         )
         .unwrap();
@@ -1266,22 +1416,24 @@ mod tests {
         corevault::write_object(&root, Epoch(1), &oid, &hb, &sealed.chunks).unwrap();
         let r = read_range(
             &ek(),
-            &root,
-            Epoch(1),
-            oid,
-            b"docs/other.md",
-            0,
-            u64::from(cs),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"docs/other.md",
+            },
+            ByteRange::new(0, u64::from(cs)),
         );
         assert!(matches!(r, Err(Error::AuthFail)), "got {r:?}");
         let got = read_range(
             &ek(),
-            &root,
-            Epoch(1),
-            oid,
-            b"docs/plan.md",
-            0,
-            u64::from(cs),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"docs/plan.md",
+            },
+            ByteRange::new(0, u64::from(cs)),
         )
         .unwrap();
         assert_eq!(got, body);
@@ -1292,7 +1444,16 @@ mod tests {
         let body = b"hello world";
         let (d, oid) = fixture(body, DEFAULT_CHUNK_SIZE);
         let root = d.path().join("v.geode");
-        let got = read_all(&ek(), &root, Epoch(1), oid, b"").unwrap();
+        let got = read_all(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+        )
+        .unwrap();
         assert_eq!(got, body);
     }
 
@@ -1302,7 +1463,16 @@ mod tests {
         let body = vec![0x5a; (cs as usize) * 3 + 10];
         let (d, oid) = fixture(&body, cs);
         let root = d.path().join("v.geode");
-        let got = read_all(&ek(), &root, Epoch(1), oid, b"").unwrap();
+        let got = read_all(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+        )
+        .unwrap();
         assert_eq!(got, body);
     }
 
@@ -1311,7 +1481,16 @@ mod tests {
         let body = b"hello world";
         let (d, oid) = fixture(body, DEFAULT_CHUNK_SIZE);
         let root = d.path().join("v.geode");
-        let r = read_range(&ek(), &root, Epoch(1), oid, b"", 0, MAX_READ_LEN + 1);
+        let r = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(0, MAX_READ_LEN + 1),
+        );
         assert!(matches!(r, Err(Error::Format(_))), "got {r:?}");
     }
 
@@ -1324,7 +1503,16 @@ mod tests {
         let mut raw = std::fs::read(&p).unwrap();
         raw[92] ^= 0x01;
         std::fs::write(&p, &raw).unwrap();
-        let r = read_range(&ek(), &root, Epoch(1), oid, b"", 0, body.len() as u64);
+        let r = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(0, body.len() as u64),
+        );
         let s = format!("{}", r.unwrap_err());
         assert!(!s.contains("ISK"), "leaks ISK: {s}");
         assert!(!s.contains('\u{7}'), "leaks key bytes: {s}");
@@ -1347,7 +1535,17 @@ mod tests {
         );
         let oid = vfs.fsync("docs/plan.md", 1_000).unwrap();
         // After the flush the SHIPPED read-only path (no /dev/fuse) agrees.
-        let got = read_range(&ek(), &root, Epoch(1), oid, b"", 0, 11).unwrap();
+        let got = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(0, 11),
+        )
+        .unwrap();
         assert_eq!(got, b"hello world");
         assert_eq!(vfs.read_range("docs/plan.md", 6, 5).unwrap(), b"world");
     }
@@ -1381,7 +1579,17 @@ mod tests {
 
         // The old object was not mutated: it still reads back its old body.
         let total = u64::try_from(body.len()).unwrap();
-        let old_pt = read_range(&ek(), &root, Epoch(1), old, b"", 0, total).unwrap();
+        let old_pt = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: old,
+                path_bind: b"",
+            },
+            ByteRange::new(0, total),
+        )
+        .unwrap();
         assert_eq!(old_pt, body);
         assert!(
             corevault::object_path(&root, Epoch(1), &old)
@@ -1390,7 +1598,17 @@ mod tests {
             "the superseded .gobj is left on disk (gc reclaims it)"
         );
 
-        let new_pt = read_range(&ek(), &root, Epoch(1), new, b"", 0, total).unwrap();
+        let new_pt = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: new,
+                path_bind: b"",
+            },
+            ByteRange::new(0, total),
+        )
+        .unwrap();
         let off_i = usize::try_from(off).unwrap();
         assert_eq!(new_pt.len(), body.len());
         assert_eq!(&new_pt[off_i..off_i + 3], b"XYZ");
@@ -1410,7 +1628,17 @@ mod tests {
         vfs.write("sparse.bin", off, b"Z").unwrap();
         let oid = vfs.fsync("sparse.bin", 1).unwrap();
         let end = off + 1;
-        let got = read_range(&ek(), &root, Epoch(1), oid, b"", 0, end).unwrap();
+        let got = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid,
+                path_bind: b"",
+            },
+            ByteRange::new(0, end),
+        )
+        .unwrap();
         assert_eq!(&got[..3], b"abc");
         assert!(got[3..off_i].iter().all(|b| *b == 0), "sparse hole is zero");
         assert_eq!(got[off_i], b'Z');
@@ -1450,13 +1678,32 @@ mod tests {
         assert_eq!(vfs.dirty_chunks("f.bin").unwrap(), vec![1, 2]);
         let oid = vfs.fsync("f.bin", 20).unwrap();
         assert_eq!(
-            read_range(&ek(), &root, Epoch(1), oid, b"", 0, shrunk).unwrap(),
+            read_range(
+                &ek(),
+                &ObjectRef {
+                    vault_root: &root,
+                    epoch: Epoch(1),
+                    object_id: oid,
+                    path_bind: b""
+                },
+                ByteRange::new(0, shrunk)
+            )
+            .unwrap(),
             &body[..shrunk_i]
         );
         assert!(
-            read_range(&ek(), &root, Epoch(1), oid, b"", shrunk, 10)
-                .unwrap()
-                .is_empty(),
+            read_range(
+                &ek(),
+                &ObjectRef {
+                    vault_root: &root,
+                    epoch: Epoch(1),
+                    object_id: oid,
+                    path_bind: b""
+                },
+                ByteRange::new(shrunk, 10)
+            )
+            .unwrap()
+            .is_empty(),
             "the truncated tail is gone"
         );
 
@@ -1464,7 +1711,17 @@ mod tests {
         let grown = u64::from(CS) * 4 + 7;
         vfs.truncate("f.bin", grown).unwrap();
         let oid2 = vfs.fsync("f.bin", 30).unwrap();
-        let got = read_range(&ek(), &root, Epoch(1), oid2, b"", 0, grown).unwrap();
+        let got = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: oid2,
+                path_bind: b"",
+            },
+            ByteRange::new(0, grown),
+        )
+        .unwrap();
         assert_eq!(got.len() as u64, grown);
         assert_eq!(&got[..shrunk_i], &body[..shrunk_i]);
         assert!(got[shrunk_i..].iter().all(|b| *b == 0));
@@ -1740,7 +1997,7 @@ mod tests {
         let mut m = read_manifest_file(&root, Epoch(1), &manifest_key()).unwrap();
         m.entries.retain(|e| e.kind != EntryKind::Dir);
         m.entry_count = 1;
-        m.root = entries_root(&m.entries);
+        m.root = entries_root(&m.entries).unwrap();
         m.total_plain_bytes = 1;
         write_manifest_file(&root, Epoch(1), &m, &manifest_key()).unwrap();
 
@@ -1800,7 +2057,17 @@ mod tests {
             vfs2.read_range("docs/plan.md", 0, 11).unwrap(),
             b"hello world"
         );
-        let got = read_range(&ek(), &root, Epoch(1), e.object_id, b"", 0, 11).unwrap();
+        let got = read_range(
+            &ek(),
+            &ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: e.object_id,
+                path_bind: b"",
+            },
+            ByteRange::new(0, 11),
+        )
+        .unwrap();
         assert_eq!(got, b"hello world");
     }
 

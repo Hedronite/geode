@@ -504,6 +504,7 @@ impl App {
 
     /// Move the tree cursor; clears the preview buffer (14-tui §8.7).
     pub(crate) fn move_focus(&mut self, delta: i32) {
+        self.preview = None;
         if self.ctx.is_none() {
             return;
         }
@@ -515,7 +516,6 @@ impl App {
         let fi = i64::try_from(self.focus).unwrap_or(i64::MAX);
         let next = (fi + i64::from(delta)).rem_euclid(ni);
         self.focus = usize::try_from(next).unwrap_or(0);
-        self.preview = None;
     }
 
     /// Move the picker cursor.
@@ -666,6 +666,7 @@ impl App {
     /// session) and clear the preview buffer. Returns to the picker
     /// (14-tui §3.3), not a locked-but-painted tree. Enter re-opens.
     pub(crate) fn lock(&mut self) {
+        let had_session = self.ctx.is_some();
         self.ctx = None;
         self.preview = None;
         self.focus = 0;
@@ -678,7 +679,11 @@ impl App {
         self.tree_rows.clear();
         self.expanded.clear();
         self.select_picker_for_vault();
-        self.error = Some("locked — Enter to unlock the selected vault".into());
+        if had_session {
+            self.error = Some("locked — Enter to unlock the selected vault".into());
+        } else {
+            self.error = None;
+        }
     }
 
     /// Poll idle lock on the session. If the session idle-locks, drop the
@@ -1023,5 +1028,52 @@ fn event_loop(term: &mut ratatui::DefaultTerminal, mut app: App) -> Result<()> {
             }
         }
         app.poll_idle_lock();
+    }
+}
+
+#[cfg(test)]
+mod reducer_tests {
+    use super::*;
+
+    fn app() -> App {
+        App::new(None, None, None)
+    }
+
+    #[test]
+    fn cursor_move_clears_preview() {
+        let mut a = app();
+        a.preview = Some(Preview::default());
+        a.move_focus(1);
+        assert!(a.preview.is_none(), "focus move must clear preview");
+    }
+
+    #[test]
+    fn lock_resets_to_picker_without_quit() {
+        let mut a = app();
+        a.pane = Pane::Preview;
+        a.error = Some("stale".into());
+        a.lock();
+        assert!(a.preview.is_none() && a.error.is_none());
+        assert!(a.picker() && !a.quit());
+    }
+
+    #[test]
+    fn reducer_toggles_help_and_quit() {
+        let mut a = App::with_options(None, None, None, crate::RunOptions::default());
+        assert!(!a.help());
+        a.toggle_help();
+        assert!(a.help());
+        a.quit_now();
+        assert!(a.quit());
+    }
+
+    #[test]
+    fn reducer_cycles_verb_tabs_wraparound() {
+        let mut a = App::with_options(None, None, None, crate::RunOptions::default());
+        assert_eq!(a.verb(), 0);
+        a.cycle_verb(-1);
+        assert_eq!(a.verb(), VERB_TABS.len() - 1);
+        a.cycle_verb(1);
+        assert_eq!(a.verb(), 0);
     }
 }

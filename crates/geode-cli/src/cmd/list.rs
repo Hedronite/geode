@@ -131,7 +131,11 @@ pub fn cat(args: &CatArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
 
     let start = Instant::now();
     let raw = corevault::read_object(&args.vault, ctx.epoch, &entry.object_id)?;
-    let bind: &[u8] = if entry.bind { entry.path.as_bytes() } else { b"" };
+    let bind: &[u8] = if entry.bind {
+        entry.path.as_bytes()
+    } else {
+        b""
+    };
     let (_, data) = object::open_object(
         &ctx.ek,
         &raw[..object::HEADER_SIZE],

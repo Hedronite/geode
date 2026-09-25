@@ -83,32 +83,14 @@ impl Inodes {
         self.by_ino.get(&ino).map(|n| n.path.clone())
     }
 
-    fn intern(
-        &mut self,
-        path: String,
-        parent: u64,
-        kind: NodeKind,
-        perm: u16,
-        size: u64,
-        mtime_ms: i64,
-    ) -> u64 {
-        if let Some(&ino) = self.by_path.get(&path) {
+    fn intern(&mut self, node: Node) -> u64 {
+        if let Some(&ino) = self.by_path.get(&node.path) {
             return ino;
         }
         let ino = self.next;
         self.next = self.next.saturating_add(1);
-        self.by_path.insert(path.clone(), ino);
-        self.by_ino.insert(
-            ino,
-            Node {
-                path,
-                parent,
-                kind,
-                perm,
-                size,
-                mtime_ms,
-            },
-        );
+        self.by_path.insert(node.path.clone(), ino);
+        self.by_ino.insert(ino, node);
         ino
     }
 
@@ -333,9 +315,14 @@ impl GeodeFs {
             NodeKind::Dir => 0,
             NodeKind::File | NodeKind::Symlink => node.plain_len,
         };
-        Ok(self
-            .inodes
-            .intern(node.path, parent, node.kind, perm, size, node.mtime_ms))
+        Ok(self.inodes.intern(Node {
+            path: node.path,
+            parent,
+            kind: node.kind,
+            perm,
+            size,
+            mtime_ms: node.mtime_ms,
+        }))
     }
 
     fn child(&self, parent: u64, name: &OsStr) -> std::result::Result<String, i32> {
@@ -468,7 +455,34 @@ impl Filesystem for GeodeFs {
         umask: u32,
         reply: ReplyEntry,
     ) {
-        self.make_dir(req, parent, name, mode, umask, reply);
+        if let Some(err) = self.refuse_write() {
+            reply.error(err);
+            return;
+        }
+        let path = match self.child(parent, name) {
+            Ok(p) => p,
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
+        };
+        let perm = mode_perm(mode, umask, NodeKind::Dir);
+        if let Err(e) = self.session.mkdir(&path, u32::from(perm), now_ms()) {
+            reply.error(fuse_errno(&e));
+            return;
+        }
+        let ino = self.inodes.intern(Node {
+            path,
+            parent,
+            kind: NodeKind::Dir,
+            perm,
+            size: 0,
+            mtime_ms: now_ms(),
+        });
+        match self.attr(ino, req) {
+            Some(attr) => reply.entry(&TTL, &attr, 0),
+            None => reply.error(EIO),
+        }
     }
 
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
@@ -724,9 +738,14 @@ impl Filesystem for GeodeFs {
             reply.error(fuse_errno(&e));
             return;
         }
-        let ino = self
-            .inodes
-            .intern(path, parent, NodeKind::File, perm, 0, now_ms());
+        let ino = self.inodes.intern(Node {
+            path,
+            parent,
+            kind: NodeKind::File,
+            perm,
+            size: 0,
+            mtime_ms: now_ms(),
+        });
         match self.attr(ino, req) {
             Some(attr) => reply.created(&TTL, &attr, 0, ino, 0),
             None => reply.error(EIO),
@@ -735,40 +754,6 @@ impl Filesystem for GeodeFs {
 }
 
 impl GeodeFs {
-    fn make_dir(
-        &mut self,
-        req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        mode: u32,
-        umask: u32,
-        reply: ReplyEntry,
-    ) {
-        if let Some(err) = self.refuse_write() {
-            reply.error(err);
-            return;
-        }
-        let path = match self.child(parent, name) {
-            Ok(p) => p,
-            Err(err) => {
-                reply.error(err);
-                return;
-            }
-        };
-        let perm = mode_perm(mode, umask, NodeKind::Dir);
-        if let Err(e) = self.session.mkdir(&path, u32::from(perm), now_ms()) {
-            reply.error(fuse_errno(&e));
-            return;
-        }
-        let ino = self
-            .inodes
-            .intern(path, parent, NodeKind::Dir, perm, 0, now_ms());
-        match self.attr(ino, req) {
-            Some(attr) => reply.entry(&TTL, &attr, 0),
-            None => reply.error(EIO),
-        }
-    }
-
     fn remove(&mut self, parent: u64, name: &OsStr, dir: bool, reply: ReplyEmpty) {
         if let Some(err) = self.refuse_write() {
             reply.error(err);

@@ -54,6 +54,7 @@ impl MountSession {
     ///
     /// `chunk_size` comes from the vault header's `chunk_size_default`
     /// (03-format 3); `now_ms` seeds the `--sync-interval` clock.
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // wire/format shape
     pub fn open(
         ek: &EpochKey,
         vault_root: &Path,
@@ -114,7 +115,9 @@ impl MountSession {
         self.vfs.read_range(path, off, len)
     }
 
-    /// Read a whole entry from offset 0 (clamped to its plaintext length).
+    /// Read up to `vfs::MAX_READ_LEN` bytes from offset 0. Large entries are
+    /// bounded by the VFS read cap; callers needing the remainder use ranged
+    /// reads and must handle the returned bound explicitly.
     pub fn read_all(&self, path: &str) -> Result<Vec<u8>> {
         self.vfs.read_range(path, 0, vfs::MAX_READ_LEN)
     }
@@ -246,7 +249,7 @@ mod tests {
             flags: 0,
             generated_at: 0,
             generator: "test".into(),
-            root: entries_root(&[]),
+            root: entries_root(&[]).unwrap(),
             entry_count: 0,
             total_plain_bytes: 0,
             total_cipher_bytes: 0,
@@ -304,7 +307,17 @@ mod tests {
         let new = s.fsync("big.bin", 3).unwrap();
         assert_ne!(new, old, "flush allocates a fresh object_id");
         assert_eq!(s.read_all("big.bin").unwrap(), want);
-        let old_pt = vfs::read_range(&ek(), &root, Epoch(1), old, b"", 0, total).unwrap();
+        let old_pt = vfs::read_range(
+            &ek(),
+            &vfs::ObjectRef {
+                vault_root: &root,
+                epoch: Epoch(1),
+                object_id: old,
+                path_bind: b"",
+            },
+            vfs::ByteRange::new(0, total),
+        )
+        .unwrap();
         assert_eq!(
             old_pt, body,
             "the superseded .gobj still reads its old body"

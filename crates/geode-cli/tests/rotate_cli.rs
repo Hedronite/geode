@@ -45,13 +45,11 @@ fn combined(out: &Output) -> String {
 
 fn isk_hex(dir: &Path, gkey: &str) -> String {
     let raw = std::fs::read(dir.join(gkey)).expect("read gkey");
-    raw[6..38]
-        .iter()
-        .fold(String::new(), |mut acc, b| {
-            use std::fmt::Write as _;
-            let _ = write!(acc, "{b:02x}");
-            acc
-        })
+    raw[6..38].iter().fold(String::new(), |mut acc, b| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
 }
 
 fn assert_no_isk(out: &Output, dir: &Path, keys: &[&str], what: &str) {
@@ -62,18 +60,14 @@ fn assert_no_isk(out: &Output, dir: &Path, keys: &[&str], what: &str) {
             !text.contains(&hex),
             "{what} leaked ISK hex from {k}: {text}"
         );
-        assert!(
-            !text.contains("ISK"),
-            "{what} leaked ISK marker: {text}"
-        );
+        assert!(!text.contains("ISK"), "{what} leaked ISK marker: {text}");
     }
 }
 
 fn gpub_key_id(dir: &Path, name: &str) -> String {
-    let doc: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(dir.join(name)).expect("read gpub"),
-    )
-    .expect("gpub json");
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join(name)).expect("read gpub"))
+            .expect("gpub json");
     doc["key_id"].as_str().expect("key_id").to_string()
 }
 
@@ -293,14 +287,7 @@ fn rotate_token_rejected() {
     let with_token = geode(
         dir,
         &[
-            "--key",
-            "k.gkey",
-            "vault",
-            "rotate",
-            "v.geode",
-            "--yes",
-            "--token",
-            "deadbeef",
+            "--key", "k.gkey", "vault", "rotate", "v.geode", "--yes", "--token", "deadbeef",
         ],
     );
     assert_eq!(
@@ -332,13 +319,7 @@ fn rotate_token_rejected() {
     let rot = geode(
         dir,
         &[
-            "--key",
-            "k.gkey",
-            "vault",
-            "rotate",
-            "v.geode",
-            "--yes",
-            "--reseal",
+            "--key", "k.gkey", "vault", "rotate", "v.geode", "--yes", "--reseal",
         ],
     );
     assert_ok(&rot, "rotate x25519 vault");

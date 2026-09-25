@@ -104,8 +104,9 @@ pub(crate) fn seal_rel_path(ctx: &cmd::VaultCtx, rel: &str) -> Result<String> {
 }
 
 /// Open a sealed vault-relative path back to plaintext components (for
-/// `list` display and `open` extraction). Wrong key yields garbage names,
-/// not an error (02-cryptography 5).
+/// `list` display and `open` extraction). A wrong key or a wrong tweak is
+/// `Error::AuthFail`, not a garbage name: `name::open_name` re-derives the
+/// deterministic pad and fails closed (02-cryptography 5.2).
 pub(crate) fn open_rel_path(ctx: &cmd::VaultCtx, sealed: &str) -> Result<String> {
     let nk = name_key(ctx);
     let mut plain: Vec<String> = Vec::new();
@@ -212,11 +213,13 @@ pub fn run(args: &SealArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         let oid = corevault::new_object_id()?;
         let sealed = object::seal_object(
             &ctx.ek,
-            ctx.vault_id,
-            ctx.epoch,
-            oid,
-            chunk::DEFAULT_CHUNK_SIZE,
-            b"",
+            &object::ObjectSpec {
+                vault_id: ctx.vault_id,
+                epoch: ctx.epoch,
+                object_id: oid,
+                chunk_size: chunk::DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
             &data,
         )?;
         let header_bytes = sealed.header.to_bytes();
@@ -259,7 +262,7 @@ pub fn run(args: &SealArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         .retain(|e| !stored.iter().any(|r| r == &e.path));
     ctx.manifest.entries.extend(new_entries);
     ctx.manifest.entries.sort_by(|a, b| a.path.cmp(&b.path));
-    ctx.manifest.root = manifest::entries_root(&ctx.manifest.entries);
+    ctx.manifest.root = manifest::entries_root(&ctx.manifest.entries)?;
     ctx.manifest.entry_count = u32::try_from(ctx.manifest.entries.len())
         .map_err(|_| Error::Format("too many entries".into()))?;
     ctx.manifest.total_plain_bytes = ctx.manifest.entries.iter().map(|e| e.plain_len).sum();

@@ -246,13 +246,7 @@ fn git_token_cannot_init_or_add() {
     assert_token_unexpected(
         dir,
         &[
-            "--key",
-            "k.gkey",
-            "git",
-            "add",
-            "NOTES.md",
-            "--token",
-            "deadbeef",
+            "--key", "k.gkey", "git", "add", "NOTES.md", "--token", "deadbeef",
         ],
         "--token after git add",
     );
@@ -323,10 +317,7 @@ fn git_unlock_then_lock() {
 fn assert_github_visibility(text: &str, what: &str) {
     let lower = text.to_ascii_lowercase();
     for needle in ["counts", "sizes", "tree", "times", "recipient key"] {
-        assert!(
-            lower.contains(needle),
-            "{what} missing {needle:?}: {text}"
-        );
+        assert!(lower.contains(needle), "{what} missing {needle:?}: {text}");
     }
     assert!(
         lower.contains("not plaintext"),

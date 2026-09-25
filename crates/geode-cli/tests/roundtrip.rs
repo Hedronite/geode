@@ -77,13 +77,15 @@ fn assert_trees_equal(a: &Path, b: &Path) {
             assert_eq!(
                 std::fs::read_link(&pa).expect("link a"),
                 std::fs::read_link(&pb).expect("link b"),
-                "symlink target differs at {}", rel.display()
+                "symlink target differs at {}",
+                rel.display()
             );
         } else {
             assert_eq!(
                 std::fs::read(&pa).expect("read a"),
                 std::fs::read(&pb).expect("read b"),
-                "content differs at {}", rel.display()
+                "content differs at {}",
+                rel.display()
             );
         }
     }
@@ -140,7 +142,10 @@ fn roundtrip_seal_verify_open() {
     let list = assert_ok(dir, &["--key", "k.gkey", "list", "v.geode"]);
     let listing = String::from_utf8_lossy(&list.stdout);
     assert!(listing.contains("a.txt"), "list shows a.txt: {listing}");
-    assert!(listing.contains("sub/b.txt"), "list shows nested: {listing}");
+    assert!(
+        listing.contains("sub/b.txt"),
+        "list shows nested: {listing}"
+    );
     let cat = assert_ok(dir, &["--key", "k.gkey", "cat", "v.geode", "a.txt"]);
     assert_eq!(cat.stdout, b"hello geode\n");
 
@@ -152,8 +157,7 @@ fn roundtrip_seal_verify_open() {
         dir,
         &["--key", "k.gkey", "verify", "v.geode", "--output", "json"],
     );
-    let doc: serde_json::Value =
-        serde_json::from_slice(&ev.stdout).expect("verify event is json");
+    let doc: serde_json::Value = serde_json::from_slice(&ev.stdout).expect("verify event is json");
     assert_eq!(doc["ok"], true);
     assert_eq!(doc["verb"], "verify");
     assert!(doc["vault_id"].as_str().is_some_and(|s| s.len() == 32));

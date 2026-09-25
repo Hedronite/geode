@@ -1,0 +1,28 @@
+# Pin toolchain + CLIs. MISSING = not installed (G-P10).
+[tools]
+rustc = "1.98.0"
+cargo = "1.98.0"
+clippy = "1.98.0"
+rustfmt = "1.98.0"
+msrv = "1.89.0"  # Linux floor aes@0.9.3; Darwin graph can be 1.88; declare max
+cargo-nextest = "0.9.146"
+cargo-llvm-cov = "cargo-llvm-cov"
+cargo-mutants = "27.1.0"
+cargo-crap = "0.5.0"
+cargo-deny = "0.20.2"
+cargo-fuzz = "0.13.2"
+nightly = "1.100.0-nightly"
+
+[auto8]
+measured = "2026-09-24"
+geode_grotto_line_pct = "93.81"
+geode_grotto_region_pct = "94.44"
+geode_grotto_function_pct = "89.01"
+workspace_line_pct = "84.70"
+workspace_region_pct = "84.82"
+geode_grotto_crap_over_threshold_6 = "63/310"
+workspace_crap_over_threshold_6 = "204/230"
+
+[notes]
+schema = "1.0.0"
+install_owner = "pm-assist"

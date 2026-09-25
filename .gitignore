@@ -4,3 +4,8 @@ target/
 *.gkey
 secret.gkey
 /notes.geode/
+mutants.out/
+mutants.out.old/
+crates/geode-core/fuzz/corpus/
+crates/geode-core/fuzz/artifacts/
+crates/geode-core/fuzz/Cargo.lock

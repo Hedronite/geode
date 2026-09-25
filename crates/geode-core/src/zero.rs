@@ -1,4 +1,4 @@
-//! Zeroize discipline (02-cryptography 10, SPEC 3.10).
+//! Zeroize discipline (02-cryptography §11, SPEC 3.10).
 //!
 //! Secret material is held in types that zeroize on drop. `Debug` redacts.
 
@@ -39,5 +39,40 @@ impl Drop for Secret32 {
 impl std::fmt::Debug for Secret32 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Secret32(**redacted**)")
+    }
+}
+
+/// Constant-time equality for tags/checksums (02-cryptography §11.2).
+///
+/// Returns `false` when slice lengths differ.
+#[must_use]
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq as _;
+    a.ct_eq(b).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn debug_never_prints_key_bytes() {
+        let s = Secret32::new_unchecked([0xde; 32]);
+        assert_eq!(format!("{s:?}"), "Secret32(**redacted**)");
+    }
+    #[test]
+    fn zeroize_clears() {
+        let mut s = Secret32::new_unchecked([0xde; 32]);
+        s.zeroize();
+        assert_eq!(s.as_bytes(), &[0u8; 32]);
+    }
+
+    #[test]
+    fn ct_eq_matches_and_rejects() {
+        let a = [1u8; 16];
+        let mut b = a;
+        assert!(ct_eq(&a, &b));
+        b[15] ^= 0x01;
+        assert!(!ct_eq(&a, &b));
+        assert!(!ct_eq(&a, &[1u8; 15]));
     }
 }

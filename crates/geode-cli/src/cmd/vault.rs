@@ -261,9 +261,7 @@ fn select_keep(recs: Vec<Recipient>, drops: &[String], adds: &[PathBuf]) -> Resu
                 keep.remove(*i);
             }
             [] => {
-                return Err(Error::Format(format!(
-                    "no recipient matching {needle}"
-                )));
+                return Err(Error::Format(format!("no recipient matching {needle}")));
             }
             _ => {
                 return Err(Error::Format(format!(
@@ -287,9 +285,7 @@ fn select_keep(recs: Vec<Recipient>, drops: &[String], adds: &[PathBuf]) -> Resu
         });
     }
     if keep.is_empty() {
-        return Err(Error::Format(
-            "rotate would leave no recipients".into(),
-        ));
+        return Err(Error::Format("rotate would leave no recipients".into()));
     }
     Ok(keep)
 }
@@ -356,21 +352,27 @@ fn rotate(args: &RotateArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         objects = rotate::reseal(
             &args.dir,
             ctx.vault_id,
-            ctx.epoch,
-            &outcome.old_ek,
-            outcome.new_epoch,
-            &outcome.new_ek,
-            &generator,
-            generated_at,
+            &rotate::EpochKeys {
+                old_epoch: ctx.epoch,
+                old_ek: &outcome.old_ek,
+                new_epoch: outcome.new_epoch,
+                new_ek: &outcome.new_ek,
+            },
+            &rotate::RotationStamp {
+                generator: &generator,
+                generated_at,
+            },
         )?;
     }
     let policy_resealed = rotate::reseal_policy(
         &args.dir,
         ctx.vault_id,
-        ctx.epoch,
-        &outcome.old_ek,
-        outcome.new_epoch,
-        &outcome.new_ek,
+        &rotate::EpochKeys {
+            old_epoch: ctx.epoch,
+            old_ek: &outcome.old_ek,
+            new_epoch: outcome.new_epoch,
+            new_ek: &outcome.new_ek,
+        },
     )?;
     bump_header_epoch(&args.dir, outcome.new_epoch, &outcome.new_ek, ctx.vault_id)?;
     drop(isk);
@@ -477,7 +479,7 @@ fn init(args: &InitArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         flags: 0,
         generated_at: now_ms() / 1000,
         generator: format!("geode {}", env!("CARGO_PKG_VERSION")),
-        root: geode_grotto::manifest::entries_root(&[]),
+        root: geode_grotto::manifest::entries_root(&[])?,
         entry_count: 0,
         total_plain_bytes: 0,
         total_cipher_bytes: 0,

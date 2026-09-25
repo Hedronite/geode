@@ -125,6 +125,15 @@ mod session {
         mtime_ms: i64,
     }
 
+    struct NodeSpec {
+        path: String,
+        parent: u64,
+        kind: NodeKind,
+        perm: u16,
+        size: u64,
+        mtime_ms: i64,
+    }
+
     struct Inodes {
         by_ino: BTreeMap<u64, Node>,
         by_path: BTreeMap<String, u64>,
@@ -158,30 +167,22 @@ mod session {
             self.by_ino.get(&ino).map(|n| n.path.clone())
         }
 
-        fn intern(
-            &mut self,
-            path: String,
-            parent: u64,
-            kind: NodeKind,
-            perm: u16,
-            size: u64,
-            mtime_ms: i64,
-        ) -> u64 {
-            if let Some(&ino) = self.by_path.get(&path) {
+        fn intern(&mut self, spec: NodeSpec) -> u64 {
+            if let Some(&ino) = self.by_path.get(&spec.path) {
                 return ino;
             }
             let ino = self.next;
             self.next = self.next.saturating_add(1);
-            self.by_path.insert(path.clone(), ino);
+            self.by_path.insert(spec.path.clone(), ino);
             self.by_ino.insert(
                 ino,
                 Node {
-                    path,
-                    parent,
-                    kind,
-                    perm,
-                    size,
-                    mtime_ms,
+                    path: spec.path,
+                    parent: spec.parent,
+                    kind: spec.kind,
+                    perm: spec.perm,
+                    size: spec.size,
+                    mtime_ms: spec.mtime_ms,
                 },
             );
             ino
@@ -408,9 +409,14 @@ mod session {
                 NodeKind::Dir => 0,
                 NodeKind::File | NodeKind::Symlink => node.plain_len,
             };
-            Ok(self
-                .inodes
-                .intern(node.path, parent, node.kind, perm, size, node.mtime_ms))
+            Ok(self.inodes.intern(NodeSpec {
+                path: node.path,
+                parent,
+                kind: node.kind,
+                perm,
+                size,
+                mtime_ms: node.mtime_ms,
+            }))
         }
 
         fn child(&self, parent: u64, name: &OsStr) -> std::result::Result<String, i32> {
@@ -799,9 +805,14 @@ mod session {
                 reply.error(fuse_errno(&e));
                 return;
             }
-            let ino = self
-                .inodes
-                .intern(path, parent, NodeKind::File, perm, 0, now_ms());
+            let ino = self.inodes.intern(NodeSpec {
+                path,
+                parent,
+                kind: NodeKind::File,
+                perm,
+                size: 0,
+                mtime_ms: now_ms(),
+            });
             match self.attr(ino, req) {
                 Some(attr) => reply.created(&TTL, &attr, 0, ino, 0),
                 None => reply.error(EIO),
@@ -810,6 +821,7 @@ mod session {
     }
 
     impl GeodeFs {
+        #[allow(clippy::too_many_arguments)] // fuser callback signature
         fn make_dir(
             &mut self,
             req: &Request<'_>,
@@ -835,9 +847,14 @@ mod session {
                 reply.error(fuse_errno(&e));
                 return;
             }
-            let ino = self
-                .inodes
-                .intern(path, parent, NodeKind::Dir, perm, 0, now_ms());
+            let ino = self.inodes.intern(NodeSpec {
+                path,
+                parent,
+                kind: NodeKind::Dir,
+                perm,
+                size: 0,
+                mtime_ms: now_ms(),
+            });
             match self.attr(ino, req) {
                 Some(attr) => reply.entry(&TTL, &attr, 0),
                 None => reply.error(EIO),

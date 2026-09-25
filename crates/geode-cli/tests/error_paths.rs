@@ -85,7 +85,10 @@ fn wrong_passphrase_gap_is_exit_1() {
     // (usage), not 2 (auth). An operator seeing "exit 1" knows it is a
     // tooling gap, not a compromised vault.
     let (code, out) = run(&["keygen", "--password", "/dev/null/nonexistent"]);
-    assert_eq!(code, 1, "wrong-passphrase gap is exit 1 (usage), not auth (2)");
+    assert_eq!(
+        code, 1,
+        "wrong-passphrase gap is exit 1 (usage), not auth (2)"
+    );
     assert!(
         out.contains("usage") || out.contains("not in v0.1.0"),
         "text names the usage family / tracked gap: {out}",
@@ -107,12 +110,26 @@ fn flipped_bit_is_exit_2() {
 
     assert_eq!(run(&["keygen", key.to_str().unwrap()]).0, 0, "keygen ok");
     assert_eq!(
-        run(&["vault", "init", vault.to_str().unwrap(), "--key", key.to_str().unwrap()]).0,
+        run(&[
+            "vault",
+            "init",
+            vault.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap()
+        ])
+        .0,
         0,
         "vault init ok",
     );
     assert_eq!(
-        run(&["seal", src.to_str().unwrap(), vault.to_str().unwrap(), "--key", key.to_str().unwrap()]).0,
+        run(&[
+            "seal",
+            src.to_str().unwrap(),
+            vault.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap()
+        ])
+        .0,
         0,
         "seal ok",
     );
@@ -126,7 +143,12 @@ fn flipped_bit_is_exit_2() {
     fs::write(&obj, bytes).expect("write flipped object");
 
     // verify → exit 2 (auth/integrity), text names "authentication".
-    let (code, out) = run(&["verify", vault.to_str().unwrap(), "--key", key.to_str().unwrap()]);
+    let (code, out) = run(&[
+        "verify",
+        vault.to_str().unwrap(),
+        "--key",
+        key.to_str().unwrap(),
+    ]);
     assert_eq!(code, 2, "flipped bit is exit 2 (auth), not usage (1)");
     assert!(
         out.contains("authentication") || out.contains("auth"),

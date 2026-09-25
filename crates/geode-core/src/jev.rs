@@ -15,8 +15,7 @@ use crate::policy::PrincipalId;
 use crate::{Error, Result};
 
 /// Bundled Facet `OpenCollection` (scope-remainder recipe).
-pub const FACET_COLLECTION: &str =
-    include_str!("../embedded/opencollection.yml");
+pub const FACET_COLLECTION: &str = include_str!("../embedded/opencollection.yml");
 pub const FACET_SELECTOR: &str = "items/0/items/0";
 pub const FACET_ENVIRONMENT: &str = "typesafe";
 
@@ -199,7 +198,7 @@ impl Transport {
                         reason: "fixture_path_absent",
                     },
                 }
-            },
+            }
             Ok(_) => Transport::None {
                 reason: "unknown_GEODE_JEV_TRANSPORT",
             },
@@ -498,11 +497,12 @@ fn reject_secret_text(text: &str, field: &str) -> Result<()> {
 
 fn looks_like_gtok_hex(s: &str) -> bool {
     let t = s.trim();
-    t.len() >= 8 && t.len() % 2 == 0 && t.to_ascii_lowercase().starts_with("47544f4b")
+    t.len() >= 8 && t.len().is_multiple_of(2) && t.to_ascii_lowercase().starts_with("47544f4b")
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::too_many_lines)]
     use super::*;
 
     fn sample() -> RemainderAsk {
@@ -655,13 +655,7 @@ mod tests {
     fn secret_material_is_rejected() {
         let mut a = sample();
         a.intent = "use TYPESAFE_API_KEY=sk-live".into();
-        let err = ask(
-            &a,
-            &Transport::None {
-                reason: "x",
-            },
-        )
-        .unwrap_err();
+        let err = ask(&a, &Transport::None { reason: "x" }).unwrap_err();
         assert!(err.to_string().contains("must not carry"));
     }
 
@@ -745,6 +739,9 @@ mod tests {
 
     #[test]
     fn body_digest_is_blake3() {
-        assert_eq!(body_digest(b"hello"), blake3::hash(b"hello").to_hex().to_string());
+        assert_eq!(
+            body_digest(b"hello"),
+            blake3::hash(b"hello").to_hex().to_string()
+        );
     }
 }

@@ -176,10 +176,10 @@ pub fn exit_family(err: &Error) -> (&'static str, i32) {
         Error::AuthFail => ("authentication/integrity failure", exit::AUTH),
         Error::Io(e) if e.kind() == std::io::ErrorKind::NotFound => ("not found", exit::USAGE),
         Error::Io(_) => ("io/usage", exit::USAGE),
-        Error::Format(m) if m.contains("unknown cipher suite") => {
-            ("unsupported suite", exit::AUTH)
+        Error::Format(m) if m.contains("unknown cipher suite") => ("unsupported suite", exit::AUTH),
+        Error::Format(m) if m.contains("unknown magic") => {
+            ("authentication/integrity failure", exit::AUTH)
         }
-        Error::Format(m) if m.contains("unknown magic") => ("authentication/integrity failure", exit::AUTH),
         Error::Format(_) | Error::Crypto(_) | Error::NotImplemented => ("usage", exit::USAGE),
         Error::PolicyDeny => ("policy deny", exit::POLICY),
         Error::TokenInvalid => ("token invalid", exit::TOKEN),

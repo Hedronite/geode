@@ -24,7 +24,7 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
 
 /// Decode a lowercase-hex string into bytes (len must be even, >=0).
 pub(crate) fn hex_decode(s: &str) -> Result<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(Error::Format(format!("odd-length hex: {s}")));
     }
     let mut out = Vec::with_capacity(s.len() / 2);

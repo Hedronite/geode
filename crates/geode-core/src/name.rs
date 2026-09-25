@@ -61,11 +61,11 @@ pub const NAME_ENCODING: &str = "base32hex";
 const HCTR2_BLOCK: usize = 16;
 
 /// Build the HCTR2 tweak: `vault_id || le32(epoch) || parent_id` (36 bytes).
-fn build_tweak(vault_id: &VaultId, epoch: Epoch, parent_id: &[u8; 16]) -> Vec<u8> {
-    let mut t = Vec::with_capacity(16 + 4 + 16);
-    t.extend_from_slice(&vault_id.0);
-    t.extend_from_slice(&epoch.0.to_le_bytes());
-    t.extend_from_slice(parent_id);
+fn build_tweak(vault_id: &VaultId, epoch: Epoch, parent_id: &[u8; 16]) -> [u8; 36] {
+    let mut t = [0u8; 36];
+    t[..16].copy_from_slice(&vault_id.0);
+    t[16..20].copy_from_slice(&epoch.0.to_le_bytes());
+    t[20..36].copy_from_slice(parent_id);
     t
 }
 
@@ -82,9 +82,9 @@ fn name_pad(
     h.update(parent_id);
     h.update(component);
     let mut xof = h.finalize_xof();
-    let mut pad = vec![0u8; pad_len];
-    xof.fill(&mut pad);
-    pad
+    let mut buf = [0u8; 255];
+    xof.fill(&mut buf[..pad_len]);
+    buf[..pad_len].to_vec()
 }
 
 fn base32hex_encoding() -> &'static data_encoding::Encoding {
@@ -113,18 +113,6 @@ fn name_cipher(name_key: &[u8; 32]) -> Hctr2 {
     Hctr2::new(name_key)
 }
 
-/// Seal a single path component under `NameKey` (02-cryptography 5).
-///
-/// `name_key`  = `BLAKE3-KDF(EK, "geode/v1/name-key", vault_id || le32(epoch))`
-/// `tweak`     = `vault_id || le32(epoch) || parent_id`
-/// `pad`       = `BLAKE3-XOF(NameKey, "pad" || parent_id || component)`
-///                `[0 .. bucket-len(component)]`
-/// `sealed_plain = le8(len) || component || pad`
-/// `ciphertext   = HCTR2-256(NameKey, tweak, sealed_plain)`
-/// `encoded      = base32hex(ciphertext)`
-///
-/// `parent_id` is the 16-byte id of the parent directory object; the root
-/// parent is `0x00*16`. Returns the base32hex ciphertext name.
 /// Seal a path component and return the raw HCTR2 ciphertext bytes
 /// (02-cryptography 5). `seal_name` base32hex-encodes this; this variant
 /// is for callers (and vector generation) that want the raw ciphertext.
@@ -179,11 +167,6 @@ pub fn seal_name(
     Ok(base32hex_encode(&ct))
 }
 
-/// Open a sealed, base32hex-encoded name component (02-cryptography 5).
-///
-/// Decrypts with `NameKey` + tweak, recovers `len`, slices the component,
-/// re-derives the pad and compares it to the decrypted tail. Any mismatch
-/// (bad length, bad bucket, non-UTF-8, pad mismatch) => [`Error::AuthFail`].
 /// Open a sealed name given the raw HCTR2 ciphertext bytes (02-cryptography 5).
 /// `open_name` base32hex-decodes first; this variant takes ciphertext directly.
 pub fn open_name_ciphertext(
@@ -412,5 +395,16 @@ mod tests {
         let ct = vec![0u8; 18];
         let r = open_name(&nk(), &vid(), EP, &ROOT_PARENT, &base32hex_encode(&ct));
         assert!(matches!(r, Err(Error::AuthFail)));
+    }
+
+    use proptest::prelude::*;
+    proptest! {
+        #[test]
+        fn rp3_name_roundtrip(comp in prop::collection::vec(any::<u8>(),1..64).prop_filter("utf8",|v| std::str::from_utf8(v).is_ok())) {
+            let c = std::str::from_utf8(&comp).unwrap(); prop_assume!(c.len()<=255);
+            let nk=[0x5a;32]; let vid=VaultId([0x11;16]); let parent=[0u8;16];
+            let sealed = seal_name(&nk,&vid,Epoch(1),&parent,c).unwrap();
+            prop_assert_eq!(open_name(&nk,&vid,Epoch(1),&parent,&sealed).unwrap(), c);
+        }
     }
 }

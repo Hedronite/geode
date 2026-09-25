@@ -77,7 +77,9 @@ fn agent_list_request_lists_under_prefix() {
         "GEODE_TOKEN from the secret var"
     );
     assert!(
-        !args.iter().any(|a| a.contains("GEODE_TOKEN") || a == "--token"),
+        !args
+            .iter()
+            .any(|a| a.contains("GEODE_TOKEN") || a == "--token"),
         "token never in argv: {args:?}"
     );
 }
@@ -96,12 +98,17 @@ fn secret_vars_are_env_sourced_and_literal_free() {
             let from_env = var["from"].as_str().is_some_and(|f| f.starts_with("env:"));
             if secret {
                 assert!(from_env, "{req_name}:{key} secret var must be from: env:…");
-                assert!(!has_value, "{req_name}:{key} secret var must not carry value:");
+                assert!(
+                    !has_value,
+                    "{req_name}:{key} secret var must not carry value:"
+                );
             }
         }
     }
     // The two named secrets the brief requires.
-    let list_vars = request(&doc, "list-scratch")["vars"].as_mapping().expect("vars");
+    let list_vars = request(&doc, "list-scratch")["vars"]
+        .as_mapping()
+        .expect("vars");
     for key in ["geode_token", "geode_key_file"] {
         let var = list_vars
             .get(serde_yaml::Value::String(key.into()))

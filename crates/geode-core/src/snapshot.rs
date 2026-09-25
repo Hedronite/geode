@@ -106,8 +106,7 @@ fn verify_json_mac(
     }
     let canon = canonicalize(&body)?;
     let got = mac_fn(manifest_key, &canon)?;
-    // TODO(G5): constant-time compare (matches geode-core G5 note).
-    if got != want {
+    if !crate::zero::ct_eq(&got, &want) {
         return Err(Error::AuthFail);
     }
     Ok(())
@@ -424,7 +423,7 @@ mod tests {
         derive_epoch_key, derive_manifest_key, EpochKey, IdentitySecret, ObjectId, VaultId,
     };
     use crate::manifest::{entries_root, Entry, EntryKind};
-    use crate::object::{open_object, seal_object};
+    use crate::object::{open_object, seal_object, ObjectSpec};
     use crate::vault::{init_vault_dir, new_object_id, write_object};
     use tempfile::tempdir;
 
@@ -451,8 +450,18 @@ mod tests {
     fn seal_write(root: &Path, vid: VaultId, epoch: Epoch, path: &str, pt: &[u8]) -> ObjectId {
         let e = ek(vid, epoch);
         let oid = new_object_id().unwrap();
-        let sealed =
-            seal_object(&e, vid, epoch, oid, DEFAULT_CHUNK_SIZE, path.as_bytes(), pt).unwrap();
+        let sealed = seal_object(
+            &e,
+            &ObjectSpec {
+                vault_id: vid,
+                epoch,
+                object_id: oid,
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: path.as_bytes(),
+            },
+            pt,
+        )
+        .unwrap();
         write_object(root, epoch, &oid, &sealed.header.to_bytes(), &sealed.chunks).unwrap();
         oid
     }
@@ -486,7 +495,7 @@ mod tests {
             total_cipher_bytes: entries.iter().map(|e| e.plain_len).sum(),
             entries,
         };
-        m.root = entries_root(&m.entries);
+        m.root = entries_root(&m.entries).unwrap();
         m
     }
 

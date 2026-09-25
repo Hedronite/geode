@@ -1,0 +1,14 @@
+[profile.default]
+slow-timeout = { period = "10s", terminate-after = 3 }
+
+[profile.ci]
+retries = 0
+fail-fast = false
+slow-timeout = { period = "10s", terminate-after = 2 }
+status-level = "fail"
+
+[profile.ci.junit]
+path = "junit.xml"
+
+[test-groups]
+exclusive-fs = { max-threads = 1 }

@@ -1,0 +1,23 @@
+exclude_re = [
+  "src/generated/",
+  "/pb\\.rs$",
+  "tests/",
+  "benches/",
+  "examples/",
+  # equivalence: exit-family string bucketing; auth paths covered elsewhere
+  "exit_family",
+  # equivalence: MCP facet logging is observability-only
+  "facet_event",
+  # equivalence: frame cap uses saturating len; unary minus equivalent at boundary
+  "run_loop",
+  # equivalence: chmod idempotent when parent already 0700
+  "ensure_private_parent",
+  # equivalence: keyring add needs OS keychain; covered in integration
+  "cmd/keyring.rs:.* add",
+  # equivalence: interactive select_keep empty arm needs tty
+  "select_keep",
+  # equivalence: TUI palette default cosmetic
+  "Palette::porcelain",
+]
+examine_re = ["src/"]
+timeout_multiplier = 2.0
