@@ -1,6 +1,2 @@
 threshold = 6.0
-fail = false
 exclude = ["src/generated/**", "tests/**", "benches/**", "examples/**"]
-
-[coverage]
-lcov = "target/coverage/lcov.info"
