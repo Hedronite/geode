@@ -1,0 +1,17 @@
+# Pin toolchain + CLIs. MISSING = not installed (G-P10).
+[tools]
+rustc = "1.98.0"
+cargo = "1.98.0"
+clippy = "1.98.0"
+rustfmt = "1.98.0"
+msrv = "1.85.0"
+cargo-nextest = "MISSING"
+cargo-llvm-cov = "MISSING"
+cargo-mutants = "MISSING"
+cargo-crap = "MISSING"
+cargo-deny = "MISSING"
+cargo-fuzz = "MISSING"
+
+[notes]
+schema = "1.0.0"
+install_owner = "pm-assist"

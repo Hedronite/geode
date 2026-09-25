@@ -9,8 +9,9 @@
 //! Suite 0x01 crypto (G1) plus GDE1 object seal/open with content root, vault
 //! directory layout with atomic writes, JCS canonicalization + manifest MAC,
 //! and symmetric recipient wrap. Path-bind is enforced: a bound object moved
-//! to a different path fails open. HCTR2 name-seal and token issue stay
-//! stubbed (G3/agent plane).
+//! to a different path fails open. This paragraph describes G2 only; HCTR2
+//! name sealing (`name`) and token issue (`token`) shipped later — see the
+//! per-version sections below.
 //!
 //! Reference: SPEC-v010 G2, CHECKLIST-v010 G2a-G2c, 02-cryptography, 03-format.
 //!
@@ -176,7 +177,8 @@ pub mod zero;
 /// Crate-wide error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// Still-stubbed paths (HCTR2 name seal, token issue) until G3/agent.
+    /// Reserved for remaining documented gaps: hybrid (`pq`) recipients and
+    /// VFS writes. Errors never carry ISK or key bytes.
     #[error("geode-core: not implemented yet (stub)")]
     NotImplemented,
 

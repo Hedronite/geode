@@ -140,8 +140,7 @@ pub fn read_range(
 
     // Header tag (every read).
     let want = compute_header_tag(ek, &header);
-    // TODO(G5): constant-time compare. Correct for G0; harden later.
-    if want != header.header_tag {
+    if !crate::zero::ct_eq(&want, &header.header_tag) {
         return Err(Error::AuthFail);
     }
     if header.object_id != object_id {
@@ -231,6 +230,12 @@ pub fn read_range(
 
 /// `read_range` at offset 0 -- convenience for whole-object reads that
 /// still only decrypt touched chunks (here, all of them).
+///
+/// **Cap (A-08, documented not fixed):** the request is `MAX_READ_LEN`
+/// (1 GiB), and `read_range` clamps to `plain_len`, so an object larger than
+/// 1 GiB returns its first 1 GiB **without an error**. Callers that must not
+/// silently truncate should page with `read_range`. An on-disk chunk index or
+/// a `Truncated` signal is an S-03 decision (GDE2-class), not a doc change.
 pub fn read_all(
     ek: &EpochKey,
     vault_root: &Path,
@@ -993,7 +998,7 @@ impl Vfs {
         self.manifest.entries.sort_by(|a, b| a.path.cmp(&b.path));
         self.manifest.entry_count = u32::try_from(self.manifest.entries.len())
             .map_err(|_| Error::Format("entry_count overflow".into()))?;
-        self.manifest.root = entries_root(&self.manifest.entries);
+        self.manifest.root = entries_root(&self.manifest.entries)?;
         self.manifest.total_plain_bytes = self.manifest.entries.iter().map(|e| e.plain_len).sum();
         self.manifest.total_cipher_bytes = self.cipher_bytes_total()?;
         Ok(())
@@ -1098,7 +1103,7 @@ mod tests {
             flags: 0,
             generated_at: 0,
             generator: "test".into(),
-            root: entries_root(&[]),
+            root: entries_root(&[]).unwrap(),
             entry_count: 0,
             total_plain_bytes: 0,
             total_cipher_bytes: 0,
@@ -1741,7 +1746,7 @@ mod tests {
         let mut m = read_manifest_file(&root, Epoch(1), &manifest_key()).unwrap();
         m.entries.retain(|e| e.kind != EntryKind::Dir);
         m.entry_count = 1;
-        m.root = entries_root(&m.entries);
+        m.root = entries_root(&m.entries).unwrap();
         m.total_plain_bytes = 1;
         write_manifest_file(&root, Epoch(1), &m, &manifest_key()).unwrap();
 

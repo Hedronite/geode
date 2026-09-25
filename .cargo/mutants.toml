@@ -1,0 +1,10 @@
+exclude_re = [
+  "src/generated/",
+  "/pb\.rs$",
+  "tests/",
+  "benches/",
+  "examples/",
+  "examples/generate_vectors.rs",
+]
+examine_re = ["src/"]
+timeout_multiplier = 2.0

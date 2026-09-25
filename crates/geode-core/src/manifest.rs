@@ -123,22 +123,15 @@ fn write_string(s: &str, out: &mut Vec<u8>) {
 }
 
 /// Merkle root over manifest entries (02-cryptography 8).
-#[must_use]
-pub fn entries_root(entries: &[Entry]) -> [u8; 32] {
-    if entries.is_empty() {
-        return [0u8; 32];
-    }
+pub fn entries_root(entries: &[Entry]) -> Result<[u8; 32]> {
+    if entries.is_empty() { return Ok([0u8; 32]); }
     let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(entries.len());
     for e in entries {
-        let val = serde_json::to_value(e)
-            .map_err(|_| Error::Format("entry serialize".into()))
-            .ok();
-        if let Some(v) = val {
-            let canon = canonicalize(&v).unwrap_or_default();
-            leaves.push(*blake3::hash(&canon).as_bytes());
-        }
+        let val = serde_json::to_value(e).map_err(|e| Error::Format(format!("entry serialize: {e}")))?;
+        let canon = canonicalize(&val)?;
+        leaves.push(*blake3::hash(&canon).as_bytes());
     }
-    merkle(&leaves)
+    Ok(merkle(&leaves))
 }
 
 fn merkle(leaves: &[[u8; 32]]) -> [u8; 32] {
@@ -241,7 +234,7 @@ mod tests {
 
     #[test]
     fn entries_root_empty_is_zero() {
-        assert_eq!(entries_root(&[]), [0u8; 32]);
+        assert_eq!(entries_root(&[]).unwrap(), [0u8; 32]);
     }
 
     #[test]
@@ -258,7 +251,7 @@ mod tests {
             content_root: [0u8; 32],
             bind: false,
         };
-        let r = entries_root(&[e]);
+        let r = entries_root(&[e]).unwrap();
         assert_ne!(r, [0u8; 32]);
     }
 }

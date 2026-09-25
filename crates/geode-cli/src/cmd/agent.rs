@@ -742,8 +742,10 @@ impl<'g> StdioServer<'g> {
         Ok(ctxs.get(&path).expect("inserted above"))
     }
 
-    /// 06-agent-plane 6.5 sliding window. Returns false when the caller is
-    /// over the limit for the current window.
+    /// 06-agent-plane 6 item 5: 128 tool calls / 10 s per token, configurable
+    /// (`GEODE_AGENT_RATE_MAX`). This is a **fixed** window that resets after
+    /// `RATE_WINDOW_SECS`; a true sliding window is not implemented.
+    /// Returns false when the caller is over the limit for the current window.
     fn rate_allow(&mut self) -> bool {
         let max = std::env::var("GEODE_AGENT_RATE_MAX")
             .ok()
@@ -844,6 +846,7 @@ impl<'g> StdioServer<'g> {
         if let Some(root) = content_root {
             doc["content_root"] = serde_json::json!(cmd::hex(root));
         }
+        if let Err(e) = geode_grotto::event::assert_event_safe(&doc) { eprintln!("facet rejected: {e}"); return; }
         eprintln!("{doc}");
     }
 

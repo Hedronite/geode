@@ -217,8 +217,7 @@ fn verify_json_mac(
     }
     let canon = manifest::canonicalize(&body)?;
     let got = manifest::manifest_mac(manifest_key, &canon)?;
-    // TODO(G5): constant-time compare (matches geode-core's own G5 note).
-    if got != want {
+    if !geode_grotto::zero::ct_eq(&got, &want) {
         return Err(Error::AuthFail);
     }
     Ok(())

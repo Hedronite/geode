@@ -235,8 +235,7 @@ fn verify_json_mac(
     }
     let canon = manifest::canonicalize(&body)?;
     let got = manifest::manifest_mac(manifest_key, &canon)?;
-    // TODO(G5): constant-time compare (matches geode-core's own G5 note).
-    if got != want {
+    if !geode_grotto::zero::ct_eq(&got, &want) {
         return Err(Error::AuthFail);
     }
     Ok(())
@@ -330,12 +329,26 @@ pub fn write_manifest(ctx: &VaultCtx) -> Result<()> {
 pub fn emit(out: OutMode, verb: &str, extra: serde_json::Value, text: &str) {
     match out {
         OutMode::Json => {
-            let mut doc = serde_json::json!({"ok": true, "verb": verb, "schema": "geode.event.v1"});
-            if let (Some(d), Some(x)) = (doc.as_object_mut(), extra.as_object()) {
-                for (k, v) in x {
-                    d.insert(k.clone(), v.clone());
+            // agent_token_issue emits hex armor in  (06-agent-plane 2);
+            // assert_event_safe rejects GTOK magic in values — guard metadata only.
+            let doc = if verb == "agent_token_issue" {
+                let token = extra.get("token").cloned();
+                let mut meta = extra.clone();
+                if let Some(o) = meta.as_object_mut() {
+                    o.remove("token");
                 }
-            }
+                let mut doc = geode_grotto::event::build_event(verb, true, meta)
+                    .unwrap_or_else(|e| fail(out, verb, &e));
+                if let (Some(t), Some(o)) = (token, doc.as_object_mut()) {
+                    o.insert("token".into(), t);
+                }
+                doc
+            } else {
+                match geode_grotto::event::build_event(verb, true, extra) {
+                    Ok(doc) => doc,
+                    Err(e) => fail(out, verb, &e),
+                }
+            };
             println!("{}", serde_json::to_string(&doc).expect("json encode"));
         }
         OutMode::Text => {
@@ -351,15 +364,12 @@ pub fn fail(out: OutMode, verb: &str, err: &Error) -> ! {
     let (code, code_exit) = map_error(err);
     match out {
         OutMode::Json => {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "ok": false,
-                    "verb": verb,
-                    "schema": "geode.event.v1",
-                    "error": {"code": code, "message": err.to_string()},
-                })
-            );
+            let doc = geode_grotto::event::build_error_event(verb, code, &err.to_string())
+                .unwrap_or_else(|_| serde_json::json!({
+                    "ok": false, "verb": verb, "schema": "geode.event.v1",
+                    "error": {"code": code, "message": "redacted: event safety check failed"},
+                }));
+            println!("{doc}");
         }
         OutMode::Text => eprintln!("{}", crate::output::human_error(verb, err)),
     }

@@ -41,3 +41,27 @@ impl std::fmt::Debug for Secret32 {
         f.write_str("Secret32(**redacted**)")
     }
 }
+
+
+/// Constant-time equality for tags/checksums.
+#[must_use]
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq as _;
+    a.ct_eq(b).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn debug_never_prints_key_bytes() {
+        let s = Secret32::new_unchecked([0xde; 32]);
+        assert_eq!(format!("{s:?}"), "Secret32(**redacted**)");
+    }
+    #[test]
+    fn zeroize_clears() {
+        let mut s = Secret32::new_unchecked([0xde; 32]);
+        s.zeroize();
+        assert_eq!(s.as_bytes(), &[0u8; 32]);
+    }
+}

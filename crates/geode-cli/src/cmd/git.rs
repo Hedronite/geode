@@ -252,7 +252,7 @@ fn init(global: &GlobalArgs, out: OutMode) -> Result<()> {
         flags,
         generated_at: now_ms() / 1000,
         generator: format!("geode {}", env!("CARGO_PKG_VERSION")),
-        root: geode_grotto::manifest::entries_root(&[]),
+        root: geode_grotto::manifest::entries_root(&[])?,
         entry_count: 0,
         total_plain_bytes: 0,
         total_cipher_bytes: 0,

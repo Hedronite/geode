@@ -491,6 +491,8 @@ fn help_stays_opaque_over_snapshot_pane() {
     assert!(app.help());
     let (rendered, buf) = draw(&app, 80, 36);
     assert!(rendered.contains("Geode TUI"));
+    assert!(!rendered.to_ascii_lowercase().contains("gtok"));
+    assert!(!rendered.to_ascii_lowercase().contains("jev"));
     let want_bg = Palette::porcelain().bg;
     let mut overlay = String::new();
     let mut opaque = 0u32;

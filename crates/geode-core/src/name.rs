@@ -113,18 +113,6 @@ fn name_cipher(name_key: &[u8; 32]) -> Hctr2 {
     Hctr2::new(name_key)
 }
 
-/// Seal a single path component under `NameKey` (02-cryptography 5).
-///
-/// `name_key`  = `BLAKE3-KDF(EK, "geode/v1/name-key", vault_id || le32(epoch))`
-/// `tweak`     = `vault_id || le32(epoch) || parent_id`
-/// `pad`       = `BLAKE3-XOF(NameKey, "pad" || parent_id || component)`
-///                `[0 .. bucket-len(component)]`
-/// `sealed_plain = le8(len) || component || pad`
-/// `ciphertext   = HCTR2-256(NameKey, tweak, sealed_plain)`
-/// `encoded      = base32hex(ciphertext)`
-///
-/// `parent_id` is the 16-byte id of the parent directory object; the root
-/// parent is `0x00*16`. Returns the base32hex ciphertext name.
 /// Seal a path component and return the raw HCTR2 ciphertext bytes
 /// (02-cryptography 5). `seal_name` base32hex-encodes this; this variant
 /// is for callers (and vector generation) that want the raw ciphertext.
@@ -179,11 +167,6 @@ pub fn seal_name(
     Ok(base32hex_encode(&ct))
 }
 
-/// Open a sealed, base32hex-encoded name component (02-cryptography 5).
-///
-/// Decrypts with `NameKey` + tweak, recovers `len`, slices the component,
-/// re-derives the pad and compares it to the decrypted tail. Any mismatch
-/// (bad length, bad bucket, non-UTF-8, pad mismatch) => [`Error::AuthFail`].
 /// Open a sealed name given the raw HCTR2 ciphertext bytes (02-cryptography 5).
 /// `open_name` base32hex-decodes first; this variant takes ciphertext directly.
 pub fn open_name_ciphertext(

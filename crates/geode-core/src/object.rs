@@ -248,8 +248,7 @@ pub fn open_object(
 ) -> Result<(ObjectHeader, Vec<u8>)> {
     let header = ObjectHeader::from_bytes(header_bytes)?;
     let want = compute_header_tag(ek, &header);
-    // TODO(G5): constant-time compare. Correct for G2; harden later.
-    if want != header.header_tag {
+    if !crate::zero::ct_eq(&want, &header.header_tag) {
         return Err(Error::AuthFail);
     }
     let effective_bind: Vec<u8> = if header.path_bind_hash == [0u8; 32] {

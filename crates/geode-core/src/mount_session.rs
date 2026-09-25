@@ -115,7 +115,9 @@ impl MountSession {
         self.vfs.read_range(path, off, len)
     }
 
-    /// Read a whole entry from offset 0 (clamped to its plaintext length).
+    /// Read up to `vfs::MAX_READ_LEN` bytes from offset 0. Large entries are
+    /// bounded by the VFS read cap; callers needing the remainder use ranged
+    /// reads and must handle the returned bound explicitly.
     pub fn read_all(&self, path: &str) -> Result<Vec<u8>> {
         self.vfs.read_range(path, 0, vfs::MAX_READ_LEN)
     }
@@ -247,7 +249,7 @@ mod tests {
             flags: 0,
             generated_at: 0,
             generator: "test".into(),
-            root: entries_root(&[]),
+            root: entries_root(&[]).unwrap(),
             entry_count: 0,
             total_plain_bytes: 0,
             total_cipher_bytes: 0,

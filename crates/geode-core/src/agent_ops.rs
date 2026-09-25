@@ -376,6 +376,7 @@ pub fn read(
 /// `object_id` is allocated (03-format 10 — never overwrite in place); the
 /// manifest is updated (same-path entry replaced) and re-MAC'd atomically.
 /// `now` is unix seconds; `mtime_ms` is derived as `now * 1000`.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // MCP tool entry
 pub fn write(
     ek: &EpochKey,
     vault_root: &Path,
@@ -439,7 +440,7 @@ pub fn write(
     manifest.entries.sort_by(|a, b| a.path.cmp(&b.path));
     manifest.entry_count = u32::try_from(manifest.entries.len())
         .map_err(|_| Error::Format("entry_count overflow".into()))?;
-    manifest.root = entries_root(&manifest.entries);
+    manifest.root = entries_root(&manifest.entries)?;
     manifest.total_plain_bytes = manifest.entries.iter().map(|e| e.plain_len).sum();
     manifest.total_cipher_bytes = cipher_bytes_total(vault_root, token.epoch, &manifest.entries)?;
     manifest.generated_at = now;
@@ -527,7 +528,7 @@ mod tests {
             flags: 0,
             generated_at: NOW,
             generator: "test".into(),
-            root: entries_root(&entries),
+            root: entries_root(&entries).unwrap(),
             entry_count: u32::try_from(entries.len()).unwrap(),
             total_plain_bytes: entries.iter().map(|e| e.plain_len).sum(),
             total_cipher_bytes: 0,

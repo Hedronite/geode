@@ -106,8 +106,7 @@ fn verify_json_mac(
     }
     let canon = canonicalize(&body)?;
     let got = mac_fn(manifest_key, &canon)?;
-    // TODO(G5): constant-time compare (matches geode-core G5 note).
-    if got != want {
+    if !crate::zero::ct_eq(&got, &want) {
         return Err(Error::AuthFail);
     }
     Ok(())
@@ -486,7 +485,7 @@ mod tests {
             total_cipher_bytes: entries.iter().map(|e| e.plain_len).sum(),
             entries,
         };
-        m.root = entries_root(&m.entries);
+        m.root = entries_root(&m.entries).unwrap();
         m
     }
 
