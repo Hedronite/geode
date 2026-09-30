@@ -167,6 +167,7 @@ pub mod recipients;
 pub mod rotate;
 pub mod session;
 pub mod sidecar;
+pub mod sign;
 pub mod snapshot;
 pub mod token;
 pub mod vault;
