@@ -39,6 +39,12 @@ data-encoding = "2"
 # G0 (v0.2.6): X25519 recipient wrap/unwrap (02-cryptography 7.2).
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hkdf = "0.12"
+# G0 (v033): the Ed25519 identity child behind the `geode sign` cosign verb.
+# It signs raw payload bytes (RFC 8032, no prehash) in `src/sign.rs`; that
+# module frames the SPKI PEM by hand, so no pkcs8/spki feature is needed here.
+# `zeroize` (already a default) is named for the contract: it makes the
+# `SigningKey` zeroize on drop.
+ed25519-dalek = { version = "2", features = ["zeroize"] }
 
 # G1a (v0.2.0): OS keyring storage for ISK / wrap passphrase. Default v1
 # feature pulls the platform-native store (Keychain on macOS, Credential
