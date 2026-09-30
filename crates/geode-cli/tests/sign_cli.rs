@@ -110,7 +110,10 @@ fn sign_pub_pem_shape_and_stability() {
 
     // -o writes the same bytes, mode 0644, no overwrite.
     assert_ok(
-        &geode(dir, &["--key", "alice.gkey", "sign", "pub", "-o", "pub.pem"]),
+        &geode(
+            dir,
+            &["--key", "alice.gkey", "sign", "pub", "-o", "pub.pem"],
+        ),
         "sign pub -o",
     );
     assert_eq!(
@@ -119,7 +122,10 @@ fn sign_pub_pem_shape_and_stability() {
         "-o content equals stdout content"
     );
     assert_eq!(mode(dir.join("pub.pem")) & 0o777, 0o644, "pub.pem is 0644");
-    let dup = geode(dir, &["--key", "alice.gkey", "sign", "pub", "-o", "pub.pem"]);
+    let dup = geode(
+        dir,
+        &["--key", "alice.gkey", "sign", "pub", "-o", "pub.pem"],
+    );
     assert_fails(&dup, 1, "refusing to overwrite pub.pem");
 }
 
@@ -151,7 +157,15 @@ fn sign_blob_signature_shape() {
     assert_ok(
         &geode(
             dir,
-            &["--key", "alice.gkey", "sign", "blob", "payload", "-o", "sig"],
+            &[
+                "--key",
+                "alice.gkey",
+                "sign",
+                "blob",
+                "payload",
+                "-o",
+                "sig",
+            ],
         ),
         "sign blob -o",
     );
@@ -175,7 +189,18 @@ fn cross_identity_signature_fails() {
     std::fs::write(dir.join("payload"), b"cross identity payload").expect("write payload");
 
     assert_ok(
-        &geode(dir, &["--key", "alice.gkey", "sign", "blob", "payload", "-o", "sig"]),
+        &geode(
+            dir,
+            &[
+                "--key",
+                "alice.gkey",
+                "sign",
+                "blob",
+                "payload",
+                "-o",
+                "sig",
+            ],
+        ),
         "sign alice",
     );
     assert_ok(
@@ -207,7 +232,10 @@ fn cross_identity_signature_fails() {
         );
         // ...and under the right identity it exits 0 (the G1 proof).
         assert_ok(
-            &geode(dir, &["--key", "alice.gkey", "sign", "pub", "-o", "alice.pem"]),
+            &geode(
+                dir,
+                &["--key", "alice.gkey", "sign", "pub", "-o", "alice.pem"],
+            ),
             "pub alice",
         );
         let good = Command::new(&check)
@@ -259,7 +287,11 @@ fn wrapped_key_signs_and_bad_passphrase_exits_2() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
     assert_ok(
-        &env_geode(dir, "correct horse", &["keygen", "w.gkey", "--password", "--cheap"]),
+        &env_geode(
+            dir,
+            "correct horse",
+            &["keygen", "w.gkey", "--password", "--cheap"],
+        ),
         "keygen wrapped",
     );
     std::fs::write(dir.join("payload"), b"wrapped payload").expect("write payload");
@@ -275,12 +307,18 @@ fn wrapped_key_signs_and_bad_passphrase_exits_2() {
             .expect("spawn geode")
     };
 
-    let good = run("correct horse", &["--key", "w.gkey", "sign", "blob", "payload"]);
+    let good = run(
+        "correct horse",
+        &["--key", "w.gkey", "sign", "blob", "payload"],
+    );
     assert_ok(&good, "wrapped sign");
     let sig = Base64::decode_vec(stdout_text(&good).trim_end()).expect("signature base64");
     assert_eq!(sig.len(), 64);
 
-    let bad = run("wrong passphrase", &["--key", "w.gkey", "sign", "blob", "payload"]);
+    let bad = run(
+        "wrong passphrase",
+        &["--key", "w.gkey", "sign", "blob", "payload"],
+    );
     assert_fails(&bad, 2, "bad passphrase");
     // The error surface leaks nothing secret.
     let err_text = format!(
@@ -288,7 +326,10 @@ fn wrapped_key_signs_and_bad_passphrase_exits_2() {
         String::from_utf8_lossy(&bad.stderr),
         String::from_utf8_lossy(&bad.stdout)
     );
-    assert!(!err_text.contains("wrong passphrase"), "no echo of the passphrase");
+    assert!(
+        !err_text.contains("wrong passphrase"),
+        "no echo of the passphrase"
+    );
 }
 
 #[test]
@@ -314,7 +355,10 @@ fn json_output_carries_no_seed_or_isk() {
     assert_eq!(doc["ok"], true);
     assert_eq!(doc["algorithm"], "ed25519");
     assert_eq!(doc["key_id"].as_str().expect("key_id").len(), 32);
-    assert!(doc["pem"].as_str().expect("pem").contains("BEGIN PUBLIC KEY"));
+    assert!(doc["pem"]
+        .as_str()
+        .expect("pem")
+        .contains("BEGIN PUBLIC KEY"));
 
     let blob_json = json_of(&[
         "--key",
@@ -339,11 +383,25 @@ fn json_output_carries_no_seed_or_isk() {
     }
     // And the public artifacts on disk stay clean too.
     assert_ok(
-        &geode(dir, &["--key", "alice.gkey", "sign", "blob", "payload", "-o", "sig"]),
+        &geode(
+            dir,
+            &[
+                "--key",
+                "alice.gkey",
+                "sign",
+                "blob",
+                "payload",
+                "-o",
+                "sig",
+            ],
+        ),
         "write sig",
     );
     let sig_file = std::fs::read_to_string(dir.join("sig")).expect("read sig");
-    assert!(!sig_file.contains(&isk_hex) && !sig_file.contains(&seed), "sig file clean");
+    assert!(
+        !sig_file.contains(&isk_hex) && !sig_file.contains(&seed),
+        "sig file clean"
+    );
 }
 
 /// The seed a cosign key would expose if it were ever emitted:
@@ -365,7 +423,10 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(unix)]
 fn mode(path: std::path::PathBuf) -> u32 {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).expect("metadata").permissions().mode()
+    std::fs::metadata(path)
+        .expect("metadata")
+        .permissions()
+        .mode()
 }
 
 fn which(prog: &str) -> bool {
