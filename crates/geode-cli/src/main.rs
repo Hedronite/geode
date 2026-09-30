@@ -95,6 +95,10 @@ enum Commands {
     Git(cmd::git::GitArgs),
     /// Seal a file or tree into a vault.
     Seal(cmd::seal::SealArgs),
+    /// Ed25519 identity child: SPKI PEM and cosign-compatible blob
+    /// signatures (SPEC-v033 G1). Verified with
+    /// `cosign verify-blob --key pub.pem --signature sig`.
+    Sign(cmd::sign::SignArgs),
     /// Open a vault out to a directory.
     Open(cmd::open::OpenArgs),
     /// Verify a vault (full / --cheap / --sample P).
@@ -202,6 +206,10 @@ impl Commands {
                 cmd::git::GitCmd::Lock(_) => "git_lock",
             },
             Self::Seal(_) => "seal",
+            Self::Sign(a) => match &a.cmd {
+                cmd::sign::SignCmd::Pub { .. } => "sign_pub",
+                cmd::sign::SignCmd::Blob { .. } => "sign_blob",
+            },
             Self::Open(_) => "open",
             Self::Verify(_) => "verify",
             Self::List(_) => "list",
@@ -474,6 +482,7 @@ fn main() {
         Commands::Vault(a) => cmd::vault::run(a, &cli.global, out),
         Commands::Git(a) => cmd::git::run(a, &cli.global, out),
         Commands::Seal(a) => cmd::seal::run(a, &cli.global, out),
+        Commands::Sign(a) => cmd::sign::run(a, &cli.global, out),
         Commands::Open(a) => cmd::open::run(a, &cli.global, out),
         Commands::Verify(a) => cmd::verify::run(a, &cli.global, out),
         Commands::List(a) => cmd::list::run(a, &cli.global, out),
