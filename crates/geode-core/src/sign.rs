@@ -55,10 +55,7 @@ pub const SPKI_DER_PREFIX: [u8; 12] = [
 ///
 /// Secret: the returned [`Secret32`] redacts in `Debug` and zeroizes on drop.
 fn derive_seed(isk: &IdentitySecret) -> Secret32 {
-    Secret32::new_unchecked(blake3::derive_key(
-        ED25519_IDENTITY_DOMAIN,
-        isk.as_bytes(),
-    ))
+    Secret32::new_unchecked(blake3::derive_key(ED25519_IDENTITY_DOMAIN, isk.as_bytes()))
 }
 
 /// An unlocked Ed25519 signing identity: the ISK's Ed25519 child.
@@ -250,7 +247,10 @@ mod tests {
         let der = Base64::decode_vec(&body).expect("body is base64");
         assert_eq!(der.len(), 44);
         assert_eq!(&der[..SPKI_DER_PREFIX.len()], &SPKI_DER_PREFIX);
-        assert_eq!(&der[SPKI_DER_PREFIX.len()..], &id.verifying_key().to_bytes());
+        assert_eq!(
+            &der[SPKI_DER_PREFIX.len()..],
+            &id.verifying_key().to_bytes()
+        );
     }
 
     #[test]
@@ -288,7 +288,10 @@ mod tests {
         assert_eq!(text.len(), 88);
         assert!(text.ends_with("=="), "{text}");
         assert_eq!(signature_from_base64(&text).unwrap(), signature);
-        assert_eq!(signature_from_base64(&format!("{text}\n")).unwrap(), signature);
+        assert_eq!(
+            signature_from_base64(&format!("{text}\n")).unwrap(),
+            signature
+        );
         assert!(signature_from_base64("not base64!").is_err());
         assert!(signature_from_base64("AAAA").is_err());
     }
