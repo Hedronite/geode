@@ -16,6 +16,7 @@ pub mod mount;
 pub mod open;
 pub mod policy;
 pub mod seal;
+pub mod sign;
 pub mod snapshot;
 pub mod vault;
 pub mod verify;
