@@ -3,7 +3,7 @@ title: Geode changelog
 type: repo-changelog
 status: current
 created: "2026-09-15"
-updated: "2026-09-25"
+updated: "2026-09-30"
 related:
   - "[[foundry/geode/geode-spec-0.0.0/SPEC]]"
   - "[[foundry/geode/geode-spec-0.0.0/12-roadmap]]"
@@ -21,6 +21,7 @@ related:
   - "[[foundry/geode/specs/SPEC-v030]]"
   - "[[foundry/geode/specs/SPEC-v031]]"
   - "[[foundry/geode/specs/SPEC-v032]]"
+  - "[[foundry/geode/specs/SPEC-v033]]"
 ---
 
 # Changelog
@@ -28,6 +29,21 @@ related:
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise). Foundry packs v021/v022 are milestones, not the git tag ([[foundry/SEMVER]]).
 
 ## [Unreleased]
+
+## [1.1.0] — 2026-09-30
+
+Compatible 1.x minor. Foundry pack **v033** (cosign Ed25519 verb). No format change. `GDE1` objects written by 1.0.0 and 1.0.1 remain readable. Suite `0x01` stays the suite. Existing custody verbs, exit codes, and MCP tools `geode_list` / `geode_read` / `geode_write` are unchanged.
+
+### Added
+
+- `geode sign pub` writes the Ed25519 identity public key as SPKI PEM (`BEGIN PUBLIC KEY`). The key stays in Geode.
+- `geode sign blob PATH` signs the raw file bytes (RFC 8032, no prehash). The signature file is standard base64 of the 64-byte signature plus one trailing newline.
+- The seed is `blake3::derive_key("geode/v1/ed25519-identity", ISK)` over the 32-byte identity secret. A second identity file is a second key on the same verb. Verify with cosign v2.6.5: `verify-blob --key pub.pem --signature sig --insecure-ignore-tlog --offline payload`.
+- `geode key pub` and `.gpub` stay X25519.
+
+### Not in this tag
+
+- The machine hook is a later verb. UKI and PCR signing stay on the LE13 interim.
 
 ## [1.0.1] — 2026-09-25
 
@@ -203,7 +219,8 @@ First release. Conformance profile **`core`** ([[foundry/geode/geode-spec-0.0.0/
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/Hedronite/geode/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/Hedronite/geode/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/Hedronite/geode/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/Hedronite/geode/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Hedronite/geode/compare/v0.2.9...v1.0.0
 [0.2.4]: https://github.com/VirtualMachinist/geode/compare/v0.2.3...v0.2.4
