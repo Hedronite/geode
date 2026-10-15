@@ -31,6 +31,7 @@ use crate::snapshot::read_manifest_file;
 use crate::token::{self, Token};
 use crate::vault as corevault;
 use crate::{Error, Result};
+use secrecy::{ExposeSecret, SecretBox, SecretString};
 use std::path::Path;
 
 /// Default read cap: 64 KiB (06-agent-plane 4).
@@ -58,12 +59,92 @@ pub struct ListedEntry {
     pub content_root: [u8; 32],
 }
 
+/// Plaintext bytes held in a [`SecretBox`]. `Debug` does not print them.
+///
+/// `Deref` to `[u8]` is the borrow the authorized read path already uses.
+pub struct SecretBytes(SecretBox<Vec<u8>>);
+
+impl SecretBytes {
+    /// Take ownership of `bytes` and zeroize them on drop.
+    #[must_use]
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(SecretBox::new(Box::new(bytes)))
+    }
+}
+
+impl std::fmt::Debug for SecretBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretBytes([REDACTED])")
+    }
+}
+
+impl std::ops::Deref for SecretBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.expose_secret()
+    }
+}
+
+impl AsRef<[u8]> for SecretBytes {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl Clone for SecretBytes {
+    fn clone(&self) -> Self {
+        Self::new(self.0.expose_secret().clone())
+    }
+}
+
+/// UTF-8 preview held in a [`SecretString`]. `Debug` does not print it.
+///
+/// Serializes as the string so an authorized read's JSON preview stays the
+/// same shape. `Deref` to `str` is that same borrow.
+#[derive(Clone)]
+pub struct SecretText(SecretString);
+
+impl SecretText {
+    /// Take ownership of `text` and zeroize it on drop.
+    #[must_use]
+    pub fn new(text: String) -> Self {
+        Self(SecretString::from(text))
+    }
+}
+
+impl std::fmt::Debug for SecretText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretText([REDACTED])")
+    }
+}
+
+impl std::ops::Deref for SecretText {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.expose_secret()
+    }
+}
+
+impl serde::Serialize for SecretText {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self)
+    }
+}
+
 /// Outcome of a token-gated read (06-agent-plane 4).
 ///
 /// `sha256` is always the hash of the **full** plaintext (not the preview),
 /// so a truncated read still lets the agent address the artifact by hash.
 /// `body` is `Preview { .. }` only when `truncated`; `None` in `Hash` mode.
-#[derive(Clone, Debug)]
+///
+/// `Debug` prints `path`, `truncated`, and `sha256` only. It does not print
+/// `plain_len` or the plaintext.
+#[derive(Clone)]
 pub struct ReadOutcome {
     pub path: String,
     pub plain_len: u64,
@@ -72,16 +153,26 @@ pub struct ReadOutcome {
     pub body: ReadBody,
 }
 
-/// Body of a read outcome.
+impl std::fmt::Debug for ReadOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadOutcome")
+            .field("path", &self.path)
+            .field("truncated", &self.truncated)
+            .field("sha256", &self.sha256)
+            .finish()
+    }
+}
+
+/// Body of a read outcome. Plaintext is a [`SecretBytes`] or [`SecretText`].
 #[derive(Clone, Debug)]
 pub enum ReadBody {
     /// Full plaintext (not truncated).
-    Full(Vec<u8>),
+    Full(SecretBytes),
     /// First `max_bytes` of the plaintext (truncated). `text` is `Some` iff
     /// the preview is valid UTF-8 and the requested mode was `Text`.
     Preview {
-        bytes: Vec<u8>,
-        text: Option<String>,
+        bytes: SecretBytes,
+        text: Option<SecretText>,
     },
     /// `Hash` mode: no body returned, only the digest.
     None,
@@ -347,13 +438,16 @@ pub fn read(
                 .min(plaintext.len());
             let bytes = plaintext[..n].to_vec();
             let text = if mode == ReadMode::Text {
-                String::from_utf8(bytes.clone()).ok()
+                String::from_utf8(bytes.clone()).ok().map(SecretText::new)
             } else {
                 None
             };
-            ReadBody::Preview { bytes, text }
+            ReadBody::Preview {
+                bytes: SecretBytes::new(bytes),
+                text,
+            }
         } else {
-            ReadBody::Full(plaintext)
+            ReadBody::Full(SecretBytes::new(plaintext))
         }
     } else {
         ReadBody::None
@@ -473,7 +567,7 @@ mod tests {
     }
 
     /// Token granting list/read/write on `scratch/` and `out/`.
-    fn sealed_token(now: i64, ttl: u64, max_bytes: u64) -> Vec<u8> {
+    fn sealed_token(now: i64, ttl: u64, max_bytes: u64) -> crate::token::SealedToken {
         let t = Token {
             token_id: TokenId([0xa5; 16]),
             vault_id: VaultId([0x01; 16]),
@@ -579,6 +673,40 @@ mod tests {
     }
 
     #[test]
+    fn debug_hides_dummy_and_plain_len() {
+        let dummy = b"sk-dummy-0000QA".to_vec();
+        let full = ReadOutcome {
+            path: "cfg/dummy.env".into(),
+            plain_len: u64::try_from(dummy.len()).unwrap(),
+            truncated: false,
+            sha256: [0x11; 32],
+            body: ReadBody::Full(SecretBytes::new(dummy.clone())),
+        };
+        let shown = format!("{full:?}");
+        assert!(!shown.contains("sk-dummy-0000QA"), "{shown}");
+        assert!(!shown.contains("plain_len"), "{shown}");
+        assert!(shown.contains("cfg/dummy.env"), "{shown}");
+        assert!(shown.contains("truncated"), "{shown}");
+        assert!(shown.contains("sha256"), "{shown}");
+
+        let preview = ReadOutcome {
+            path: "cfg/dummy.env".into(),
+            plain_len: u64::try_from(dummy.len()).unwrap(),
+            truncated: true,
+            sha256: [0x22; 32],
+            body: ReadBody::Preview {
+                bytes: SecretBytes::new(dummy.clone()),
+                text: Some(SecretText::new(String::from_utf8(dummy).unwrap())),
+            },
+        };
+        let shown = format!("{preview:?}");
+        assert!(!shown.contains("sk-dummy-0000QA"), "{shown}");
+        assert!(!shown.contains("plain_len"), "{shown}");
+        let body = format!("{:?}", preview.body);
+        assert!(!body.contains("sk-dummy-0000QA"), "{body}");
+    }
+
+    #[test]
     fn read_allow_prefix_roundtrips() {
         let d = setup_vault(&[("scratch/plan.md", b"hello agent")]);
         let root = d.path().join("v.geode");
@@ -597,7 +725,7 @@ mod tests {
         assert!(!o.truncated);
         assert_eq!(o.plain_len, 11);
         match o.body {
-            ReadBody::Full(b) => assert_eq!(b, b"hello agent"),
+            ReadBody::Full(b) => assert_eq!(&b[..], b"hello agent".as_slice()),
             other => panic!("expected Full, got {other:?}"),
         }
     }
@@ -814,7 +942,7 @@ mod tests {
         )
         .unwrap();
         match o.body {
-            ReadBody::Full(b) => assert_eq!(b, b"fresh bytes"),
+            ReadBody::Full(b) => assert_eq!(&b[..], b"fresh bytes".as_slice()),
             other => panic!("expected Full, got {other:?}"),
         }
         let got = list(&ek(), &root, &tok, NOW, "scratch/", false).unwrap();
@@ -840,7 +968,7 @@ mod tests {
         )
         .unwrap();
         match o.body {
-            ReadBody::Full(b) => assert_eq!(b, b"new"),
+            ReadBody::Full(b) => assert_eq!(&b[..], b"new".as_slice()),
             other => panic!("expected Full, got {other:?}"),
         }
         let got = list(&ek(), &root, &tok, NOW, "scratch/", false).unwrap();

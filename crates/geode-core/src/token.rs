@@ -19,6 +19,7 @@ use crate::manifest::canonicalize;
 use crate::policy::{Op, PrincipalId};
 use crate::{assert_magic, assert_suite, Error, Result, MAGIC_GTOK, SUITE_0X01};
 use aegis::aegis256x2::{Aegis256X2, Key, Nonce};
+use secrecy::{ExposeSecret, SecretBox};
 
 /// Default token TTL: 15 minutes (02-cryptography 9).
 pub const DEFAULT_TTL_SECS: u64 = 15 * 60;
@@ -97,6 +98,57 @@ fn validate(token: &Token) -> Result<()> {
     Ok(())
 }
 
+/// Sealed `GTOK` bytes. `Debug` does not print them. `Deref` to `[u8]` is
+/// the borrow inspect and the CLI already use.
+pub struct SealedToken(SecretBox<Vec<u8>>);
+
+impl SealedToken {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self(SecretBox::new(Box::new(bytes)))
+    }
+
+    /// Copy the sealed bytes out. Tamper tests in this module flip bits
+    /// on the copy. Callers borrow through `Deref` to `[u8]`.
+    #[cfg(test)]
+    fn into_vec(self) -> Vec<u8> {
+        self.0.expose_secret().clone()
+    }
+}
+
+impl std::fmt::Debug for SealedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SealedToken(**redacted**)")
+    }
+}
+
+impl std::ops::Deref for SealedToken {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.expose_secret()
+    }
+}
+
+impl AsRef<[u8]> for SealedToken {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl PartialEq for SealedToken {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl Eq for SealedToken {}
+
+impl Clone for SealedToken {
+    fn clone(&self) -> Self {
+        Self::new(self.0.expose_secret().clone())
+    }
+}
+
 /// Issue a sealed token (`GTOK...`) (06-agent-plane 2).
 ///
 /// Seals canonical (RFC 8785) JSON of `token` with AEGIS-256-X2 under
@@ -104,8 +156,8 @@ fn validate(token: &Token) -> Result<()> {
 /// string `geode/v1/token`. Fails closed if no `EpochKey` is supplied — the
 /// caller holds EK from an unlocked session; a locked session has no EK and
 /// MUST NOT issue. Validates `principal_id` and TTL in `[0, MAX_TTL_SECS]`
-/// before any crypto runs.
-pub fn issue(token: &Token, ek: &EpochKey) -> Result<Vec<u8>> {
+/// before any crypto runs. The returned bytes sit in a [`SealedToken`].
+pub fn issue(token: &Token, ek: &EpochKey) -> Result<SealedToken> {
     validate(token)?;
     let value =
         serde_json::to_value(token).map_err(|e| Error::Format(format!("token serialize: {e}")))?;
@@ -121,7 +173,7 @@ pub fn issue(token: &Token, ek: &EpochKey) -> Result<Vec<u8>> {
     out.extend_from_slice(&token.token_id.0);
     out.extend_from_slice(&tag);
     out.extend_from_slice(&ct);
-    Ok(out)
+    Ok(SealedToken::new(out))
 }
 
 /// Inspect a sealed token: verify the MAC and return the claims.
@@ -193,7 +245,7 @@ pub fn issue_narrow(
     token: &Token,
     ek: &EpochKey,
     policy: &crate::policy::Policy,
-) -> Result<Vec<u8>> {
+) -> Result<SealedToken> {
     narrows_policy(token, policy)?;
     issue(token, ek)
 }
@@ -249,6 +301,8 @@ mod tests {
         let a = issue(&t, &ek).unwrap();
         let b = issue(&t, &ek).unwrap();
         assert_eq!(a, b, "same (token, ek) MUST yield identical sealed bytes");
+        let shown = format!("{a:?}");
+        assert!(!shown.contains("GTOK"), "{shown}");
     }
 
     #[test]
@@ -273,7 +327,7 @@ mod tests {
     fn flipped_ciphertext_bit_is_auth_fail() {
         let ek = ek();
         let t = token(1_700_000_000, DEFAULT_TTL_SECS);
-        let mut sealed = issue(&t, &ek).unwrap();
+        let mut sealed = issue(&t, &ek).unwrap().into_vec();
         let last = sealed.len() - 1;
         sealed[last] ^= 0x01;
         let r = inspect(&sealed, &ek, 1_700_000_000);
@@ -284,7 +338,7 @@ mod tests {
     fn flipped_tag_bit_is_auth_fail() {
         let ek = ek();
         let t = token(1_700_000_000, DEFAULT_TTL_SECS);
-        let mut sealed = issue(&t, &ek).unwrap();
+        let mut sealed = issue(&t, &ek).unwrap().into_vec();
         sealed[21] ^= 0x01;
         let r = inspect(&sealed, &ek, 1_700_000_000);
         assert!(matches!(r, Err(Error::AuthFail)), "got {r:?}");
@@ -306,7 +360,7 @@ mod tests {
     fn swapped_token_id_is_auth_fail() {
         let ek = ek();
         let t = token(1_700_000_000, DEFAULT_TTL_SECS);
-        let mut sealed = issue(&t, &ek).unwrap();
+        let mut sealed = issue(&t, &ek).unwrap().into_vec();
         sealed[5] ^= 0x01;
         let r = inspect(&sealed, &ek, 1_700_000_000);
         assert!(matches!(r, Err(Error::AuthFail)), "got {r:?}");
