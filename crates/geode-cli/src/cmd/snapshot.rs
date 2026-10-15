@@ -23,9 +23,9 @@ pub struct SnapshotArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum SnapshotCmd {
-    /// Snapshot the current manifest under a name (04-vault 7).
+    /// Save the current manifest under a name.
     Create(CreateArgs),
-    /// List named snapshots, each MAC-verified before display (04-vault 7).
+    /// List named snapshots. Each one is checked before it is shown.
     Ls(LsArgs),
 }
 

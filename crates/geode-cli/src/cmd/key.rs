@@ -24,7 +24,7 @@ pub struct KeygenArgs {
     /// Destination key file (default ./secret.gkey, with a warning).
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
-    /// Passphrase-wrap the key (02-cryptography 6.2; prompts, no echo).
+    /// Wrap the key with a passphrase. Prompts with no echo.
     #[arg(long)]
     pub password: bool,
     /// Weaker Argon2id parameters for constrained hosts (with --password).

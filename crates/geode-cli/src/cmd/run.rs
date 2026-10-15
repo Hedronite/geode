@@ -39,8 +39,8 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 /// `geode run` — run a command with vault secrets injected into its env.
 ///
-/// Local mode: `human:local`, a key is required, and any token is refused
-/// (exit 4). `--` is required before the command. `argv[0]` is resolved
+/// Local use needs a key. A token is refused (exit 4). `--` is required
+/// before the command. `argv[0]` is resolved
 /// against `PATH`, canonicalized, and must match an `--allow-cmd`.
 /// Every binding must pass policy, or nothing runs. The child gets a fresh
 /// env: `PATH`, `HOME`, `LANG`, `TERM`, then the bindings. It never gets
@@ -197,7 +197,7 @@ fn preflight(args: &RunArgs) -> Result<(Vec<BindingSpec>, Vec<CmdRule>), Refusal
         return Err(refuse(
             exit::TOKEN,
             "token_refused",
-            "local geode run is human:local and refuses a token (GEODE_TOKEN, --token-file, --token-fd)",
+            "local geode run refuses a token (GEODE_TOKEN, --token-file, --token-fd)",
         ));
     }
     if args.command.is_empty() {

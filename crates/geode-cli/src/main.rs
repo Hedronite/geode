@@ -95,9 +95,10 @@ enum Commands {
     Git(cmd::git::GitArgs),
     /// Seal a file or tree into a vault.
     Seal(cmd::seal::SealArgs),
-    /// Ed25519 identity child: SPKI PEM and cosign-compatible blob
-    /// signatures (SPEC-v033 G1). Verified with
-    /// `cosign verify-blob --key pub.pem --signature sig`.
+    /// Sign a file with the vault identity (Ed25519).
+    ///
+    /// `pub` writes the public key as PEM. `blob` signs the raw file
+    /// bytes. Check with `cosign verify-blob --key pub.pem --signature sig`.
     Sign(cmd::sign::SignArgs),
     /// Open a vault out to a directory.
     Open(cmd::open::OpenArgs),
@@ -107,33 +108,30 @@ enum Commands {
     List(cmd::list::ListArgs),
     /// Print one object to stdout.
     Cat(cmd::list::CatArgs),
-    /// Named manifest snapshots (create/ls, 04-vault 7).
+    /// Name the current manifest, or list those names.
     Snapshot(cmd::snapshot::SnapshotArgs),
     /// Delete objects unreferenced by the manifest and all snapshots.
     Gc(cmd::snapshot::GcArgs),
-    /// Manage the keyring (named identity keys, 05-cli 2.1).
+    /// List identity keys, or add one under a label.
     Keyring(KeyringArgs),
-    /// Policy document (10-policy): show the effective policy, seal a new
-    /// one, or dry-run an op against it.
+    /// Show, seal, or dry-run the vault policy.
     Policy(PolicyArgs),
-    /// Mount a vault at MOUNTPOINT (08-mount). On Darwin with `FUSE-T` or
-    /// macFUSE loaded, this runs a real `FUSE` session: foreground is the
-    /// default and blocks until unmount; `--daemon` forks and writes a pid
-    /// file. With neither driver loaded, mount exits 1 and names `FUSE-T`
-    /// or macFUSE — it does not pretend the mount succeeded. On Linux with
-    /// feature `fuse`, behavior is unchanged: a real session, foreground
-    /// default, `fusermount3` unmount. Default is READ-WRITE: omitting
-    /// `--read-only` accepts a read-write mount (copy-on-write chunk
-    /// writes, manifest mutations, fsync per 08-mount 3). Pass
-    /// `--read-only` for a read-only mount — the recommended default for
-    /// agent-adjacent mounts (08-mount 7). Windows / `WinFsp` is not
-    /// offered. Every attempt prints the UID-bypass warning FIRST, before
-    /// any refusal:
+    /// Mount a vault at a directory.
+    ///
+    /// On macOS this needs FUSE-T or macFUSE. The default is foreground,
+    /// and it blocks until you unmount. `--daemon` forks and writes a pid
+    /// file. If neither driver is loaded, mount exits 1 and names the one
+    /// it looked for. A build with FUSE support does the same on Linux,
+    /// and `fusermount3` unmounts it.
+    ///
+    /// The default is read-write. Pass `--read-only` when a process other
+    /// than you will see the mount. Windows is not offered.
+    ///
+    /// Every attempt prints this warning before any refusal:
     ///
     ///   warning: a mount is a policy bypass for any process of that UID
-    ///   (08-mount 7)
     ///
-    /// Unmount before leaving agents unsupervised. No key bytes in this help.
+    /// Unmount before leaving other programs unsupervised.
     Mount {
         /// Vault directory.
         #[arg(value_name = "VAULT")]
@@ -141,48 +139,42 @@ enum Commands {
         /// Mountpoint directory.
         #[arg(value_name = "MOUNTPOINT")]
         mountpoint: PathBuf,
-        /// Mount read-only. Omitting this flag mounts READ-WRITE;
-        /// `--read-only` is the recommended default for agent-adjacent
-        /// mounts (08-mount 7).
+        /// Mount read-only. Omit this to mount read-write.
         #[arg(long)]
         read_only: bool,
-        /// Fork to background and write a pid file (08-mount 6; Linux
-        /// feature `fuse` only).
+        /// Fork to the background and write a pid file. Needs a FUSE build.
         #[arg(long)]
         daemon: bool,
     },
-    /// Unmount a mounted vault (fusermount3 / umount, 08-mount 3).
+    /// Unmount a vault (`fusermount3` on Linux, `umount` on macOS).
     Unmount {
         /// Mountpoint directory.
         #[arg(value_name = "MOUNTPOINT")]
         mountpoint: PathBuf,
     },
-    /// Agent plane (06-agent-plane): serve MCP over stdio/socket, issue and
-    /// inspect scoped tokens, and run the read/write/list tool verbs under a
-    /// token. Help chrome is frontend-owned (G2c); dispatch is wired by
-    /// fullstack G1 (PR #20) to `cmd::agent::run`.
+    /// Issue a token, or call the vault tools with one.
+    ///
+    /// `serve` speaks MCP on stdio or a Unix socket. `read`, `write`, and
+    /// `list` require a token. `geode tui` does not accept one.
     Agent(AgentArgs),
-    /// Run a command with vault secrets injected into its env (SPEC-v034
-    /// G6). Local mode: `human:local`, key required, no token. `--` is
-    /// required before the command. Child output is redacted.
+    /// Run a command with vault secrets in its environment.
+    ///
+    /// Needs your key, and refuses a token. Put the command after `--`.
+    /// Output is redacted. Redaction does not stop a hostile command.
     Run(cmd::run::RunArgs),
     /// Audit log: verify the append-only hash chain.
     Audit(cmd::audit::AuditArgs),
-    /// Custody daemon control: unlock, lock, status. Resolves no key.
+    /// Unlock, lock, or check the custody daemon.
     Custody(cmd::custody::CustodyArgs),
-    /// Ratatui operator surface (14-tui). With the `tui` feature off
-    /// (core-profile build) this prints "not available" and exits 1.
+    /// Open the terminal UI.
     ///
-    /// Invariant (14-tui §1.4, §10): the TUI is a **human** surface. It
-    /// unlocks in-process via `--key` + passphrase, never via `--token`.
-    /// `--token` is deliberately NOT a global clap arg here (it would leak
-    /// into the TUI subcommand); it lives on the agent verbs only. The TUI
-    /// MUST NOT gain a `--token` unlock path or any agent-verb surface.
+    /// A build without the `tui` feature prints "not available" and exits 1.
+    /// The UI unlocks with `--key` and a passphrase. It does not take a token.
     Tui {
         /// Vault to open; omit for the vault picker.
         #[arg(value_name = "VAULT")]
         vault: Option<PathBuf>,
-        /// Built-in palette (14-tui §11). Default: graphite.
+        /// Color palette. Default: graphite.
         #[arg(
             long,
             value_name = "NAME",
@@ -190,7 +182,7 @@ enum Commands {
             default_value = "graphite"
         )]
         appearance: AppearanceArg,
-        /// Skip the opening splash (14-tui polish; env: `GEODE_TUI_NO_SPLASH=true`).
+        /// Skip the opening splash.
         #[arg(long, env = "GEODE_TUI_NO_SPLASH")]
         no_splash: bool,
     },
@@ -237,16 +229,11 @@ impl Commands {
     }
 }
 
-/// `geode policy` — policy document verbs (10-policy). Frontend registers
-/// the subcommand shape (G2) so `geode policy --help` and `show|set|check
-/// --help` list the shipped verbs; fullstack G1 (v0.2.3) wired the real
-/// `cmd::policy` module. Help prose chrome is frontend-owned. No key
-/// bytes are printed — see `output.rs` (public ids only).
+/// Show the vault policy, seal a new one, or dry-run an operation.
 ///
-/// Break-glass (10-policy 4): rewriting a sealed policy requires
-/// `--yes --break-glass` and is printed **loudly** to stderr (never
-/// silent); there is no break-glass for tokens. `policy check` deny is
-/// `Error::PolicyDeny` → JSON `code: policy_deny`, exit 3.
+/// Rewriting a sealed policy requires `--yes --break-glass` and is
+/// printed to stderr. Tokens cannot use that override. A denied check
+/// exits 3.
 #[derive(Args, Debug)]
 pub struct PolicyArgs {
     #[command(subcommand)]
@@ -261,8 +248,7 @@ pub enum PolicyCmd {
         #[arg(value_name = "VAULT")]
         vault: PathBuf,
     },
-    /// Seal a JSON policy file into the vault. Rewriting an existing
-    /// sealed policy requires `--yes --break-glass` (10-policy 4).
+    /// Seal a JSON policy file. Rewriting one requires `--yes --break-glass`.
     Set {
         /// Vault directory.
         #[arg(value_name = "VAULT")]
@@ -273,7 +259,7 @@ pub enum PolicyCmd {
         /// Confirm the rewrite.
         #[arg(long)]
         yes: bool,
-        /// Human override flag (10-policy 4); never applies to tokens.
+        /// Confirm a human rewrite of a sealed policy. Does not apply to tokens.
         #[arg(long)]
         break_glass: bool,
     },
@@ -315,25 +301,20 @@ pub enum KeyringCmd {
     },
 }
 
-/// `geode agent` — agent plane verbs (05-cli 2.6, 06-agent-plane). Frontend
-/// owns the clap help chrome (G2c) so `geode agent --help` documents the
-/// verbs; fullstack G1 (PR #20) wired `cmd::agent::run` for serve/read/
-/// write/list. No key bytes are printed by this chrome — see `output.rs`
-/// (public ids only).
+/// Issue a scoped token, or use the vault tools with one.
 ///
-/// `--token`/`GEODE_TOKEN` is the agent identity path (05-cli 1). It is
-/// scoped to the agent verbs below, NOT a global clap flag, so it cannot
-/// reach `geode tui` (14-tui §1.4: the TUI is a human surface).
+/// Token flags belong to `serve`, `read`, `write`, and `list`. They are
+/// not global, so `geode tui` does not accept a token.
 #[derive(Args, Debug)]
 pub struct AgentArgs {
     #[command(subcommand)]
     pub cmd: AgentCmd,
 }
 
-/// Token and passphrase sources for the token-gated agent verbs (SPEC-v034
-/// G2). Scoped to `serve`/`read`/`write`/`list`, never global, so
-/// `geode tui` still has no `--token` (14-tui §1.4). The three token flags
-/// are mutually exclusive; with none of them, `$GEODE_TOKEN` is used.
+/// Where a token-gated verb reads the token and the passphrase.
+///
+/// Used by `serve`, `read`, `write`, and `list`. Pass one of `--token-file`,
+/// `--token-fd`, or `--token`. With none of them, `$GEODE_TOKEN` is used.
 #[derive(Args, Debug)]
 pub struct TokenSource {
     /// Sealed agent token (hex armor or GTOK) on argv. Deprecated: argv is
@@ -355,16 +336,15 @@ pub struct TokenSource {
 
 #[derive(Subcommand, Debug)]
 pub enum AgentCmd {
-    /// Serve the MCP tool server (06-agent-plane 3). One transport per
-    /// run: `--socket PATH` serves the same newline-delimited JSON MCP
-    /// frames on a mode-0600 Unix socket (parent directory must already
-    /// exist; process stdout is not an MCP stream in socket mode);
-    /// `--stdio` speaks MCP over stdin/stdout for Facet/agent hosts. The
-    /// two flags cannot be combined — `--stdio --socket PATH` exits 1,
-    /// and so does neither flag (there is no implicit default path).
-    /// No token, no server: `--token` or `$GEODE_TOKEN` is required.
+    /// Serve the vault tools over MCP.
+    ///
+    /// One transport per run. `--socket PATH` listens on a mode-0600 Unix
+    /// socket. The parent directory must already exist, and stdout is not
+    /// the MCP stream in that mode. `--stdio` uses stdin and stdout.
+    /// Combining the two exits 1, and so does passing neither.
+    /// A token is required.
     Serve {
-        /// Speak MCP over stdin/stdout (the Facet/agent host transport).
+        /// Speak MCP over stdin and stdout.
         /// Mutually exclusive with `--socket PATH`; combining them exits 1.
         #[arg(long)]
         stdio: bool,
@@ -389,7 +369,7 @@ pub enum AgentCmd {
         #[command(subcommand)]
         cmd: TokenCmd,
     },
-    /// Read one object (06 §4). Agents SHOULD prefer this over `geode cat`.
+    /// Read one object. Prefer this over `geode cat` when you hold a token.
     Read {
         /// Vault directory.
         #[arg(value_name = "VAULT")]
@@ -404,7 +384,7 @@ pub enum AgentCmd {
         #[command(flatten)]
         token: TokenSource,
     },
-    /// Write stdin as a new object at PATH under an allow prefix (06 §4).
+    /// Seal stdin as a new object at PATH, under an allow prefix.
     Write {
         /// Vault directory.
         #[arg(value_name = "VAULT")]
@@ -426,9 +406,9 @@ pub enum AgentCmd {
         #[command(flatten)]
         token: TokenSource,
     },
-    /// Classify non-prefix remainder (shadow Jev). Code owns prefix / `../`
-    /// / TTL / MAC. No `--token` — this verb does not seal, open, or verify.
-    /// The TUI stays Jev-free.
+    /// Check that a path under an allow prefix is still in scope.
+    ///
+    /// Does not seal, open, or verify, and takes no token.
     Scope {
         /// Vault-relative path already under an allow prefix.
         #[arg(long, value_name = "PATH")]
@@ -436,7 +416,7 @@ pub enum AgentCmd {
         /// Operation (`list|read|write`). Never seal/open/verify.
         #[arg(long, value_name = "OP")]
         op: String,
-        /// Path prefix the grant already allows (repeatable). Code-checked.
+        /// Path prefix the token already allows (repeatable).
         #[arg(long, value_name = "PREFIX")]
         allow_prefix: Vec<String>,
         /// Principal id (public). Default `agent:remainder`.
@@ -451,7 +431,7 @@ pub enum AgentCmd {
     },
 }
 
-/// `--redact` for `geode agent token issue` (SPEC-v034 G4).
+/// How `token issue` labels a redacted value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum RedactArg {
     /// `[REDACTED:NAME]` (default).
@@ -460,7 +440,7 @@ pub enum RedactArg {
     Hidden,
 }
 
-/// `--mode` for `geode agent read` (06-agent-plane 4; SPEC-v034 G4).
+/// How `geode agent read` renders an object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum ReadModeArg {
     /// Plaintext bytes.
@@ -473,8 +453,9 @@ pub enum ReadModeArg {
 
 #[derive(Subcommand, Debug)]
 pub enum TokenCmd {
-    /// Issue a sealed token (`GTOK…`) for a principal (06 §2). Stdout is the
-    /// token or a path; Facet MUST store it `secret: true`.
+    /// Issue a sealed token (`GTOK…`) for a principal.
+    ///
+    /// Stdout is the token. Treat it as a secret.
     Issue {
         /// Vault the token is scoped to.
         #[arg(long, value_name = "DIR")]
@@ -518,9 +499,10 @@ pub enum TokenCmd {
         #[arg(long, value_enum, default_value = "strict")]
         redact: RedactArg,
     },
-    /// Inspect a sealed token: principal, ops, prefixes, ttl, expiry.
-    /// Read-only — the TUI mirrors this view (14-tui §6.10); issuance is
-    /// CLI-only. Token source: PATH, else `$GEODE_TOKEN`, else stdin.
+    /// Show a token's principal, operations, prefixes, and expiry.
+    ///
+    /// Does not print the token's secrets. Pass a token file, or
+    /// `$GEODE_TOKEN`, or stdin.
     Inspect {
         /// Sealed token file to inspect.
         #[arg(value_name = "TOKEN")]

@@ -20,14 +20,12 @@ pub struct SealArgs {
     /// Destination vault.
     #[arg(value_name = "VAULT")]
     pub vault: PathBuf,
-    /// Delete sources after the written objects verify (04-vault 2; default keep).
+    /// Delete the source after the sealed copy checks out. The default is to keep it.
     #[arg(long)]
     pub consume: bool,
-    /// Seal filenames with HCTR2-256 (suite 0x01) so the manifest stores
-    /// ciphertext names instead of plaintext paths (02-cryptography 5).
-    /// Default keeps plaintext names. No key material is printed; output
-    /// carries only public identifiers (`vault_id`, `key_id`, `epoch`,
-    /// hashes).
+    /// Seal filenames with HCTR2-256 so the manifest stores ciphertext
+    /// names instead of plaintext paths. Default keeps plaintext names.
+    /// Output shows public ids only (`vault_id`, `key_id`, `epoch`, hashes).
     #[arg(long)]
     pub seal_names: bool,
 }

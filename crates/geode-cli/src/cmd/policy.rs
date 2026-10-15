@@ -177,12 +177,11 @@ fn set(
     if rewrite {
         if !(yes && break_glass) {
             return Err(Error::Format(
-                "policy.json.sealed exists; rewriting requires --yes --break-glass (10-policy 4)"
-                    .into(),
+                "policy.json.sealed exists; rewriting requires --yes --break-glass".into(),
             ));
         }
         eprintln!(
-            "BREAK-GLASS: rewriting sealed policy for vault {} epoch {} (10-policy 4)",
+            "BREAK-GLASS: rewriting sealed policy for vault {} epoch {}",
             cmd::hex(&ctx.vault_id.0),
             ctx.epoch.0,
         );

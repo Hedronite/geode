@@ -24,10 +24,10 @@ tui = ["dep:geode-tui"]
 fuse = ["dep:fuser"]
 
 [dependencies]
-geode-grotto = { version = "1.2.0", path = "../geode-core" }
-geode-tui = { version = "1.2.0", path = "../geode-tui", optional = true }
+geode-grotto = { version = "1.2.1", path = "../geode-core" }
+geode-tui = { version = "1.2.1", path = "../geode-tui", optional = true }
 # G6 (v034): the only spawn path for `geode run`.
-geode-os = { version = "1.2.0", path = "../geode-os" }
+geode-os = { version = "1.2.1", path = "../geode-os" }
 secrecy = "0.10"
 fuser = { version = "0.15.1", optional = true }
 blake3 = "1"

@@ -55,7 +55,7 @@ ed25519-dalek = { version = "2", features = ["zeroize"] }
 keyring = "4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 # G6 (v034): named redaction for `inject::plan` and its output collector.
-geode-redact = { version = "1.2.0", path = "../geode-redact" }
+geode-redact = { version = "1.2.1", path = "../geode-redact" }
 
 [dev-dependencies]
 tempfile = "3"

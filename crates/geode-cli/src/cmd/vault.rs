@@ -36,8 +36,8 @@ pub enum VaultCmd {
     /// narrow reads/writes, they never mint recipients. Recipient possession
     /// bypasses policy if the holder runs other software.
     AddRecipient(AddRecipientArgs),
-    /// Rotate the vault epoch (04-vault 6). Requires `--key`. `--token` is
-    /// not a flag here and `GEODE_TOKEN` never substitutes for `--key`.
+    /// Start a new vault epoch. Requires `--key`. A token cannot do this,
+    /// and `GEODE_TOKEN` is not a substitute.
     ///
     /// `epoch += 1`; remaining recipients wrap the new EK.
     /// `--add-recipient PUB` wraps the new EK for an extra X25519 `.gpub`.

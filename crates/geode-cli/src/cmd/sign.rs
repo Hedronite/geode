@@ -42,19 +42,17 @@ use crate::cmd::{self, OutMode};
 /// verifier, and where the private key lives; claims nothing about
 /// other tooling or image signing.
 const SIGN_LONG_ABOUT: &str = "\
-Ed25519 signing (SPEC-v033 G1): two sub-verbs, one unlocked identity \
-file.
+Ed25519 signing from the unlocked identity file.
 
-`geode sign pub` prints the identity public key as SPKI PEM. \
-`geode sign blob` signs the raw bytes of a file (Ed25519, no prehash).
+`geode sign pub` prints the public key as PEM. \
+`geode sign blob` signs the raw bytes of a file (no prehash).
 
-Verification is standard `cosign verify-blob --key pub.pem --signature \
-sig`; cosign reads the PEM and the base64 signature exactly as Geode \
-writes them.
+Check a signature with `cosign verify-blob --key pub.pem --signature \
+sig`. cosign reads the PEM and the base64 signature as Geode writes them.
 
-The private key stays in Geode: it is unlocked from the identity file, \
-used in memory, and never exported. No key bytes appear in this help \
-or in any command output.";
+The private key stays in the identity file. It is unlocked in memory \
+and never exported. This help does not print key bytes.
+";
 
 #[derive(Args, Debug)]
 #[command(after_help = SIGN_LONG_ABOUT)]

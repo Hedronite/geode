@@ -30,6 +30,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-10-15
+
+### Changed
+
+- Command help describes what each command does. Internal design notes are no longer in the help text.
+
 ## [1.2.0] — 2026-10-15
 
 Compatible 1.x minor. Foundry pack **v034** (keyring custody and inject-only exec). No format change. `GDE1` objects written by 1.0.0, 1.0.1, and 1.1.0 remain readable. Suite `0x01` stays the suite. Existing custody verbs, exit codes, and MCP tools `geode_list` / `geode_read` / `geode_write` for a token 1.1.0 already accepts are unchanged. A `Read` token still defaults `geode_read` to `text`.
@@ -241,7 +247,8 @@ First release. Conformance profile **`core`** ([[foundry/geode/geode-spec-0.0.0/
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/Hedronite/geode/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/Hedronite/geode/compare/v1.2.1...HEAD
+[1.2.1]: https://github.com/Hedronite/geode/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Hedronite/geode/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Hedronite/geode/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/Hedronite/geode/compare/v1.0.0...v1.0.1
