@@ -51,6 +51,22 @@ impl ReadMode {
     }
 }
 
+/// Default `geode_read` mode for `ops`.
+///
+/// A token with `Read` stays on `text`. A token with `Inject` and without
+/// `Read` uses `hash`. Any other token stays on `text`, which `read` then
+/// denies.
+#[must_use]
+pub fn default_read_mode(ops: &[Op]) -> ReadMode {
+    if ops.contains(&Op::Read) {
+        ReadMode::Text
+    } else if ops.contains(&Op::Inject) {
+        ReadMode::Hash
+    } else {
+        ReadMode::Text
+    }
+}
+
 /// One listed entry (06-agent-plane 3 `geode_list`).
 #[derive(Clone, Debug)]
 pub struct ListedEntry {
@@ -242,6 +258,34 @@ fn normalize_strict(path: &str) -> Result<String> {
 /// Returns `Ok(())` if both hold. Op missing -> [`Error::PolicyDeny`].
 /// Prefix miss -> [`Error::PolicyDeny`] when `leak_denies`, else
 /// [`Error::Io`](`std::io::ErrorKind::NotFound`) (06 §6.4, default off).
+/// `text` and `hex` require `Read`. `Inject` without `Read` is
+/// `plaintext_denied` and returns no body. `hash` requires `Read` or
+/// `Inject`; a list-only token is [`Error::PolicyDeny`].
+fn authorize_read(token: &Token, mode: ReadMode, norm_path: &str, leak_denies: bool) -> Result<()> {
+    let has_read = token.allow_ops.contains(&Op::Read);
+    let has_inject = token.allow_ops.contains(&Op::Inject);
+    match mode {
+        ReadMode::Text | ReadMode::Hex => {
+            if has_read {
+                authorize(token, Op::Read, norm_path, leak_denies)
+            } else if has_inject {
+                Err(Error::Format("plaintext_denied".into()))
+            } else {
+                Err(Error::PolicyDeny)
+            }
+        }
+        ReadMode::Hash => {
+            if has_read {
+                authorize(token, Op::Read, norm_path, leak_denies)
+            } else if has_inject {
+                authorize(token, Op::Inject, norm_path, leak_denies)
+            } else {
+                Err(Error::PolicyDeny)
+            }
+        }
+    }
+}
+
 fn authorize(token: &Token, op: Op, norm_path: &str, leak_denies: bool) -> Result<()> {
     if !token.allow_ops.contains(&op) {
         return Err(Error::PolicyDeny);
@@ -400,7 +444,7 @@ pub fn read(
 ) -> Result<ReadOutcome> {
     let token = token::inspect(sealed_token, ek, now)?;
     let norm = normalize_strict(path)?;
-    authorize(&token, Op::Read, &norm, leak_denies)?;
+    authorize_read(&token, mode, &norm, leak_denies)?;
     let manifest = load_manifest(ek, &token, vault_root)?;
     let entry = manifest
         .entries
@@ -578,6 +622,29 @@ mod tests {
             allow_ops: vec![Op::List, Op::Read, Op::Write],
             allow_prefix: vec!["scratch/".into(), "out/".into()],
             max_bytes,
+            allow_cmds: Vec::new(),
+            allow_hosts: Vec::new(),
+            peer_uid: None,
+            redact: crate::token::RedactLevel::Strict,
+        };
+        issue(&t, &ek()).unwrap()
+    }
+
+    fn sealed_ops(ops: Vec<Op>) -> crate::token::SealedToken {
+        let t = Token {
+            token_id: TokenId([0xc3; 16]),
+            vault_id: VaultId([0x01; 16]),
+            epoch: Epoch(1),
+            principal_id: crate::policy::PrincipalId("agent:facet-coder-3".into()),
+            not_before: NOW,
+            not_after: NOW + 900,
+            allow_ops: ops,
+            allow_prefix: vec!["scratch/".into()],
+            max_bytes: 1 << 20,
+            allow_cmds: Vec::new(),
+            allow_hosts: Vec::new(),
+            peer_uid: None,
+            redact: crate::token::RedactLevel::Strict,
         };
         issue(&t, &ek()).unwrap()
     }
@@ -1011,6 +1078,10 @@ mod tests {
             allow_ops: vec![Op::List, Op::Read],
             allow_prefix: vec!["scratch/".into()],
             max_bytes: 1 << 20,
+            allow_cmds: Vec::new(),
+            allow_hosts: Vec::new(),
+            peer_uid: None,
+            redact: crate::token::RedactLevel::Strict,
         };
         let tok = issue(&t, &ek()).unwrap();
         let r = write(&ek(), &root, &tok, NOW, "scratch/x", b"x", false);
@@ -1115,5 +1186,95 @@ mod tests {
         let s = format!("{}", r.unwrap_err());
         assert!(!s.contains("ISK"), "error leaks ISK: {s}");
         assert!(!s.contains('\u{99}'), "error leaks key bytes: {s}");
+    }
+
+    #[test]
+    fn read_mode_defaults_follow_the_grant() {
+        assert_eq!(default_read_mode(&[Op::Read]), ReadMode::Text);
+        assert_eq!(
+            default_read_mode(&[Op::List, Op::Read, Op::Write]),
+            ReadMode::Text
+        );
+        assert_eq!(default_read_mode(&[Op::Inject]), ReadMode::Hash);
+        assert_eq!(default_read_mode(&[Op::List, Op::Inject]), ReadMode::Hash);
+        assert_eq!(default_read_mode(&[Op::List]), ReadMode::Text);
+        assert_ne!(default_read_mode(&[Op::Read]), ReadMode::Hash);
+    }
+
+    #[test]
+    fn inject_only_text_is_plaintext_denied_and_hash_has_no_body() {
+        let d = setup_vault(&[("scratch/plan.md", b"sk-dummy-0000QA")]);
+        let root = d.path().join("v.geode");
+        let tok = sealed_ops(vec![Op::List, Op::Inject]);
+        let denied = read(
+            &ek(),
+            &root,
+            &tok,
+            NOW,
+            "scratch/plan.md",
+            None,
+            ReadMode::Text,
+            false,
+        );
+        assert!(
+            matches!(denied, Err(Error::Format(ref m)) if m == "plaintext_denied"),
+            "got {denied:?}"
+        );
+        let hex_denied = read(
+            &ek(),
+            &root,
+            &tok,
+            NOW,
+            "scratch/plan.md",
+            None,
+            ReadMode::Hex,
+            false,
+        );
+        assert!(
+            matches!(hex_denied, Err(Error::Format(ref m)) if m == "plaintext_denied"),
+            "got {hex_denied:?}"
+        );
+        let hashed = read(
+            &ek(),
+            &root,
+            &tok,
+            NOW,
+            "scratch/plan.md",
+            None,
+            ReadMode::Hash,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(hashed.body, ReadBody::None));
+        assert!(!format!("{hashed:?}").contains("sk-dummy-0000QA"));
+    }
+
+    #[test]
+    fn list_only_hash_and_old_token_without_read_stay_policy_deny() {
+        let d = setup_vault(&[("scratch/plan.md", b"x")]);
+        let root = d.path().join("v.geode");
+        let list_only = sealed_ops(vec![Op::List]);
+        let hash = read(
+            &ek(),
+            &root,
+            &list_only,
+            NOW,
+            "scratch/plan.md",
+            None,
+            ReadMode::Hash,
+            false,
+        );
+        assert!(matches!(hash, Err(Error::PolicyDeny)), "got {hash:?}");
+        let text = read(
+            &ek(),
+            &root,
+            &list_only,
+            NOW,
+            "scratch/plan.md",
+            None,
+            ReadMode::Text,
+            false,
+        );
+        assert!(matches!(text, Err(Error::PolicyDeny)), "got {text:?}");
     }
 }

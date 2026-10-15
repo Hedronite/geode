@@ -34,6 +34,25 @@ const TOKEN_AD: &[u8] = b"geode/v1/token";
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TokenId(pub [u8; 16]);
 
+/// One absolute command allowed to receive an injected secret.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CmdRule {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args_prefix: Vec<String>,
+}
+
+/// How a redactor names a hit. Absent JSON means [`RedactLevel::Strict`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RedactLevel {
+    #[default]
+    Strict,
+    Hidden,
+}
+
 /// Unwrap token claims (02-cryptography 9).
 ///
 /// A token is **not the ISK** and never carries key material; it only narrows
@@ -49,6 +68,28 @@ pub struct Token {
     pub allow_ops: Vec<Op>,
     pub allow_prefix: Vec<String>,
     pub max_bytes: u64,
+    /// Empty unless the token lists commands. An empty list denies inject.
+    #[serde(default)]
+    pub allow_cmds: Vec<CmdRule>,
+    /// Empty means no host restriction is claimed.
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
+    /// Absent unless the token is bound to a socket peer uid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_uid: Option<u32>,
+    /// Absent JSON decodes as [`RedactLevel::Strict`].
+    #[serde(default)]
+    pub redact: RedactLevel,
+}
+
+impl Token {
+    /// Inject requires `Op::Inject` and a non-empty `allow_cmds`.
+    ///
+    /// An old token has neither, so inject is denied.
+    #[must_use]
+    pub fn allows_inject(&self) -> bool {
+        self.allow_ops.contains(&Op::Inject) && !self.allow_cmds.is_empty()
+    }
 }
 
 /// `TokenKey = BLAKE3-KDF(EK, "geode/v1/token", token_id)` (02-cryptography 9).
@@ -270,6 +311,10 @@ mod tests {
             allow_ops: vec![Op::List, Op::Read, Op::Write],
             allow_prefix: vec!["scratch/".into(), "out/".into()],
             max_bytes: 1 << 20,
+            allow_cmds: Vec::new(),
+            allow_hosts: Vec::new(),
+            peer_uid: None,
+            redact: RedactLevel::Strict,
         }
         .with_ttl(ttl_secs)
     }
@@ -419,6 +464,50 @@ mod tests {
         assert!(matches!(r, Err(Error::Format(_))), "got {r:?}");
     }
 
+    #[test]
+    fn old_token_json_defaults_deny_inject_and_keep_suite() {
+        let t = token(1_700_000_000, DEFAULT_TTL_SECS);
+        let mut value = serde_json::to_value(&t).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("allow_cmds");
+        obj.remove("allow_hosts");
+        obj.remove("peer_uid");
+        obj.remove("redact");
+        let old: Token = serde_json::from_value(value).unwrap();
+        assert!(old.allow_cmds.is_empty());
+        assert!(old.allow_hosts.is_empty());
+        assert!(old.peer_uid.is_none());
+        assert_eq!(old.redact, RedactLevel::Strict);
+        assert!(!old.allow_ops.contains(&Op::Inject));
+        assert!(!old.allows_inject());
+        let sealed = issue(&old, &ek()).unwrap();
+        assert_eq!(sealed[4], SUITE_0X01);
+        let opened = inspect(&sealed, &ek(), 1_700_000_000).unwrap();
+        assert!(!opened.allows_inject());
+    }
+
+    #[test]
+    fn inject_without_allow_cmds_is_denied() {
+        let mut t = token(1_700_000_000, DEFAULT_TTL_SECS);
+        t.allow_ops = vec![Op::Inject];
+        assert!(!t.allows_inject());
+        t.allow_cmds.push(CmdRule {
+            path: "/bin/true".into(),
+            sha256: None,
+            args_prefix: Vec::new(),
+        });
+        assert!(t.allows_inject());
+        assert!(!t.allow_ops.contains(&Op::Read));
+    }
+
+    #[test]
+    fn read_does_not_grant_inject() {
+        let t = token(1_700_000_000, DEFAULT_TTL_SECS);
+        assert!(t.allow_ops.contains(&Op::Read));
+        assert!(!t.allow_ops.contains(&Op::Inject));
+        assert!(!t.allows_inject());
+    }
+
     use proptest::prelude::*;
     fn tw(nb: i64, na: i64) -> Token {
         Token {
@@ -431,6 +520,10 @@ mod tests {
             allow_ops: vec![Op::Read],
             allow_prefix: vec!["scratch/".into()],
             max_bytes: 4096,
+            allow_cmds: Vec::new(),
+            allow_hosts: Vec::new(),
+            peer_uid: None,
+            redact: RedactLevel::Strict,
         }
     }
     proptest! {
