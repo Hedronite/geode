@@ -33,7 +33,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use geode_grotto::agent_ops::{self, ReadBody, ReadMode};
 use geode_grotto::kdf::EpochKey;
 use geode_grotto::policy::{Op, PrincipalId};
-use geode_grotto::token::{self, Token, TokenId};
+use geode_grotto::token::{self, RedactLevel, Token, TokenId};
 use geode_grotto::{Error, Result};
 
 use crate::{cmd, AgentArgs, AgentCmd, GlobalArgs, OutMode, TokenCmd, TokenSource};
@@ -256,6 +256,10 @@ fn issue(
         allow_ops: ops,
         allow_prefix: prefixes,
         max_bytes,
+        allow_cmds: Vec::new(),
+        allow_hosts: Vec::new(),
+        peer_uid: None,
+        redact: RedactLevel::Strict,
     };
     // 10-policy 2.5: a token may only narrow policy, never widen — issue
     // refuses a grant policy would deny (`Error::PolicyDeny`, exit 3).

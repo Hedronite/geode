@@ -45,6 +45,7 @@ impl PrincipalId {
 pub enum Op {
     List,
     Read,
+    Inject,
     Write,
     Mount,
     Verify,
@@ -156,6 +157,7 @@ pub fn default_policy(vault_id: &str) -> Policy {
             ops: vec![
                 Op::List,
                 Op::Read,
+                Op::Inject,
                 Op::Write,
                 Op::Mount,
                 Op::Verify,
@@ -337,6 +339,10 @@ mod tests {
             allow_ops: ops.to_vec(),
             allow_prefix: prefixes.iter().map(|s| (*s).to_string()).collect(),
             max_bytes,
+            allow_cmds: Vec::new(),
+            allow_hosts: Vec::new(),
+            peer_uid: None,
+            redact: crate::token::RedactLevel::Strict,
         }
     }
 
@@ -573,6 +579,59 @@ mod tests {
         let s = format!("{}", r.unwrap_err());
         assert!(!s.contains("ISK"), "error leaks ISK: {s}");
         assert!(!s.contains('\u{7}'), "error leaks key bytes: {s}");
+    }
+
+    #[test]
+    fn inject_and_read_do_not_imply_each_other() {
+        let read_only = agent_policy(&[Op::Read], &["scratch/"], None);
+        let who = PrincipalId("agent:facet-coder-3".into());
+        assert_eq!(
+            evaluate(&read_only, &who, Op::Read, "scratch/a").unwrap(),
+            Verdict::Allow
+        );
+        assert_eq!(
+            evaluate(&read_only, &who, Op::Inject, "scratch/a").unwrap(),
+            Verdict::Deny
+        );
+        let inject_only = agent_policy(&[Op::Inject], &["scratch/"], None);
+        assert_eq!(
+            evaluate(&inject_only, &who, Op::Inject, "scratch/a").unwrap(),
+            Verdict::Allow
+        );
+        assert_eq!(
+            evaluate(&inject_only, &who, Op::Read, "scratch/a").unwrap(),
+            Verdict::Deny
+        );
+    }
+
+    #[test]
+    fn default_policy_grants_inject_to_human_local_only() {
+        let policy = default_policy("v");
+        assert_eq!(policy.principals.len(), 1);
+        assert_eq!(policy.principals[0].id.0, "human:local");
+        assert!(policy.principals[0].ops.contains(&Op::Inject));
+        assert!(policy.principals.iter().all(|g| g.id.0 == "human:local"));
+        let mut human = agent_token(&[Op::Inject], &[""], 1 << 20);
+        human.principal_id = PrincipalId("human:local".into());
+        assert!(token_narrows_policy(&human, &policy).is_ok());
+        let agent = agent_token(&[Op::Inject], &["scratch/"], 1 << 20);
+        assert!(matches!(
+            token_narrows_policy(&agent, &policy),
+            Err(Error::PolicyDeny)
+        ));
+    }
+
+    #[test]
+    fn sealed_grant_is_not_widened_for_inject() {
+        let policy = agent_policy(&[Op::List, Op::Read], &["scratch/"], None);
+        let inject = agent_token(&[Op::Inject], &["scratch/"], 1 << 20);
+        assert!(matches!(
+            token_narrows_policy(&inject, &policy),
+            Err(Error::PolicyDeny)
+        ));
+        let read = agent_token(&[Op::Read], &["scratch/"], 1 << 20);
+        assert!(token_narrows_policy(&read, &policy).is_ok());
+        assert!(!read.allow_ops.contains(&Op::Inject));
     }
 
     use proptest::prelude::*;
