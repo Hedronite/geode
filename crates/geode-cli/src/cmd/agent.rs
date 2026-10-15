@@ -1,8 +1,8 @@
 //! `geode agent` — agent plane verbs (06-agent-plane). Thin adapter over
 //! `geode_grotto::token` (G2b, v0.2.1) and `geode_grotto::agent_ops`
 //! (G1, v0.2.2): the CLI authenticates the vault (`load_vault`), resolves
-//! the caller's sealed token (`--token` on agent verbs only, else
-//! `GEODE_TOKEN`), and delegates every authorization decision to core.
+//! the caller's sealed token (`--token-file`/`--token-fd`/`--token` on
+//! agent verbs only, else `GEODE_TOKEN`), and delegates every authorization decision to core.
 //! The clap shape is frontend's chrome (`crate::AgentArgs`); this module
 //! is the behavior.
 //!
@@ -36,7 +36,7 @@ use geode_grotto::policy::{Op, PrincipalId};
 use geode_grotto::token::{self, Token, TokenId};
 use geode_grotto::{Error, Result};
 
-use crate::{cmd, AgentArgs, AgentCmd, GlobalArgs, OutMode, TokenCmd};
+use crate::{cmd, AgentArgs, AgentCmd, GlobalArgs, OutMode, TokenCmd, TokenSource};
 
 /// Default per-token byte cap when `--max-bytes` is omitted (06-agent-plane
 /// 4 read discipline: agents are steered to hash large artifacts).
@@ -106,14 +106,14 @@ pub fn run(args: &AgentArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
             vault,
             prefix,
             token,
-        } => list(vault, prefix.as_deref(), token.as_deref(), global, out),
-        AgentCmd::Read { vault, path, token } => read(vault, path, token.as_deref(), global, out),
-        AgentCmd::Write { vault, path, token } => write(vault, path, token.as_deref(), global, out),
+        } => list(vault, prefix.as_deref(), token, global, out),
+        AgentCmd::Read { vault, path, token } => read(vault, path, token, global, out),
+        AgentCmd::Write { vault, path, token } => write(vault, path, token, global, out),
         AgentCmd::Serve {
             stdio,
             socket,
             token,
-        } => serve(*stdio, socket.as_deref(), token.as_deref(), global),
+        } => serve(*stdio, socket.as_deref(), token, global),
         AgentCmd::Scope {
             path,
             op,
@@ -399,22 +399,114 @@ fn inspect(
 // G1 (v0.2.2): token-gated list / read / write + stdio MCP server.
 // ---------------------------------------------------------------------
 
-/// Resolve the caller's sealed token for the agent verbs: `--token` (agent
-/// verbs only — never a global flag, so it cannot reach `geode tui`,
-/// 14-tui 1.4), else `GEODE_TOKEN` (06-agent-plane 3). Stdin is NOT a
-/// token source here: `write` owns stdin for the body. The hex-armored
-/// form is accepted because env vars cannot carry binary NULs.
-fn resolve_agent_token(flag: Option<&str>) -> Result<Vec<u8>> {
-    let raw = flag
-        .map(str::to_owned)
-        .or_else(|| std::env::var_os("GEODE_TOKEN").map(|v| v.to_string_lossy().into_owned()))
-        .filter(|t| !t.trim().is_empty())
-        .ok_or_else(|| {
-            Error::Format(
-                "missing token: pass --token or set GEODE_TOKEN (06-agent-plane 3)".into(),
-            )
-        })?;
-    normalize_sealed(raw.as_bytes())
+/// Resolve the caller's sealed token for the agent verbs (SPEC-v034 G2):
+/// `--token-file PATH` (0600, caller-owned), `--token-fd N`, raw `--token`
+/// (warns once, still works), else `GEODE_TOKEN` (06-agent-plane 3). These
+/// flags live on the agent verbs only — never global, so they cannot reach
+/// `geode tui` (14-tui 1.4). Stdin is NOT a token source here: `write` owns
+/// stdin for the body. The hex-armored form is accepted because env vars
+/// cannot carry binary NULs. `--passphrase-fd` is loaded here too, before
+/// any key unlock.
+fn resolve_agent_token(src: &TokenSource) -> Result<Vec<u8>> {
+    if let Some(fd) = src.passphrase_fd {
+        crate::output::load_passphrase_fd(fd).map_err(Error::Io)?;
+    }
+    let raw: Vec<u8> = if let Some(path) = &src.token_file {
+        read_token_file(path)?
+    } else if let Some(fd) = src.token_fd {
+        read_token_fd(fd)?
+    } else if let Some(flag) = &src.token {
+        crate::output::warn_token_argv();
+        flag.as_bytes().to_vec()
+    } else {
+        std::env::var_os("GEODE_TOKEN")
+            .map(|v| v.to_string_lossy().into_owned().into_bytes())
+            .unwrap_or_default()
+    };
+    if raw.iter().all(u8::is_ascii_whitespace) {
+        return Err(Error::Format(
+            "missing token: pass --token-file, --token-fd, or set GEODE_TOKEN \
+             (06-agent-plane 3)"
+                .into(),
+        ));
+    }
+    normalize_sealed(&raw)
+}
+
+/// Upper bound on a token read from a file or fd. A sealed token is far
+/// smaller; this only stops an accidental huge read.
+const TOKEN_READ_CAP: u64 = 64 * 1024;
+
+/// `--token-file PATH`: the file must be a regular file, mode exactly 0600,
+/// and owned by the caller, or exit 1. Mode and owner come from the opened
+/// handle, so a swap after the check cannot change what is read. The error
+/// names the path, the mode, and the uids — never the token bytes.
+fn read_token_file(path: &Path) -> Result<Vec<u8>> {
+    use std::os::unix::fs::MetadataExt;
+    let f = std::fs::File::open(path)
+        .map_err(|e| Error::Format(format!("token file {}: cannot open: {e}", path.display())))?;
+    let md = f.metadata().map_err(Error::Io)?;
+    let mode = md.mode() & 0o7777;
+    let me = caller_uid()?;
+    if !md.is_file() || mode != 0o600 || md.uid() != me {
+        return Err(Error::Format(format!(
+            "token file {} must be a regular file with mode 0600 owned by uid {me} \
+             (found mode 0o{mode:03o}, owner uid {})",
+            path.display(),
+            md.uid()
+        )));
+    }
+    let mut buf = Vec::new();
+    f.take(TOKEN_READ_CAP)
+        .read_to_end(&mut buf)
+        .map_err(Error::Io)?;
+    Ok(buf)
+}
+
+/// `--token-fd N`: read the token from an fd the caller opened, via
+/// `/dev/fd/N` (no `unsafe`). The error names the fd, never the bytes.
+fn read_token_fd(fd: u32) -> Result<Vec<u8>> {
+    let f = std::fs::File::open(format!("/dev/fd/{fd}"))
+        .map_err(|e| Error::Format(format!("--token-fd {fd}: cannot open: {e}")))?;
+    let mut buf = Vec::new();
+    f.take(TOKEN_READ_CAP)
+        .read_to_end(&mut buf)
+        .map_err(Error::Io)?;
+    Ok(buf)
+}
+
+/// The caller's effective uid without `unsafe` (forbidden workspace-wide).
+/// Linux reads the `Uid:` line of `/proc/self/status`, which stays readable
+/// when the process is non-dumpable. Elsewhere, a fresh probe file in the
+/// temp dir is created, its owner read, and the file removed.
+fn caller_uid() -> Result<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").map_err(Error::Io)?;
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("Uid:"))
+            .and_then(|rest| rest.split_whitespace().nth(1))
+            .and_then(|euid| euid.parse().ok())
+            .ok_or_else(|| Error::Format("cannot read caller uid from /proc/self/status".into()))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let probe = std::env::temp_dir().join(format!(".geode-uid-{}-{nanos}", std::process::id()));
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .map_err(Error::Io)?;
+        let uid = f.metadata().map(|m| m.uid());
+        drop(f);
+        let _ = std::fs::remove_file(&probe);
+        uid.map_err(Error::Io)
+    }
 }
 
 /// Authenticate a vault for its EK. The ISK is dropped immediately after;
@@ -443,11 +535,11 @@ fn default_prefix(sealed: &[u8], ek: &EpochKey, now: i64) -> Result<String> {
 fn list(
     vault: &Path,
     prefix: Option<&str>,
-    token_flag: Option<&str>,
+    token_src: &TokenSource,
     global: &GlobalArgs,
     out: OutMode,
 ) -> Result<()> {
-    let sealed = resolve_agent_token(token_flag)?;
+    let sealed = resolve_agent_token(token_src)?;
     let ctx = vault_ctx(vault, global)?;
     let now = now_secs();
     let owned: String;
@@ -531,11 +623,11 @@ fn read_doc(outcome: &agent_ops::ReadOutcome, mode: ReadMode) -> serde_json::Val
 fn read(
     vault: &Path,
     path: &str,
-    token_flag: Option<&str>,
+    token_src: &TokenSource,
     global: &GlobalArgs,
     out: OutMode,
 ) -> Result<()> {
-    let sealed = resolve_agent_token(token_flag)?;
+    let sealed = resolve_agent_token(token_src)?;
     let ctx = vault_ctx(vault, global)?;
     let outcome = agent_ops::read(
         &ctx.ek,
@@ -580,11 +672,11 @@ fn read(
 fn write(
     vault: &Path,
     path: &str,
-    token_flag: Option<&str>,
+    token_src: &TokenSource,
     global: &GlobalArgs,
     out: OutMode,
 ) -> Result<()> {
-    let sealed = resolve_agent_token(token_flag)?;
+    let sealed = resolve_agent_token(token_src)?;
     let ctx = vault_ctx(vault, global)?;
     let now = now_secs();
     let claims = token::inspect(&sealed, &ctx.ek, now)?;
@@ -1265,17 +1357,17 @@ fn write_frame(stdout: &mut impl std::io::Write, frame: &serde_json::Value) -> R
 fn serve(
     stdio: bool,
     socket: Option<&Path>,
-    token_flag: Option<&str>,
+    token_src: &TokenSource,
     global: &GlobalArgs,
 ) -> Result<()> {
     match (stdio, socket) {
         (false, None) | (true, Some(_)) => Err(Error::NotImplemented),
         (true, None) => {
-            let sealed = resolve_agent_token(token_flag)?;
+            let sealed = resolve_agent_token(token_src)?;
             StdioServer::new(global, sealed).run_loop()
         }
         (false, Some(path)) => {
-            let sealed = resolve_agent_token(token_flag)?;
+            let sealed = resolve_agent_token(token_src)?;
             serve_socket(global, sealed, path)
         }
     }

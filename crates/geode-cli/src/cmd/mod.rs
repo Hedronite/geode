@@ -131,9 +131,13 @@ pub fn load_isk(path: &Path) -> Result<IdentitySecret> {
     }
 }
 
-/// Passphrase for wrapped keys: `GEODE_PASSPHRASE` when set (the startup
-/// warning already fired in `main`), else the no-echo prompt.
+/// Passphrase for wrapped keys: `--passphrase-fd` when given (SPEC-v034
+/// G2), else `GEODE_PASSPHRASE` when set (the startup warning already fired
+/// in `main`), else the no-echo prompt.
 fn passphrase() -> Result<zeroize::Zeroizing<String>> {
+    if let Some(p) = crate::output::fd_passphrase() {
+        return Ok(p);
+    }
     if let Some(p) = std::env::var_os("GEODE_PASSPHRASE") {
         return Ok(zeroize::Zeroizing::new(p.to_string_lossy().into_owned()));
     }

@@ -104,19 +104,69 @@ pub fn tui_unavailable() -> ! {
     std::process::exit(exit::USAGE);
 }
 
-/// `GEODE_PASSPHRASE` warning (SPEC §5.5, 05-cli §1). Printed to stderr once
-/// when the env var is set. The env var is a CI/script escape hatch, not the
-/// happy path — it may be visible in process listings.
+/// `GEODE_PASSPHRASE` warning (SPEC §5.5, 05-cli §1; upgraded SPEC-v034
+/// G2). Printed to stderr once when the env var is set. Existing verbs
+/// still accept the variable; it is deprecated, not refused.
 pub fn warn_passphrase_env() {
     if std::env::var_os("GEODE_PASSPHRASE").is_some() {
         let mut err = std::io::stderr().lock();
-        let _ = writeln!(
-            err,
-            "geode: warning: GEODE_PASSPHRASE is set. Passphrase-from-env is a \
-             CI/script escape hatch and may be visible in process listings; \
-             prefer `--passphrase-fd` or the no-echo prompt."
-        );
+        let _ = writeln!(err, "{}", passphrase_env_warning());
     }
+}
+
+/// The upgraded `GEODE_PASSPHRASE` warning text (SPEC-v034 G2). Lives here,
+/// not in TUI source. Names no passphrase bytes.
+#[must_use]
+pub fn passphrase_env_warning() -> &'static str {
+    "geode: warning: GEODE_PASSPHRASE is deprecated and will be removed in the \
+     next major. It may be visible in process listings and inherited by child \
+     processes; use `--passphrase-fd N` or the no-echo prompt."
+}
+
+/// Raw `--token` on an existing agent verb (SPEC-v034 G2). Still works; warns
+/// once per invocation. Never echoes the value.
+pub fn warn_token_argv() {
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(err, "{}", token_argv_warning());
+}
+
+/// The raw `--token` warning text. Names the flag, never the value.
+#[must_use]
+pub fn token_argv_warning() -> &'static str {
+    "geode: warning: --token on argv is visible in ps/history; use --token-file"
+}
+
+/// Passphrase read once from `--passphrase-fd` (SPEC-v034 G2). Held for the
+/// process so the wrapped-key unlock can use it instead of
+/// `GEODE_PASSPHRASE` or the prompt.
+static FD_PASSPHRASE: std::sync::OnceLock<zeroize::Zeroizing<String>> = std::sync::OnceLock::new();
+
+/// Read the first line of open file descriptor `fd` as the passphrase. The
+/// fd is opened as `/dev/fd/N` (no `unsafe`). A trailing `\n` / `\r\n` is
+/// stripped. The error names the fd, never the bytes.
+pub fn load_passphrase_fd(fd: u32) -> std::io::Result<()> {
+    use std::io::Read as _;
+    let f = std::fs::File::open(format!("/dev/fd/{fd}")).map_err(|e| {
+        std::io::Error::new(e.kind(), format!("--passphrase-fd {fd}: cannot open: {e}"))
+    })?;
+    let mut buf = zeroize::Zeroizing::new(Vec::new());
+    f.take(64 * 1024).read_to_end(&mut buf)?;
+    let end = buf.iter().position(|&b| b == b'\n').unwrap_or(buf.len());
+    let line = buf[..end].strip_suffix(b"\r").unwrap_or(&buf[..end]);
+    let pass = std::str::from_utf8(line).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("--passphrase-fd {fd}: passphrase is not UTF-8"),
+        )
+    })?;
+    let _ = FD_PASSPHRASE.set(zeroize::Zeroizing::new(pass.to_owned()));
+    Ok(())
+}
+
+/// The `--passphrase-fd` passphrase, when one was loaded.
+#[must_use]
+pub fn fd_passphrase() -> Option<zeroize::Zeroizing<String>> {
+    FD_PASSPHRASE.get().cloned()
 }
 
 /// Read a passphrase from the terminal with no echo (G4b, 05-cli §1).
@@ -227,6 +277,20 @@ mod tests {
         assert!(s.contains("exit 2"));
         assert!(s.contains("authentication"));
         assert!(!s.contains("ISK"));
+    }
+
+    #[test]
+    fn passphrase_warning_is_upgraded() {
+        let w = passphrase_env_warning();
+        assert!(w.contains("GEODE_PASSPHRASE") && w.contains("deprecated"));
+        assert!(w.contains("--passphrase-fd"));
+    }
+
+    #[test]
+    fn token_warning_names_flag_only() {
+        let w = token_argv_warning();
+        assert!(w.contains("--token") && w.contains("--token-file"));
+        assert!(!w.contains("GTOK"));
     }
 
     #[test]
