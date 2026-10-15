@@ -54,6 +54,8 @@ ed25519-dalek = { version = "2", features = ["zeroize"] }
 # a 0600 file via keyring::store_secret_file.
 keyring = "4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+# G6 (v034): named redaction for `inject::plan` and its output collector.
+geode-redact = { version = "1.1.0", path = "../geode-redact" }
 
 [dev-dependencies]
 tempfile = "3"

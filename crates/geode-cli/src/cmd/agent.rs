@@ -255,7 +255,7 @@ struct InjectClaims {
 
 /// Validate one command path: absolute, equal to its canonical form, and a
 /// regular file with an execute bit. Usage error (exit 1) otherwise.
-fn canonical_cmd(path: &str) -> Result<String> {
+pub(crate) fn canonical_cmd(path: &str) -> Result<String> {
     use std::os::unix::fs::PermissionsExt;
     let p = Path::new(path);
     if !p.is_absolute() {

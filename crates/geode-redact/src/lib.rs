@@ -12,6 +12,9 @@ use aho_corasick::{AhoCorasick, MatchKind};
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use base64::Engine as _;
 
+mod named;
+pub use named::{NamedIndexError, NamedRedactor, NamedStream, Placeholder};
+
 const MIN_VALUE: usize = 8;
 const REPLACEMENT: &[u8] = b"[REDACTED]";
 /// Chars of a base64 group that still depend on bytes before the secret.
@@ -179,29 +182,37 @@ fn push_needle(needles: &mut Vec<Vec<u8>>, seen: &mut BTreeSet<Vec<u8>>, needle:
 }
 
 fn index_value(needles: &mut Vec<Vec<u8>>, seen: &mut BTreeSet<Vec<u8>>, value: &[u8]) {
-    push_if_long(needles, seen, value);
-    push_if_long(needles, seen, &hex_encode(value, false));
-    push_if_long(needles, seen, &hex_encode(value, true));
-    push_if_long(needles, seen, &percent_encode(value));
-    if let Some(json) = json_canonical(value) {
-        push_if_long(needles, seen, &json);
-    }
-    for url_safe in [false, true] {
-        let (padded, unpadded) = whole_b64(value, url_safe);
-        push_if_long(needles, seen, &padded);
-        push_if_long(needles, seen, &unpadded);
-        for align in 0..3 {
-            if let Some(frag) = stable_b64(value, align, url_safe) {
-                push_if_long(needles, seen, &frag);
-            }
-        }
+    for needle in value_needles(value) {
+        push_needle(needles, seen, &needle);
     }
 }
 
-fn push_if_long(needles: &mut Vec<Vec<u8>>, seen: &mut BTreeSet<Vec<u8>>, needle: &[u8]) {
-    if needle.len() >= MIN_VALUE {
-        push_needle(needles, seen, needle);
+/// Every v1 encoding of `value` that is at least 8 bytes long.
+fn value_needles(value: &[u8]) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let mut add = |needle: &[u8]| {
+        if needle.len() >= MIN_VALUE {
+            out.push(needle.to_vec());
+        }
+    };
+    add(value);
+    add(&hex_encode(value, false));
+    add(&hex_encode(value, true));
+    add(&percent_encode(value));
+    if let Some(json) = json_canonical(value) {
+        add(&json);
     }
+    for url_safe in [false, true] {
+        let (padded, unpadded) = whole_b64(value, url_safe);
+        add(&padded);
+        add(&unpadded);
+        for align in 0..3 {
+            if let Some(frag) = stable_b64(value, align, url_safe) {
+                add(&frag);
+            }
+        }
+    }
+    out
 }
 
 fn hex_encode(data: &[u8], upper: bool) -> Vec<u8> {

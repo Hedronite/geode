@@ -162,6 +162,12 @@ enum Commands {
     /// token. Help chrome is frontend-owned (G2c); dispatch is wired by
     /// fullstack G1 (PR #20) to `cmd::agent::run`.
     Agent(AgentArgs),
+    /// Run a command with vault secrets injected into its env (SPEC-v034
+    /// G6). Local mode: `human:local`, key required, no token. `--` is
+    /// required before the command. Child output is redacted.
+    Run(cmd::run::RunArgs),
+    /// Audit log: verify the append-only hash chain.
+    Audit(cmd::audit::AuditArgs),
     /// Ratatui operator surface (14-tui). With the `tui` feature off
     /// (core-profile build) this prints "not available" and exits 1.
     ///
@@ -221,6 +227,8 @@ impl Commands {
             Self::Mount { .. } => "mount",
             Self::Unmount { .. } => "unmount",
             Self::Agent(_) => "agent",
+            Self::Run(_) => "run",
+            Self::Audit(_) => "audit_verify",
             Self::Tui { .. } => "tui",
         }
     }
@@ -512,6 +520,12 @@ pub enum TokenCmd {
     },
 }
 
+/// True when argv names the `run` verb and has no `--` separator.
+fn run_without_dashdash() -> bool {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    args.iter().any(|a| a == "run") && !args.iter().any(|a| a == "--")
+}
+
 fn main() {
     // G4b: warn if GEODE_PASSPHRASE is set (SPEC 5.5, 05-cli 1) - once per
     // invocation, before any passphrase prompt or verb dispatch.
@@ -524,6 +538,11 @@ fn main() {
         Ok(cli) => cli,
         Err(error) => {
             error.print().expect("error writes to stderr");
+            // SPEC-v034 G6: `geode run` requires `--`; without it clap sees
+            // the command as an unexpected argument.
+            if error.kind() == ErrorKind::UnknownArgument && run_without_dashdash() {
+                eprintln!("geode: error: no command after --");
+            }
             // SPEC-v034 G4: `--ops` stays required; the usage error names the
             // inject-only shape so an operator does not reach for `read`.
             if error.kind() == ErrorKind::MissingRequiredArgument
@@ -575,6 +594,8 @@ fn main() {
         } => cmd::mount::mount(vault, mountpoint, *read_only, *daemon, &cli.global, out),
         Commands::Unmount { mountpoint } => cmd::mount::unmount(mountpoint, &cli.global, out),
         Commands::Agent(a) => cmd::agent::run(a, &cli.global, out),
+        Commands::Run(a) => cmd::run::run(a, &cli.global, out),
+        Commands::Audit(a) => cmd::audit::run(a, out),
         // Feature on: the TUI starts (14-tui 2), wired with the vault path
         // and the global `--key` / `GEODE_KEY_FILE` identity path (G5). The
         // TUI unlocks in-process via `geode-grotto` (14-tui 3); the CLI stays

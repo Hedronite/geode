@@ -1,6 +1,6 @@
 [package]
 name = "geode-os"
-description = "Process core-dump refusal for Geode. No user-child spawn."
+description = "Process core-dump refusal and the inject child spawn for Geode."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -8,6 +8,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod agent;
+pub mod audit;
 pub mod git;
 pub mod key;
 pub mod keyring;
@@ -15,6 +16,7 @@ pub mod list;
 pub mod mount;
 pub mod open;
 pub mod policy;
+pub mod run;
 pub mod seal;
 pub mod sign;
 pub mod snapshot;
