@@ -15,6 +15,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::ident::ChildIdentity;
+
 /// Grace between SIGTERM and SIGKILL on timeout.
 const KILL_GRACE: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(20);
@@ -75,10 +77,27 @@ impl ChildOutcome {
 /// # Errors
 ///
 /// Returns the OS error when the child cannot be started. Nothing ran.
-pub fn spawn(spec: SpawnSpec, mut on_chunk: impl FnMut(Stream, &[u8])) -> io::Result<ChildOutcome> {
-    let mut cmd = Command::new(&spec.program);
-    cmd.args(&spec.args)
-        .env_clear()
+pub fn spawn(spec: SpawnSpec, on_chunk: impl FnMut(Stream, &[u8])) -> io::Result<ChildOutcome> {
+    spawn_as(spec, &ChildIdentity::Inherit, on_chunk)
+}
+
+/// [`spawn`] under a custody child identity (SPEC-v034 G7). `User` switches
+/// uid/gid in the child before exec (Linux only); `Seatbelt` wraps the
+/// program in `sandbox-exec` (macOS only). If the identity cannot be taken
+/// the child never execs and this returns the error: there is no fallback
+/// to the caller's identity.
+///
+/// # Errors
+///
+/// The OS error from start-up or the identity switch, or `Unsupported`
+/// for an identity this OS cannot take.
+pub fn spawn_as(
+    spec: SpawnSpec,
+    identity: &ChildIdentity,
+    mut on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
+    let mut cmd = build_command(&spec, identity)?;
+    cmd.env_clear()
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .stdin(if spec.inherit_stdin {
             Stdio::inherit()
@@ -157,6 +176,78 @@ pub fn spawn(spec: SpawnSpec, mut on_chunk: impl FnMut(Stream, &[u8])) -> io::Re
         signal: status.signal(),
         timed_out,
     })
+}
+
+/// The program, args, and identity hook for one child.
+fn build_command(spec: &SpawnSpec, identity: &ChildIdentity) -> io::Result<Command> {
+    match identity {
+        ChildIdentity::Inherit => {
+            let mut cmd = Command::new(&spec.program);
+            cmd.args(&spec.args);
+            Ok(cmd)
+        }
+        ChildIdentity::User { uid, gid } => user_command(spec, *uid, *gid),
+        ChildIdentity::Seatbelt { deny } => seatbelt_command(spec, deny),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn user_command(spec: &SpawnSpec, uid: u32, gid: u32) -> io::Result<Command> {
+    let mut cmd = Command::new(&spec.program);
+    cmd.args(&spec.args);
+    // SAFETY: the hook runs in the forked child before exec and only makes
+    // async-signal-safe syscalls on plain integers. Any failure aborts the
+    // exec, so the child never runs as the caller.
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::setgroups(0, std::ptr::null()) != 0
+                || libc::setgid(gid) != 0
+                || libc::setuid(uid) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::getuid() != uid || libc::geteuid() != uid || libc::getgid() != gid {
+                return Err(io::Error::from_raw_os_error(libc::EPERM));
+            }
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(cmd)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn user_command(_spec: &SpawnSpec, _uid: u32, _gid: u32) -> io::Result<Command> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "custody uid switch is Linux only",
+    ))
+}
+
+/// `sandbox-exec` ships with macOS at this fixed path.
+#[cfg(target_os = "macos")]
+const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+
+#[cfg(target_os = "macos")]
+fn seatbelt_command(spec: &SpawnSpec, deny: &[PathBuf]) -> io::Result<Command> {
+    let profile = crate::ident::seatbelt_profile(deny)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let mut cmd = Command::new(SANDBOX_EXEC);
+    cmd.arg("-p")
+        .arg(profile)
+        .arg(&spec.program)
+        .args(&spec.args);
+    Ok(cmd)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn seatbelt_command(_spec: &SpawnSpec, _deny: &[PathBuf]) -> io::Result<Command> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "seatbelt is macOS only",
+    ))
 }
 
 fn pipe_reader(
@@ -252,6 +343,74 @@ mod tests {
         assert_eq!(o.signal, Some(libc::SIGTERM));
         assert_eq!(o.process_exit(), 128 + libc::SIGTERM);
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn user_identity_never_falls_back_to_the_caller() {
+        let tmp = std::env::temp_dir().join(format!("geode-os-ident-{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let mut s = spec(
+            &format!("id -u > '{}'", tmp.display()),
+            Duration::from_secs(10),
+        );
+        s.env.push(("PATH".into(), "/usr/bin:/bin".into()));
+        let nobody = ChildIdentity::User {
+            uid: 65534,
+            gid: 65534,
+        };
+        let r = spawn_as(s, &nobody, |_, _| {});
+        let me = crate::ident::euid();
+        if cfg!(target_os = "linux") && me == 0 {
+            // Root can switch: the child is really 65534.
+            assert_eq!(r.unwrap().exit_code, Some(0));
+            assert_eq!(std::fs::read_to_string(&tmp).unwrap().trim(), "65534");
+        } else {
+            // Not root (or not Linux): no child runs, as the caller or anyone.
+            assert!(r.is_err(), "spawned without the identity: {r:?}");
+            assert!(!tmp.exists(), "a child ran");
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_denies_listed_paths_only() {
+        let dir = std::env::temp_dir().join(format!("geode-os-sb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let key = dir.join("default.gkey");
+        let other = dir.join("other.txt");
+        std::fs::write(&key, "sk-dummy-0000QA").unwrap();
+        std::fs::write(&other, "public").unwrap();
+        let script = format!("cat '{}'; echo; cat '{}'", other.display(), key.display());
+        let mut s = spec(&script, Duration::from_secs(10));
+        s.env.push(("PATH".into(), "/usr/bin:/bin".into()));
+        let id = ChildIdentity::Seatbelt {
+            deny: vec![key.clone()],
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let o = spawn_as(s, &id, |st, c| match st {
+            Stream::Stdout => out.extend_from_slice(c),
+            Stream::Stderr => err.extend_from_slice(c),
+        })
+        .unwrap();
+        let out = String::from_utf8_lossy(&out);
+        assert!(out.contains("public"), "{out}");
+        assert!(
+            !out.contains("sk-dummy"),
+            "seatbelt let the key through: {out}"
+        );
+        assert_ne!(o.exit_code, Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn seatbelt_is_refused_off_macos() {
+        let id = ChildIdentity::Seatbelt {
+            deny: vec!["/x".into()],
+        };
+        assert!(spawn_as(spec("true", Duration::from_secs(1)), &id, |_, _| {}).is_err());
     }
 
     #[test]

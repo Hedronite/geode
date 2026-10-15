@@ -168,6 +168,8 @@ enum Commands {
     Run(cmd::run::RunArgs),
     /// Audit log: verify the append-only hash chain.
     Audit(cmd::audit::AuditArgs),
+    /// Custody daemon control: unlock, lock, status. Resolves no key.
+    Custody(cmd::custody::CustodyArgs),
     /// Ratatui operator surface (14-tui). With the `tui` feature off
     /// (core-profile build) this prints "not available" and exits 1.
     ///
@@ -229,6 +231,7 @@ impl Commands {
             Self::Agent(_) => "agent",
             Self::Run(_) => "run",
             Self::Audit(_) => "audit_verify",
+            Self::Custody(_) => "custody",
             Self::Tui { .. } => "tui",
         }
     }
@@ -370,6 +373,14 @@ pub enum AgentCmd {
         /// with `--stdio`; one of the two is required (neither exits 1).
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
+        /// Run the custody daemon (user `geode` / `_geode` only). Listens on
+        /// the fixed custody socket, mode 0660, group `geode-agents`; takes a
+        /// token per connection. Not with `--stdio` or `--socket`.
+        #[arg(long)]
+        custody: bool,
+        /// Vault the custody daemon is bound to. Requires `--custody`.
+        #[arg(long, value_name = "DIR")]
+        vault: Option<PathBuf>,
         #[command(flatten)]
         token: TokenSource,
     },
@@ -596,6 +607,7 @@ fn main() {
         Commands::Agent(a) => cmd::agent::run(a, &cli.global, out),
         Commands::Run(a) => cmd::run::run(a, &cli.global, out),
         Commands::Audit(a) => cmd::audit::run(a, out),
+        Commands::Custody(a) => cmd::custody::run(a, &cli.global, out),
         // Feature on: the TUI starts (14-tui 2), wired with the vault path
         // and the global `--key` / `GEODE_KEY_FILE` identity path (G5). The
         // TUI unlocks in-process via `geode-grotto` (14-tui 3); the CLI stays

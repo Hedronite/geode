@@ -45,7 +45,7 @@ use crate::{
 const DEFAULT_MAX_BYTES: u64 = 1_048_576;
 
 /// MCP protocol version the stdio server speaks.
-const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+pub(crate) const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_JSON_RPC_FRAME_BYTES: usize = 1 << 20;
 
 #[cfg(unix)]
@@ -73,7 +73,7 @@ pub(crate) fn ensure_private_parent(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn rpc_line_too_large(line: &str) -> bool {
+pub(crate) fn rpc_line_too_large(line: &str) -> bool {
     line.len() > MAX_JSON_RPC_FRAME_BYTES
 }
 
@@ -131,8 +131,18 @@ pub fn run(args: &AgentArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         AgentCmd::Serve {
             stdio,
             socket,
+            custody,
+            vault,
             token,
-        } => serve(*stdio, socket.as_deref(), token, global),
+        } => {
+            if *custody {
+                cmd::custody::serve(*stdio, socket.as_deref(), vault.as_deref(), token, global)
+            } else if vault.is_some() {
+                Err(Error::Format("--vault on serve needs --custody".into()))
+            } else {
+                serve(*stdio, socket.as_deref(), token, global)
+            }
+        }
         AgentCmd::Scope {
             path,
             op,
@@ -154,7 +164,7 @@ pub fn run(args: &AgentArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     }
 }
 
-fn now_secs() -> i64 {
+pub(crate) fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
@@ -516,7 +526,7 @@ fn read_sealed_token(path: Option<&std::path::Path>) -> Result<Vec<u8>> {
 /// Normalize an ingested token: trim trailing whitespace, and accept the
 /// hex-armored form (the `--output json` `token` field) when the raw
 /// `GTOK` magic is absent — env vars and editors cannot carry binary NULs.
-fn normalize_sealed(raw: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn normalize_sealed(raw: &[u8]) -> Result<Vec<u8>> {
     let trimmed: &[u8] = raw.trim_ascii_end();
     if trimmed.starts_with(geode_grotto::MAGIC_GTOK) {
         return Ok(trimmed.to_vec());
@@ -1024,12 +1034,12 @@ fn with_jev(mut doc: serde_json::Value, jev: Option<serde_json::Value>) -> serde
 // ---------------------------------------------------------------------
 
 /// JSON-RPC result frame.
-fn rpc_ok(id: &serde_json::Value, result: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn rpc_ok(id: &serde_json::Value, result: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
 }
 
 /// JSON-RPC error frame.
-fn rpc_error(id: &serde_json::Value, code: i64, message: &str) -> serde_json::Value {
+pub(crate) fn rpc_error(id: &serde_json::Value, code: i64, message: &str) -> serde_json::Value {
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -1039,7 +1049,7 @@ fn rpc_error(id: &serde_json::Value, code: i64, message: &str) -> serde_json::Va
 
 /// Error family names mirroring `cmd::fail` (05-cli 3) for MCP tool
 /// errors — the process never exits mid-session on a tool failure.
-fn mcp_error_code(err: &Error) -> &'static str {
+pub(crate) fn mcp_error_code(err: &Error) -> &'static str {
     match err {
         Error::AuthFail => "auth_fail",
         Error::Io(e) if e.kind() == std::io::ErrorKind::NotFound => "not_found",
@@ -1052,20 +1062,20 @@ fn mcp_error_code(err: &Error) -> &'static str {
 }
 
 /// One authenticated agent-plane tool call (06-agent-plane 3/4).
-struct AgentCall<'a> {
-    facet_events: bool,
-    ctx: &'a cmd::VaultCtx,
-    claims: &'a Token,
-    sealed: &'a [u8],
-    now: i64,
-    vault: &'a str,
-    args: &'a serde_json::Value,
+pub(crate) struct AgentCall<'a> {
+    pub(crate) facet_events: bool,
+    pub(crate) ctx: &'a cmd::VaultCtx,
+    pub(crate) claims: &'a Token,
+    pub(crate) sealed: &'a [u8],
+    pub(crate) now: i64,
+    pub(crate) vault: &'a str,
+    pub(crate) args: &'a serde_json::Value,
 }
 
 /// The stdio MCP server (06-agent-plane 3). One process, one token; EK is
 /// unwrapped once per vault and cached — the ISK is dropped after each
 /// unwrap and never held across requests.
-struct StdioServer<'g> {
+pub(crate) struct StdioServer<'g> {
     global: &'g GlobalArgs,
     sealed: Vec<u8>,
     ctxs: HashMap<PathBuf, cmd::VaultCtx>,
@@ -1129,56 +1139,7 @@ impl<'g> StdioServer<'g> {
                 .ok()
                 .map(|t| t.allow_prefix)
         });
-        let note = match grants {
-            Some(prefixes) => format!(" Your token allows: {}.", prefixes.join(", ")),
-            None => " Your token's allow prefixes are enforced by the binary.".to_string(),
-        };
-        let vault_prop = serde_json::json!({"type": "string", "description": "Vault directory"});
-        vec![
-            serde_json::json!({
-                "name": "geode_list",
-                "description": format!("List sealed vault entries under a prefix. Policy-enforced; returns no file bodies.{note}"),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "vault": vault_prop.clone(),
-                        "prefix": {"type": "string", "description": "Prefix to list under (default: the token's first allow prefix)"},
-                        "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
-                    },
-                    "required": ["vault"],
-                },
-            }),
-            serde_json::json!({
-                "name": "geode_read",
-                "description": format!("Read one vault path. Honors the token max_bytes cap; use mode=hash for large files.{note}"),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "vault": vault_prop.clone(),
-                        "path": {"type": "string", "description": "Vault-relative object path"},
-                        "max_bytes": {"type": "integer", "description": "Read cap (default 64 KiB; hard cap from the token)"},
-                        "mode": {"type": "string", "enum": ["text", "hex", "hash"], "description": "Rendering mode (default text)"},
-                        "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
-                    },
-                    "required": ["vault", "path"],
-                },
-            }),
-            serde_json::json!({
-                "name": "geode_write",
-                "description": format!("Seal bytes at a vault path under an allow prefix. Creates a new object_id; body cap is the token max_bytes.{note}"),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "vault": vault_prop.clone(),
-                        "path": {"type": "string", "description": "Vault-relative object path"},
-                        "body": {"type": "string", "description": "UTF-8 body"},
-                        "body_hex": {"type": "string", "description": "Hex-encoded raw bytes (exactly one of body/body_hex)"},
-                        "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
-                    },
-                    "required": ["vault", "path"],
-                },
-            }),
-        ]
+        tool_descriptors_for(grants)
     }
 
     /// 06-agent-plane 5: when `GEODE_FACET_EVENTS=1`, append one JSON event
@@ -1260,7 +1221,7 @@ impl<'g> StdioServer<'g> {
     }
 
     /// `geode_list` (06-agent-plane 3): entries under a covered prefix.
-    fn list_tool(call: &AgentCall<'_>) -> Result<serde_json::Value> {
+    pub(crate) fn list_tool(call: &AgentCall<'_>) -> Result<serde_json::Value> {
         let prefix = match call.args.get("prefix").and_then(|p| p.as_str()) {
             Some(p) => p.to_owned(),
             None => call
@@ -1310,7 +1271,7 @@ impl<'g> StdioServer<'g> {
     }
 
     /// `geode_read` (06-agent-plane 4): body, capped preview, or hash only.
-    fn read_tool(call: &AgentCall<'_>) -> Result<serde_json::Value> {
+    pub(crate) fn read_tool(call: &AgentCall<'_>) -> Result<serde_json::Value> {
         let path = call
             .args
             .get("path")
@@ -1361,7 +1322,7 @@ impl<'g> StdioServer<'g> {
     }
 
     /// `geode_write` (06-agent-plane 3, 4): seal `body`/`body_hex` at path.
-    fn write_tool(call: &AgentCall<'_>) -> Result<serde_json::Value> {
+    pub(crate) fn write_tool(call: &AgentCall<'_>) -> Result<serde_json::Value> {
         let path = call
             .args
             .get("path")
@@ -1566,8 +1527,67 @@ impl<'g> StdioServer<'g> {
     }
 }
 
+/// The frozen `geode_list` / `geode_read` / `geode_write` descriptors
+/// (06-agent-plane 3). `grants` is the token's allow prefixes when known.
+/// Shared by stdio, plain `--socket`, and `--custody`.
+pub(crate) fn tool_descriptors_for(grants: Option<Vec<String>>) -> Vec<serde_json::Value> {
+    let note = match grants {
+        Some(prefixes) => format!(" Your token allows: {}.", prefixes.join(", ")),
+        None => " Your token's allow prefixes are enforced by the binary.".to_string(),
+    };
+    let vault_prop = serde_json::json!({"type": "string", "description": "Vault directory"});
+    vec![
+        serde_json::json!({
+            "name": "geode_list",
+            "description": format!("List sealed vault entries under a prefix. Policy-enforced; returns no file bodies.{note}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "vault": vault_prop.clone(),
+                    "prefix": {"type": "string", "description": "Prefix to list under (default: the token's first allow prefix)"},
+                    "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
+                },
+                "required": ["vault"],
+            },
+        }),
+        serde_json::json!({
+            "name": "geode_read",
+            "description": format!("Read one vault path. Honors the token max_bytes cap; use mode=hash for large files.{note}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "vault": vault_prop.clone(),
+                    "path": {"type": "string", "description": "Vault-relative object path"},
+                    "max_bytes": {"type": "integer", "description": "Read cap (default 64 KiB; hard cap from the token)"},
+                    "mode": {"type": "string", "enum": ["text", "hex", "hash"], "description": "Rendering mode (default text)"},
+                    "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
+                },
+                "required": ["vault", "path"],
+            },
+        }),
+        serde_json::json!({
+            "name": "geode_write",
+            "description": format!("Seal bytes at a vault path under an allow prefix. Creates a new object_id; body cap is the token max_bytes.{note}"),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "vault": vault_prop.clone(),
+                    "path": {"type": "string", "description": "Vault-relative object path"},
+                    "body": {"type": "string", "description": "UTF-8 body"},
+                    "body_hex": {"type": "string", "description": "Hex-encoded raw bytes (exactly one of body/body_hex)"},
+                    "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
+                },
+                "required": ["vault", "path"],
+            },
+        }),
+    ]
+}
+
 /// Write one NDJSON frame to stdout (the only bytes serve puts there).
-fn write_frame(stdout: &mut impl std::io::Write, frame: &serde_json::Value) -> Result<()> {
+pub(crate) fn write_frame(
+    stdout: &mut impl std::io::Write,
+    frame: &serde_json::Value,
+) -> Result<()> {
     let line =
         serde_json::to_string(frame).map_err(|e| Error::Format(format!("json encode: {e}")))?;
     stdout.write_all(line.as_bytes()).map_err(Error::Io)?;
