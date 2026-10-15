@@ -1,0 +1,25 @@
+[package]
+name = "geode-os"
+description = "Process core-dump refusal for Geode. No user-child spawn."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+libc = "0.2"
+
+# Not `lints.workspace = true`: that table forbids unsafe_code, and Cargo
+# will not let this crate override a single workspace lint. geode-core
+# still inherits the forbid. This crate allows unsafe only for the
+# core-dump calls.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = "warn"
