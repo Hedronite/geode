@@ -3,7 +3,7 @@ title: Geode changelog
 type: repo-changelog
 status: current
 created: "2026-09-15"
-updated: "2026-09-30"
+updated: "2026-10-15"
 related:
   - "[[foundry/geode/geode-spec-0.0.0/SPEC]]"
   - "[[foundry/geode/geode-spec-0.0.0/12-roadmap]]"
@@ -29,6 +29,28 @@ related:
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise). Foundry packs v021/v022 are milestones, not the git tag ([[foundry/SEMVER]]).
 
 ## [Unreleased]
+
+## [1.2.0] — 2026-10-15
+
+Compatible 1.x minor. Foundry pack **v034** (keyring custody and inject-only exec). No format change. `GDE1` objects written by 1.0.0, 1.0.1, and 1.1.0 remain readable. Suite `0x01` stays the suite. Existing custody verbs, exit codes, and MCP tools `geode_list` / `geode_read` / `geode_write` for a token 1.1.0 already accepts are unchanged. A `Read` token still defaults `geode_read` to `text`.
+
+### Added
+
+- `geode-redact` covers the v1 encodings: raw, base64 (both alphabets), hex, one percent-encoding, and canonical JSON. Shell quoting is not claimed. A named binding redacts as `[REDACTED:NAME]`. The `sk-` prefix stays `[REDACTED]`.
+- `Op::Inject` does not imply `Read`, and `Read` does not imply `Inject`. `human:local` can inject. An old token cannot. An inject-only token defaults `geode_read` to `hash`. Explicit `text` without `Read` is `plaintext_denied` and returns no body.
+- `token issue` accepts `allow_cmds`, `allow_hosts`, `peer_uid`, and `redact`. `token inspect` prints those claims and does not print sealed bytes. `token issue` without `--ops` is usage.
+- `geode agent` accepts a token file and a token fd, and `--passphrase-fd`. Raw `--token` on an existing agent verb still warns once and does not echo the value.
+- `geode run` injects on the local machine. The child env is built from scratch. Repeatable `--allow-cmd` names the allowed programs. The audit row says `custody: false`. `geode audit verify` exits 0 on a good chain and 2 on the first bad seq.
+- `geode agent serve --custody --vault DIR` runs the custody daemon. The socket is `/run/geode/custody.sock` on Linux and `/var/run/geode/custody.sock` on macOS, mode 0660, group `geode-agents`. Linux runs the child as `geode-run`. macOS keeps the child as `_geode` under a seatbelt that denies the key, the audit DB, and the socket. There is no same-uid mode and no `run_as_peer`.
+- `geode custody unlock`, `lock`, and `status` talk to that daemon. `status` prints no key bytes.
+- MCP `geode_run` is advertised only by a `--custody` server when the bound token holds `Inject`. The result is one buffer. A child non-zero exit is a normal result. On Linux a non-empty `allow_hosts` runs the child in its own network namespace behind a userspace proxy. If that namespace cannot be made, the run is `policy_deny` and nothing starts. On macOS a non-empty list refuses before spawn. An empty list records `hosts: unrestricted`.
+- Read plaintext is wrapped so Debug does not print it. The process refuses core dumps.
+
+### Not in this tag
+
+- `geode run --file` and `geode run --socket` exit 1. The custody `geode_run` tool is the remote run surface.
+- The machine hook is a later verb. UKI and PCR signing stay on the LE13 interim.
+- Darwin `geode mount` still exits 1. Windows is not offered.
 
 ## [1.1.0] — 2026-09-30
 
@@ -219,7 +241,8 @@ First release. Conformance profile **`core`** ([[foundry/geode/geode-spec-0.0.0/
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/Hedronite/geode/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/Hedronite/geode/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/Hedronite/geode/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Hedronite/geode/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/Hedronite/geode/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Hedronite/geode/compare/v0.2.9...v1.0.0

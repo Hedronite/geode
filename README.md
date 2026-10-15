@@ -52,7 +52,7 @@ It is not a FUSE mount, not a post-quantum suite, and not an interop layer for o
 | Binary | `geode` ([`geode-cli`](crates/geode-cli)) |
 | Library | [`geode-grotto`](crates/geode-core) (Rust import `geode_grotto`) |
 | TUI | [`geode-tui`](crates/geode-tui), default feature `tui` |
-| Version | **1.1.0** · [v1.1.0](https://github.com/Hedronite/geode/releases/tag/v1.1.0) · [CHANGELOG](CHANGELOG.md) |
+| Version | **1.2.0** · [v1.2.0](https://github.com/Hedronite/geode/releases/tag/v1.2.0) · [CHANGELOG](CHANGELOG.md) |
 | Rust | 1.89 |
 | License | [Apache-2.0](LICENSE) |
 
@@ -131,7 +131,7 @@ vectors/v1/           # golden vectors: kdf, chunk, wrap, name
 
 ## Status
 
-Workspace **1.1.0** matches git tag [`v1.1.0`](https://github.com/Hedronite/geode/releases/tag/v1.1.0) and the crates.io versions of `geode-grotto` / `geode-tui` / `geode-cli`. Compatible minor on the 1.0 contract: `geode sign pub` and `geode sign blob`. `GDE1` objects from 1.0.0 remain readable. Suite `0x01` stays the suite. Existing custody verbs, exit codes, and MCP tools are unchanged. The next incompatible change to the format, CLI verbs, exit codes, or MCP tools is 2.0.0.
+Workspace **1.2.0** matches git tag [`v1.2.0`](https://github.com/Hedronite/geode/releases/tag/v1.2.0) and the crates.io versions of `geode-redact` / `geode-os` / `geode-grotto` / `geode-tui` / `geode-cli`. Compatible minor on the 1.0 contract: keyring custody and inject-only exec. `geode sign pub` and `geode sign blob` stay. `GDE1` objects from 1.0.0 remain readable. Suite `0x01` stays the suite. A `Read` token still defaults `geode_read` to `text`. The next incompatible change to the format, CLI verbs, exit codes, or MCP tools `geode_list` / `geode_read` / `geode_write` is 2.0.0.
 
 Shipped on this tag:
 
@@ -142,6 +142,9 @@ Shipped on this tag:
 - `geode mount VAULT MOUNTPOINT`: Linux runs a FUSE session (feature `fuse`). Omit `--read-only` for read-write. Darwin still exits 1 (1.x.y). `--token` cannot mount
 - Agent plane: `token issue|inspect`, `agent list|read|write`, `agent serve --stdio` or `--socket PATH`
 - `geode sign pub` and `geode sign blob PATH`: Ed25519 identity child. The key stays in Geode. Verify with cosign v2.6.5 `verify-blob`
+- `geode run`: local inject with a clean child env and v1 redaction. Redaction does not stop a hostile command
+- `geode agent serve --custody` and `geode custody unlock|lock|status`. MCP `geode_run` is advertised only on that server
+- `geode audit verify`
 
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): `cargo test --workspace --locked` and `clippy -D warnings` on `ubuntu-latest`.
 
