@@ -208,7 +208,7 @@ fn parse_ops(s: &str) -> Result<Vec<Op>> {
             "inject" => Op::Inject,
             "mount" | "admin" => {
                 return Err(Error::Format(format!(
-                    "op '{part}' is never granted to an agent token (06-agent-plane 3)"
+                    "op '{part}' is never granted to an agent token"
                 )));
             }
             _ => return Err(Error::Format(format!("unknown op '{part}'"))),
@@ -649,9 +649,7 @@ fn resolve_agent_token(src: &TokenSource) -> Result<Vec<u8>> {
     };
     if raw.iter().all(u8::is_ascii_whitespace) {
         return Err(Error::Format(
-            "missing token: pass --token-file, --token-fd, or set GEODE_TOKEN \
-             (06-agent-plane 3)"
-                .into(),
+            "missing token: pass --token-file, --token-fd, or set GEODE_TOKEN".into(),
         ));
     }
     normalize_sealed(&raw)
@@ -1409,11 +1407,7 @@ impl<'g> StdioServer<'g> {
             return rpc_error(id, -32602, &format!("unknown tool '{name}'"));
         }
         if !self.rate_allow() {
-            return rpc_error(
-                id,
-                -32000,
-                "rate_limited: 128 tool calls / 10 s per token (06-agent-plane 6.5)",
-            );
+            return rpc_error(id, -32000, "rate_limited: 128 tool calls / 10 s per token");
         }
         let empty = serde_json::json!({});
         let args = params.and_then(|p| p.get("arguments")).unwrap_or(&empty);
@@ -1559,7 +1553,7 @@ pub(crate) fn tool_descriptors_for(grants: Option<Vec<String>>) -> Vec<serde_jso
                 "properties": {
                     "vault": vault_prop.clone(),
                     "prefix": {"type": "string", "description": "Prefix to list under (default: the token's first allow prefix)"},
-                    "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
+                    "intent": {"type": "string", "description": "Optional note. Not a credential, and it does not change what the token allows."},
                 },
                 "required": ["vault"],
             },
@@ -1574,7 +1568,7 @@ pub(crate) fn tool_descriptors_for(grants: Option<Vec<String>>) -> Vec<serde_jso
                     "path": {"type": "string", "description": "Vault-relative object path"},
                     "max_bytes": {"type": "integer", "description": "Read cap (default 64 KiB; hard cap from the token)"},
                     "mode": {"type": "string", "enum": ["text", "hex", "hash"], "description": "Rendering mode. Default text when the token holds read; hash when it holds inject without read. text or hex without read returns plaintext_denied with no body."},
-                    "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
+                    "intent": {"type": "string", "description": "Optional note. Not a credential, and it does not change what the token allows."},
                 },
                 "required": ["vault", "path"],
             },
@@ -1589,7 +1583,7 @@ pub(crate) fn tool_descriptors_for(grants: Option<Vec<String>>) -> Vec<serde_jso
                     "path": {"type": "string", "description": "Vault-relative object path"},
                     "body": {"type": "string", "description": "UTF-8 body"},
                     "body_hex": {"type": "string", "description": "Hex-encoded raw bytes (exactly one of body/body_hex)"},
-                    "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
+                    "intent": {"type": "string", "description": "Optional note. Not a credential, and it does not change what the token allows."},
                 },
                 "required": ["vault", "path"],
             },

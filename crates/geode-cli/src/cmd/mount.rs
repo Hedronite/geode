@@ -41,8 +41,7 @@ mod fuse_linux;
 mod fuse_macos;
 
 /// 08-mount 7, printed on EVERY mount attempt (before giving up).
-const UID_BYPASS_WARNING: &str =
-    "warning: a mount is a policy bypass for any process of that UID (08-mount 5)";
+const UID_BYPASS_WARNING: &str = "warning: a mount is a policy bypass for any process of that UID";
 
 /// Set on the re-exec'd daemon child so it mounts instead of spawning again.
 #[cfg(all(feature = "fuse", target_os = "linux"))]
@@ -184,7 +183,7 @@ fn accepted_mode(read_only: bool) -> &'static str {
 pub fn unsupported_message() -> &'static str {
     #[cfg(target_os = "macos")]
     {
-        "mount is unsupported on Darwin in this build (08-mount: macOS is SHOULD)"
+        "mount is unsupported on macOS in this build: load FUSE-T or macFUSE"
     }
     #[cfg(not(target_os = "macos"))]
     {
