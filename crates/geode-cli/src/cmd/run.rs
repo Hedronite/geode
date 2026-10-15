@@ -5,8 +5,14 @@
 //! authorize, match `allow_cmds`, or redact on its own.
 //!
 //! Local mode only in this build: `human:local`, key in hand, no token.
-//! `--socket` waits for the custody daemon. `--file` waits for the
-//! memfd / tmpfs binding.
+//! `--socket` is refused (exit 1); an agent reaches the custody daemon
+//! through MCP `geode_run` instead. `--file` waits for the memfd / tmpfs
+//! binding.
+//!
+//! Redaction catches the v1 encodings only (raw, base64, hex, one
+//! percent-encoding, canonical JSON string) plus the known token
+//! prefixes. It does not catch shell quoting or any other transform, and
+//! it does not stop a hostile command.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -32,18 +38,45 @@ const LOCAL_PRINCIPAL: &str = "human:local";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 /// `geode run` — run a command with vault secrets injected into its env.
-/// Values never reach Geode's output; the child's output is redacted.
+///
+/// Local mode: `human:local`, a key is required, and any token is refused
+/// (exit 4). `--` is required before the command. `argv[0]` is resolved
+/// against `PATH`, canonicalized, and must match an `--allow-cmd`.
+/// Every binding must pass policy, or nothing runs. The child gets a fresh
+/// env: `PATH`, `HOME`, `LANG`, `TERM`, then the bindings. It never gets
+/// `GEODE_TOKEN`.
+///
+/// Stdout carries only the child's redacted stdout. Stderr carries
+/// `geode:` lines (warnings, `injected: NAMES (values withheld)`) and the
+/// child's redacted stderr. Each stream is capped at 1 MiB, then
+/// `[TRUNCATED]`. A bound value is replaced with `[REDACTED:NAME]`, or
+/// `[REDACTED]` for a token-prefix match.
+///
+/// Redaction catches the v1 encodings only: raw, base64 (standard and
+/// URL-safe), hex, one percent-encoding, and a canonical JSON string.
+/// It does not catch shell quoting or any other transform. Redaction stops
+/// accidents; it does not stop a hostile command.
+///
+/// Exit: before spawn, 1 usage, 2 auth, 3 policy deny or `argv[0]` not
+/// allowed, 4 token, 5 locked. After spawn, the child's code, or 128+N
+/// for signal N.
 #[derive(Args, Debug)]
 pub struct RunArgs {
     /// Vault directory the bindings come from.
     #[arg(long, value_name = "DIR")]
     pub vault: PathBuf,
-    /// Custody daemon socket. Not available in this build.
+    /// Custody daemon socket. Refused in this build (exit 1); agents use
+    /// MCP `geode_run` on the custody daemon.
     #[arg(long, value_name = "PATH")]
     pub socket: Option<PathBuf>,
     /// Bind the vault object at PATH to env NAME (repeatable). NAME matches
     /// `[A-Z_][A-Z0-9_]{0,63}`; `PATH`, `HOME`, `LANG`, `TERM`, `GEODE_*`,
-    /// `LD_*`, and `DYLD_*` are reserved.
+    /// `LD_*`, and `DYLD_*` are reserved. The value goes only into the
+    /// child's env and is never printed. A value under 8 bytes is refused.
+    /// Child output is redacted for the v1 encodings only (raw, base64,
+    /// hex, one percent-encoding, canonical JSON string). Shell quoting and
+    /// other transforms are not caught. Redaction does not stop a hostile
+    /// command.
     #[arg(long = "secret", value_name = "NAME=PATH")]
     pub secret: Vec<String>,
     /// File binding. Not available in local mode in this build.
@@ -68,13 +101,15 @@ pub struct RunArgs {
     /// Refused on `geode run` (argv is visible in ps/history).
     #[arg(long, value_name = "TOKEN", hide = true)]
     pub token: Option<String>,
-    /// Token file. Socket mode only; local mode refuses any token.
+    /// Token file. Socket mode only; local mode refuses any token (exit 4).
     #[arg(long, value_name = "PATH")]
     pub token_file: Option<PathBuf>,
-    /// Token fd. Socket mode only; local mode refuses any token.
+    /// Token fd. Socket mode only; local mode refuses any token (exit 4).
     #[arg(long, value_name = "N")]
     pub token_fd: Option<u32>,
-    /// The command and its arguments, after `--`.
+    /// The command and its arguments, after `--`. An argument that
+    /// contains a bound value, in any v1 encoding, is refused
+    /// (`argv_rejected`, exit 3).
     #[arg(last = true, value_name = "CMD")]
     pub command: Vec<String>,
 }
