@@ -319,6 +319,29 @@ pub struct AgentArgs {
     pub cmd: AgentCmd,
 }
 
+/// Token and passphrase sources for the token-gated agent verbs (SPEC-v034
+/// G2). Scoped to `serve`/`read`/`write`/`list`, never global, so
+/// `geode tui` still has no `--token` (14-tui §1.4). The three token flags
+/// are mutually exclusive; with none of them, `$GEODE_TOKEN` is used.
+#[derive(Args, Debug)]
+pub struct TokenSource {
+    /// Sealed agent token (hex armor or GTOK) on argv. Deprecated: argv is
+    /// visible in ps/history. Prefer `--token-file`; else `$GEODE_TOKEN`.
+    #[arg(long, value_name = "TOKEN", conflicts_with_all = ["token_file", "token_fd"])]
+    pub token: Option<String>,
+    /// Read the sealed token from PATH. The file must be mode 0600 and
+    /// owned by the caller.
+    #[arg(long, value_name = "PATH", conflicts_with = "token_fd")]
+    pub token_file: Option<PathBuf>,
+    /// Read the sealed token from open file descriptor N.
+    #[arg(long, value_name = "N")]
+    pub token_fd: Option<u32>,
+    /// Read the passphrase for a wrapped `--key` from open file
+    /// descriptor N (first line). Wins over `$GEODE_PASSPHRASE`.
+    #[arg(long, value_name = "N")]
+    pub passphrase_fd: Option<u32>,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum AgentCmd {
     /// Serve the MCP tool server (06-agent-plane 3). One transport per
@@ -339,9 +362,8 @@ pub enum AgentCmd {
         /// with `--stdio`; one of the two is required (neither exits 1).
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
-        /// Sealed agent token (hex armor or GTOK); else `$GEODE_TOKEN`.
-        #[arg(long, value_name = "TOKEN")]
-        token: Option<String>,
+        #[command(flatten)]
+        token: TokenSource,
     },
     /// Token lifecycle: issue a scoped token, or inspect one.
     Token {
@@ -356,9 +378,8 @@ pub enum AgentCmd {
         /// Object path inside the vault.
         #[arg(value_name = "PATH")]
         path: String,
-        /// Sealed agent token (hex armor or GTOK); else `$GEODE_TOKEN`.
-        #[arg(long, value_name = "TOKEN")]
-        token: Option<String>,
+        #[command(flatten)]
+        token: TokenSource,
     },
     /// Write stdin as a new object at PATH under an allow prefix (06 §4).
     Write {
@@ -368,9 +389,8 @@ pub enum AgentCmd {
         /// Object path inside the vault.
         #[arg(value_name = "PATH")]
         path: String,
-        /// Sealed agent token (hex armor or GTOK); else `$GEODE_TOKEN`.
-        #[arg(long, value_name = "TOKEN")]
-        token: Option<String>,
+        #[command(flatten)]
+        token: TokenSource,
     },
     /// List entries under a prefix.
     List {
@@ -380,9 +400,8 @@ pub enum AgentCmd {
         /// Prefix to list under (optional).
         #[arg(value_name = "PREFIX")]
         prefix: Option<String>,
-        /// Sealed agent token (hex armor or GTOK); else `$GEODE_TOKEN`.
-        #[arg(long, value_name = "TOKEN")]
-        token: Option<String>,
+        #[command(flatten)]
+        token: TokenSource,
     },
     /// Classify non-prefix remainder (shadow Jev). Code owns prefix / `../`
     /// / TTL / MAC. No `--token` — this verb does not seal, open, or verify.
