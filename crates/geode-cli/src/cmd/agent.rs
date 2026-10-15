@@ -33,10 +33,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use geode_grotto::agent_ops::{self, ReadBody, ReadMode};
 use geode_grotto::kdf::EpochKey;
 use geode_grotto::policy::{Op, PrincipalId};
-use geode_grotto::token::{self, RedactLevel, Token, TokenId};
+use geode_grotto::token::{self, CmdRule, RedactLevel, Token, TokenId};
 use geode_grotto::{Error, Result};
 
-use crate::{cmd, AgentArgs, AgentCmd, GlobalArgs, OutMode, TokenCmd, TokenSource};
+use crate::{
+    cmd, AgentArgs, AgentCmd, GlobalArgs, OutMode, ReadModeArg, RedactArg, TokenCmd, TokenSource,
+};
 
 /// Default per-token byte cap when `--max-bytes` is omitted (06-agent-plane
 /// 4 read discipline: agents are steered to hash large artifacts).
@@ -90,6 +92,11 @@ pub fn run(args: &AgentArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
                 ops,
                 allow_prefix,
                 max_bytes,
+                allow_cmd,
+                allow_cmds_file,
+                allow_host,
+                peer_uid,
+                redact,
             } => issue(
                 vault,
                 principal,
@@ -97,6 +104,13 @@ pub fn run(args: &AgentArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
                 ops,
                 allow_prefix,
                 *max_bytes,
+                &InjectClaimArgs {
+                    allow_cmd,
+                    allow_cmds_file: allow_cmds_file.as_deref(),
+                    allow_host,
+                    peer_uid: *peer_uid,
+                    redact: *redact,
+                },
                 global,
                 out,
             ),
@@ -107,7 +121,12 @@ pub fn run(args: &AgentArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
             prefix,
             token,
         } => list(vault, prefix.as_deref(), token, global, out),
-        AgentCmd::Read { vault, path, token } => read(vault, path, token, global, out),
+        AgentCmd::Read {
+            vault,
+            path,
+            mode,
+            token,
+        } => read(vault, path, *mode, token, global, out),
         AgentCmd::Write { vault, path, token } => write(vault, path, token, global, out),
         AgentCmd::Serve {
             stdio,
@@ -176,6 +195,7 @@ fn parse_ops(s: &str) -> Result<Vec<Op>> {
             "read" => Op::Read,
             "write" => Op::Write,
             "verify" => Op::Verify,
+            "inject" => Op::Inject,
             "mount" | "admin" => {
                 return Err(Error::Format(format!(
                     "op '{part}' is never granted to an agent token (06-agent-plane 3)"
@@ -216,6 +236,168 @@ fn normalize_prefixes(prefixes: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// The SPEC-v034 G4 inject claim flags on `token issue`.
+struct InjectClaimArgs<'a> {
+    allow_cmd: &'a [PathBuf],
+    allow_cmds_file: Option<&'a Path>,
+    allow_host: &'a [String],
+    peer_uid: Option<u32>,
+    redact: RedactArg,
+}
+
+/// The parsed inject claims, validated before any vault I/O.
+struct InjectClaims {
+    allow_cmds: Vec<CmdRule>,
+    allow_hosts: Vec<String>,
+    peer_uid: Option<u32>,
+    redact: RedactLevel,
+}
+
+/// Validate one command path: absolute, equal to its canonical form, and a
+/// regular file with an execute bit. Usage error (exit 1) otherwise.
+fn canonical_cmd(path: &str) -> Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return Err(Error::Format(format!(
+            "allow-cmd '{path}' is not an absolute path"
+        )));
+    }
+    let canon =
+        std::fs::canonicalize(p).map_err(|e| Error::Format(format!("allow-cmd '{path}': {e}")))?;
+    if canon != p {
+        return Err(Error::Format(format!(
+            "allow-cmd '{path}' is not canonical (resolves to {})",
+            canon.display()
+        )));
+    }
+    let md = std::fs::metadata(&canon).map_err(Error::Io)?;
+    if !md.is_file() || md.permissions().mode() & 0o111 == 0 {
+        return Err(Error::Format(format!(
+            "allow-cmd '{path}' is not an executable file"
+        )));
+    }
+    Ok(path.to_owned())
+}
+
+/// Parse `--allow-cmds-file`: a JSON list of `{path, sha256?, args_prefix?}`.
+/// Unknown keys are refused so a typo cannot silently widen a rule.
+fn read_cmds_file(file: &Path) -> Result<Vec<CmdRule>> {
+    const KEYS: [&str; 3] = ["path", "sha256", "args_prefix"];
+    let bytes = std::fs::read(file)
+        .map_err(|e| Error::Format(format!("allow-cmds-file {}: {e}", file.display())))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| Error::Format(format!("allow-cmds-file {}: bad JSON: {e}", file.display())))?;
+    let list = value.as_array().ok_or_else(|| {
+        Error::Format(format!(
+            "allow-cmds-file {}: expected a JSON list of command rules",
+            file.display()
+        ))
+    })?;
+    let mut rules = Vec::with_capacity(list.len());
+    for (i, item) in list.iter().enumerate() {
+        let obj = item.as_object().ok_or_else(|| {
+            Error::Format(format!("allow-cmds-file rule {i}: expected an object"))
+        })?;
+        if let Some(k) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
+            return Err(Error::Format(format!(
+                "allow-cmds-file rule {i}: unknown key '{k}' (path, sha256, args_prefix)"
+            )));
+        }
+        let mut rule: CmdRule = serde_json::from_value(item.clone())
+            .map_err(|e| Error::Format(format!("allow-cmds-file rule {i}: {e}")))?;
+        rule.path = canonical_cmd(&rule.path)?;
+        if let Some(sum) = &rule.sha256 {
+            let ok = sum.len() == 64 && sum.bytes().all(|b| b.is_ascii_hexdigit());
+            if !ok {
+                return Err(Error::Format(format!(
+                    "allow-cmds-file rule {i}: sha256 must be 64 hex characters"
+                )));
+            }
+            rule.sha256 = Some(sum.to_ascii_lowercase());
+        }
+        rules.push(rule);
+    }
+    Ok(rules)
+}
+
+/// Validate a host: non-empty ASCII with no whitespace, scheme, path, or
+/// userinfo. Lowercased.
+fn normalize_host(host: &str) -> Result<String> {
+    let bad = host.is_empty()
+        || !host.is_ascii()
+        || host.contains("://")
+        || host
+            .chars()
+            .any(|c| c.is_ascii_whitespace() || c == '/' || c == '@');
+    if bad {
+        return Err(Error::Format(format!("bad allow-host '{host}'")));
+    }
+    Ok(host.to_ascii_lowercase())
+}
+
+fn parse_inject_claims(args: &InjectClaimArgs<'_>) -> Result<InjectClaims> {
+    let mut allow_cmds: Vec<CmdRule> = Vec::new();
+    for p in args.allow_cmd {
+        let path = p
+            .to_str()
+            .ok_or_else(|| Error::Format("allow-cmd path is not UTF-8".into()))?;
+        let rule = CmdRule {
+            path: canonical_cmd(path)?,
+            sha256: None,
+            args_prefix: Vec::new(),
+        };
+        if !allow_cmds.contains(&rule) {
+            allow_cmds.push(rule);
+        }
+    }
+    if let Some(file) = args.allow_cmds_file {
+        for rule in read_cmds_file(file)? {
+            if !allow_cmds.contains(&rule) {
+                allow_cmds.push(rule);
+            }
+        }
+    }
+    let mut allow_hosts: Vec<String> = Vec::new();
+    for h in args.allow_host {
+        let h = normalize_host(h)?;
+        if !allow_hosts.contains(&h) {
+            allow_hosts.push(h);
+        }
+    }
+    Ok(InjectClaims {
+        allow_cmds,
+        allow_hosts,
+        peer_uid: args.peer_uid,
+        redact: match args.redact {
+            RedactArg::Strict => RedactLevel::Strict,
+            RedactArg::Hidden => RedactLevel::Hidden,
+        },
+    })
+}
+
+fn redact_str(level: RedactLevel) -> &'static str {
+    match level {
+        RedactLevel::Strict => "strict",
+        RedactLevel::Hidden => "hidden",
+    }
+}
+
+/// One command rule as inspect text: the path, then any digest and
+/// argument prefix.
+fn cmd_rule_text(rule: &CmdRule) -> String {
+    let mut s = rule.path.clone();
+    if let Some(sum) = &rule.sha256 {
+        s.push_str(" sha256=");
+        s.push_str(sum);
+    }
+    if !rule.args_prefix.is_empty() {
+        s.push_str(" args=");
+        s.push_str(&rule.args_prefix.join(" "));
+    }
+    s
+}
+
 #[allow(clippy::too_many_arguments)]
 fn issue(
     vault: &std::path::Path,
@@ -224,6 +406,7 @@ fn issue(
     ops: &str,
     allow_prefix: &[String],
     max_bytes: Option<u64>,
+    inject: &InjectClaimArgs<'_>,
     global: &GlobalArgs,
     out: OutMode,
 ) -> Result<()> {
@@ -235,6 +418,7 @@ fn issue(
     let prefixes = normalize_prefixes(allow_prefix)?;
     let ttl = parse_ttl(ttl)?;
     let max_bytes = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
+    let inject = parse_inject_claims(inject)?;
 
     // Authenticate the vault for vault_id + epoch. The ISK is dropped
     // immediately after; nothing secret is ever printed.
@@ -256,10 +440,10 @@ fn issue(
         allow_ops: ops,
         allow_prefix: prefixes,
         max_bytes,
-        allow_cmds: Vec::new(),
-        allow_hosts: Vec::new(),
-        peer_uid: None,
-        redact: RedactLevel::Strict,
+        allow_cmds: inject.allow_cmds,
+        allow_hosts: inject.allow_hosts,
+        peer_uid: inject.peer_uid,
+        redact: inject.redact,
     };
     // 10-policy 2.5: a token may only narrow policy, never widen — issue
     // refuses a grant policy would deny (`Error::PolicyDeny`, exit 3).
@@ -270,6 +454,9 @@ fn issue(
     let policy = geode_grotto::policy::load_policy(vault, &mk, ctx.vault_id, ctx.epoch)?;
     let sealed = token::issue_narrow(&claims, &ctx.ek, &policy)?;
     let id_hex = cmd::hex(&id);
+    if claims.allow_ops.contains(&Op::Inject) && claims.allow_cmds.is_empty() {
+        eprintln!("note: token {id_hex} has inject but no --allow-cmd; it cannot run anything");
+    }
 
     match out {
         OutMode::Json => {
@@ -382,9 +569,13 @@ fn inspect(
             "allow_ops": ops,
             "allow_prefix": claims.allow_prefix,
             "max_bytes": claims.max_bytes,
+            "allow_cmds": claims.allow_cmds,
+            "allow_hosts": claims.allow_hosts,
+            "peer_uid": claims.peer_uid,
+            "redact": redact_str(claims.redact),
         }),
         &format!(
-            "token {}\n  principal {}\n  vault {} epoch {}\n  valid {}..{}\n  ops {}\n  prefixes {}\n  max-bytes {}",
+            "token {}\n  principal {}\n  vault {} epoch {}\n  valid {}..{}\n  ops {}\n  prefixes {}\n  max-bytes {}\n  allow-cmds {}\n  allow-hosts {}\n  peer-uid {}\n  redact {}",
             cmd::hex(&claims.token_id.0),
             claims.principal_id.0,
             cmd::hex(&claims.vault_id.0),
@@ -394,6 +585,25 @@ fn inspect(
             ops.join(","),
             claims.allow_prefix.join(","),
             claims.max_bytes,
+            if claims.allow_cmds.is_empty() {
+                "-".to_owned()
+            } else {
+                claims
+                    .allow_cmds
+                    .iter()
+                    .map(cmd_rule_text)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+            if claims.allow_hosts.is_empty() {
+                "-".to_owned()
+            } else {
+                claims.allow_hosts.join(",")
+            },
+            claims
+                .peer_uid
+                .map_or_else(|| "-".to_owned(), |u| u.to_string()),
+            redact_str(claims.redact),
         ),
     );
     Ok(())
@@ -627,33 +837,43 @@ fn read_doc(outcome: &agent_ops::ReadOutcome, mode: ReadMode) -> serde_json::Val
 fn read(
     vault: &Path,
     path: &str,
+    mode: Option<ReadModeArg>,
     token_src: &TokenSource,
     global: &GlobalArgs,
     out: OutMode,
 ) -> Result<()> {
     let sealed = resolve_agent_token(token_src)?;
     let ctx = vault_ctx(vault, global)?;
-    let outcome = agent_ops::read(
-        &ctx.ek,
-        vault,
-        &sealed,
-        now_secs(),
-        path,
-        None,
-        ReadMode::Text,
-        false,
-    )?;
+    let now = now_secs();
+    // SPEC-v034 G3/G4: the default follows the grant — `text` for a `Read`
+    // token, `hash` for `Inject` without `Read`. Core decides the gate.
+    let mode = match mode {
+        Some(ReadModeArg::Text) => ReadMode::Text,
+        Some(ReadModeArg::Hex) => ReadMode::Hex,
+        Some(ReadModeArg::Hash) => ReadMode::Hash,
+        None => agent_ops::default_read_mode(&token::inspect(&sealed, &ctx.ek, now)?.allow_ops),
+    };
+    let outcome = agent_ops::read(&ctx.ek, vault, &sealed, now, path, None, mode, false)?;
     match out {
         OutMode::Json => {
-            cmd::emit(out, "agent_read", read_doc(&outcome, ReadMode::Text), "");
+            cmd::emit(out, "agent_read", read_doc(&outcome, mode), "");
         }
         OutMode::Text => {
             let mut stdout = std::io::stdout().lock();
-            match &outcome.body {
-                ReadBody::Full(bytes) | ReadBody::Preview { bytes, .. } => {
+            match (&outcome.body, mode) {
+                (ReadBody::Full(bytes) | ReadBody::Preview { bytes, .. }, ReadMode::Hex) => {
+                    stdout
+                        .write_all(cmd::hex(bytes).as_bytes())
+                        .map_err(Error::Io)?;
+                    stdout.write_all(b"\n").map_err(Error::Io)?;
+                }
+                (ReadBody::Full(bytes) | ReadBody::Preview { bytes, .. }, _) => {
                     stdout.write_all(bytes).map_err(Error::Io)?;
                 }
-                ReadBody::None => {}
+                (ReadBody::None, _) => {
+                    // Hash mode: the digest only, never a body.
+                    writeln!(stdout, "{}", cmd::hex(&outcome.sha256)).map_err(Error::Io)?;
+                }
             }
             stdout.flush().map_err(Error::Io)?;
             if let ReadBody::Preview { bytes, .. } = &outcome.body {
@@ -1100,12 +1320,12 @@ impl<'g> StdioServer<'g> {
             .args
             .get("max_bytes")
             .and_then(serde_json::Value::as_u64);
-        let mode = match call
-            .args
-            .get("mode")
-            .and_then(|m| m.as_str())
-            .unwrap_or("text")
-        {
+        let mode = match call.args.get("mode").and_then(|m| m.as_str()).unwrap_or(
+            match agent_ops::default_read_mode(&call.claims.allow_ops) {
+                ReadMode::Hash => "hash",
+                ReadMode::Text | ReadMode::Hex => "text",
+            },
+        ) {
             "text" => ReadMode::Text,
             "hex" => ReadMode::Hex,
             "hash" => ReadMode::Hash,

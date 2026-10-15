@@ -378,6 +378,10 @@ pub enum AgentCmd {
         /// Object path inside the vault.
         #[arg(value_name = "PATH")]
         path: String,
+        /// Rendering mode. Default follows the token: `text` with `read`,
+        /// `hash` with `inject` and no `read`. `text`/`hex` need `read`.
+        #[arg(long, value_enum, value_name = "MODE")]
+        mode: Option<ReadModeArg>,
         #[command(flatten)]
         token: TokenSource,
     },
@@ -428,6 +432,26 @@ pub enum AgentCmd {
     },
 }
 
+/// `--redact` for `geode agent token issue` (SPEC-v034 G4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum RedactArg {
+    /// `[REDACTED:NAME]` (default).
+    Strict,
+    /// `[REDACTED]`, no binding name.
+    Hidden,
+}
+
+/// `--mode` for `geode agent read` (06-agent-plane 4; SPEC-v034 G4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ReadModeArg {
+    /// Plaintext bytes.
+    Text,
+    /// Lowercase hex of the bytes.
+    Hex,
+    /// sha256 only, no body.
+    Hash,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum TokenCmd {
     /// Issue a sealed token (`GTOK…`) for a principal (06 §2). Stdout is the
@@ -442,7 +466,10 @@ pub enum TokenCmd {
         /// Token lifetime (e.g. `15m`; default 15m, max 12h).
         #[arg(long, value_name = "DURATION", default_value = "15m")]
         ttl: String,
-        /// Allowed operation set (comma list: `list,read,write,…`).
+        /// Allowed operation set (comma list of `list`, `read`, `write`,
+        /// `verify`, `inject`). Required. `--ops list,inject` lets a token
+        /// use secrets without reading plaintext. A token with no
+        /// `--allow-cmd` cannot run anything, even with `inject`.
         #[arg(long, value_name = "OPS")]
         ops: String,
         /// Path prefix the token allows (repeatable).
@@ -451,6 +478,26 @@ pub enum TokenCmd {
         /// Per-token byte cap for reads/writes (default applies when omitted).
         #[arg(long, value_name = "BYTES")]
         max_bytes: Option<u64>,
+        /// Absolute canonical executable an `inject` run may start
+        /// (repeatable). One rule per flag: the path only, no digest, no
+        /// argument prefix.
+        #[arg(long = "allow-cmd", value_name = "PATH")]
+        allow_cmd: Vec<PathBuf>,
+        /// JSON list of command rules: `[{"path": "/abs/exe", "sha256":
+        /// "<hex>", "args_prefix": ["…"]}]`. `sha256` and `args_prefix`
+        /// are optional. Combined with `--allow-cmd`.
+        #[arg(long, value_name = "FILE")]
+        allow_cmds_file: Option<PathBuf>,
+        /// Host an `inject` run may reach (repeatable). Recorded intent.
+        #[arg(long = "allow-host", value_name = "HOST")]
+        allow_host: Vec<String>,
+        /// Bind the token to one socket peer uid.
+        #[arg(long, value_name = "N")]
+        peer_uid: Option<u32>,
+        /// How redaction names a hit: `strict` shows the binding name,
+        /// `hidden` does not.
+        #[arg(long, value_enum, default_value = "strict")]
+        redact: RedactArg,
     },
     /// Inspect a sealed token: principal, ops, prefixes, ttl, expiry.
     /// Read-only — the TUI mirrors this view (14-tui §6.10); issuance is
@@ -477,6 +524,16 @@ fn main() {
         Ok(cli) => cli,
         Err(error) => {
             error.print().expect("error writes to stderr");
+            // SPEC-v034 G4: `--ops` stays required; the usage error names the
+            // inject-only shape so an operator does not reach for `read`.
+            if error.kind() == ErrorKind::MissingRequiredArgument
+                && error.to_string().contains("--ops <OPS>")
+            {
+                eprintln!(
+                    "tip: --ops list,inject grants list and inject without plaintext \
+                     read; add --allow-cmd PATH or the token cannot run anything"
+                );
+            }
             let code = match error.kind() {
                 ErrorKind::DisplayHelp
                 | ErrorKind::DisplayVersion
