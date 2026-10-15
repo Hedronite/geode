@@ -1573,7 +1573,7 @@ pub(crate) fn tool_descriptors_for(grants: Option<Vec<String>>) -> Vec<serde_jso
                     "vault": vault_prop.clone(),
                     "path": {"type": "string", "description": "Vault-relative object path"},
                     "max_bytes": {"type": "integer", "description": "Read cap (default 64 KiB; hard cap from the token)"},
-                    "mode": {"type": "string", "enum": ["text", "hex", "hash"], "description": "Rendering mode (default text)"},
+                    "mode": {"type": "string", "enum": ["text", "hex", "hash"], "description": "Rendering mode. Default text when the token holds read; hash when it holds inject without read. text or hex without read returns plaintext_denied with no body."},
                     "intent": {"type": "string", "description": "Optional declared remainder (public text; never a token). Shadow Jev only."},
                 },
                 "required": ["vault", "path"],

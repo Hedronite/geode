@@ -9,7 +9,13 @@
 //! Per connection: the peer's uid/gid/pid come from the kernel. A token
 //! arrives once in `initialize` as `params._meta.geode_token`, must carry
 //! `peer_uid`, and must match the peer. The agent tools are the frozen
-//! three; `geode_run` is not advertised (G8).
+//! three, plus `geode_run` only when the bound token holds `inject` (G8).
+//! `geode_run` returns one buffered result; values never come back.
+//! Redaction catches the v1 encodings only (raw, base64, hex, one
+//! percent-encoding, canonical JSON string) and the known token prefixes.
+//! It does not catch shell quoting or any other transform, and it does not
+//! stop a hostile command; `allow_cmds` and `allow_hosts` narrow who can
+//! try.
 //!
 //! `geode custody unlock|lock|status` are clients. They resolve no key.
 //! `unlock` and `lock` are refused for a peer in `geode-agents`. `status`
@@ -134,7 +140,12 @@ pub fn default_socket() -> PathBuf {
 // Client verbs
 // ---------------------------------------------------------------------
 
-/// `geode custody` — control the custody daemon.
+/// `geode custody` — control the custody daemon over its socket.
+///
+/// These verbs are clients. They resolve no key and send no token. The
+/// daemon itself is `geode agent serve --custody --vault DIR`. `unlock`
+/// and `lock` are refused for a peer in `geode-agents`. No verb prints key
+/// bytes or the passphrase.
 #[derive(Args, Debug)]
 pub struct CustodyArgs {
     #[command(subcommand)]
@@ -144,7 +155,9 @@ pub struct CustodyArgs {
 #[derive(Subcommand, Debug)]
 pub enum CustodyCmd {
     /// Unlock the daemon's key. Passphrase from `--passphrase-fd`, else a
-    /// no-echo prompt on a TTY. Refused for members of `geode-agents`.
+    /// no-echo prompt on a TTY; with neither, exit 1. The passphrase goes
+    /// to the daemon over the socket and is never printed. Refused for
+    /// members of `geode-agents`.
     Unlock {
         /// Custody socket (default: the platform custody socket).
         #[arg(long, value_name = "PATH")]

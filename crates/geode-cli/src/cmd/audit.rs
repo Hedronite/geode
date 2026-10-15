@@ -16,6 +16,10 @@ use crate::output::exit;
 use crate::{cmd, OutMode};
 
 /// `geode audit` — the append-only run and deny log.
+///
+/// Each row is BLAKE3-chained to the one before it. A row holds no secret
+/// value, no value length, and no raw argv; argv is stored only as a hash.
+/// Local `geode run` writes the caller's own DB with `custody: false`.
 #[derive(Args, Debug)]
 pub struct AuditArgs {
     #[command(subcommand)]
@@ -25,7 +29,8 @@ pub struct AuditArgs {
 #[derive(Subcommand, Debug)]
 pub enum AuditCmd {
     /// Verify the audit hash chain. Exit 0 when intact, 2 at the first bad
-    /// seq.
+    /// seq, 1 when there is no database to read. Prints the DB path and,
+    /// on failure, the bad seq; never row contents.
     Verify {
         /// Audit database. Default: the caller's local audit DB,
         /// `$XDG_STATE_HOME/hedronite/geode/audit.db` or
