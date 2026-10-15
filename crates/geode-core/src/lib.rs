@@ -151,6 +151,7 @@
 
 pub mod aead;
 pub mod agent_ops;
+pub mod audit;
 pub mod chunk;
 pub mod event;
 pub mod hctr2;
