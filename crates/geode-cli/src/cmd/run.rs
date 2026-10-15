@@ -80,10 +80,11 @@ pub struct RunArgs {
 }
 
 /// A refusal before spawn: the shipped exit code and one `geode:` line.
-struct Refusal {
-    code: i32,
-    kind: &'static str,
-    msg: String,
+/// Custody `geode_run` reports `kind` as the `isError` code.
+pub(crate) struct Refusal {
+    pub(crate) code: i32,
+    pub(crate) kind: &'static str,
+    pub(crate) msg: String,
 }
 
 fn refuse(code: i32, kind: &'static str, msg: impl Into<String>) -> Refusal {
@@ -259,6 +260,7 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         allow_cmds: &cmds,
         allow_hosts: &[],
         redact: RedactLevel::Strict,
+        enforce_hosts: false,
     };
     let view = VaultView {
         root: &args.vault,
@@ -268,8 +270,14 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
     };
     let base_path = std::env::var_os("PATH");
     let row = RowBase {
+        principal: LOCAL_PRINCIPAL.into(),
+        token_id: String::new(),
+        peer_uid: None,
+        peer_pid: None,
         vault_id: cmd::hex(&ctx.vault_id.0),
         paths: bindings.iter().map(|b| b.path.clone()).collect(),
+        custody: false,
+        hosts: inject::hosts_label(&[]),
     };
     let plan = match inject::plan(
         &caller,
@@ -287,10 +295,18 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
     execute(args, out, &plan, &mut chain, &row)
 }
 
-/// Fields every row of this run shares.
-struct RowBase {
-    vault_id: String,
-    paths: Vec<String>,
+/// Fields every audit row of one run shares. Local runs are
+/// `human:local`, no token, `custody: false`; custody runs carry the token
+/// id, the kernel peer, and `custody: true`.
+pub(crate) struct RowBase {
+    pub(crate) principal: String,
+    pub(crate) token_id: String,
+    pub(crate) peer_uid: Option<u32>,
+    pub(crate) peer_pid: Option<u32>,
+    pub(crate) vault_id: String,
+    pub(crate) paths: Vec<String>,
+    pub(crate) custody: bool,
+    pub(crate) hosts: String,
 }
 
 fn now() -> i64 {
@@ -309,18 +325,18 @@ fn append(
 ) {
     let input = AuditInput {
         ts: now(),
-        token_id: String::new(),
-        principal: LOCAL_PRINCIPAL.into(),
-        peer_uid: None,
-        peer_pid: None,
+        token_id: row.token_id.clone(),
+        principal: row.principal.clone(),
+        peer_uid: row.peer_uid,
+        peer_pid: row.peer_pid,
         vault_id: row.vault_id.clone(),
         op: "run".into(),
         paths: row.paths.clone(),
         exit_code,
         redaction_hits: hits,
         outcome: outcome.into(),
-        custody: false,
-        hosts: "unrestricted".into(),
+        custody: row.custody,
+        hosts: row.hosts.clone(),
         argv,
     };
     if let Err(e) = chain.append(input, crate::cmd::audit::mirror) {
@@ -337,7 +353,7 @@ fn not_spawned() -> ArgvCommit {
 }
 
 /// Deny and argv-rejected plans get a row; usage and auth failures do not.
-fn plan_refusal(chain: &mut Chain, row: &RowBase, e: PlanError) -> Refusal {
+pub(crate) fn plan_refusal(chain: &mut Chain, row: &RowBase, e: PlanError) -> Refusal {
     match e {
         PlanError::Usage(m) => refuse(exit::USAGE, "usage", m),
         PlanError::Auth => refuse(
@@ -373,11 +389,18 @@ fn plan_refusal(chain: &mut Chain, row: &RowBase, e: PlanError) -> Refusal {
 }
 
 /// Child env from scratch: `PATH`, `HOME`, `LANG`, `TERM` from the caller
-/// when set, then the bindings. Nothing else, so no `GEODE_TOKEN`.
-fn child_env(plan: &inject::Plan) -> Vec<(OsString, OsString)> {
+/// when set (`HOME` replaced by `home` when given), then the bindings.
+/// Nothing else, so no `GEODE_TOKEN`.
+fn child_env(plan: &inject::Plan, home: Option<&OsStr>) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = inject::BASE_ENV
         .iter()
-        .filter_map(|k| std::env::var_os(k).map(|v| (OsString::from(k), v)))
+        .filter_map(|k| {
+            let v = match (*k, home) {
+                ("HOME", Some(h)) => Some(h.to_os_string()),
+                _ => std::env::var_os(k),
+            };
+            v.map(|v| (OsString::from(k), v))
+        })
         .collect();
     for (name, value) in &plan.env {
         env.push((
@@ -388,41 +411,44 @@ fn child_env(plan: &inject::Plan) -> Vec<(OsString, OsString)> {
     env
 }
 
-fn execute(
-    args: &RunArgs,
-    out: OutMode,
+/// How one planned run is started. Built by the transport.
+pub(crate) struct ExecOpts {
+    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) inherit_stdin: bool,
+    pub(crate) timeout: Duration,
+    pub(crate) identity: geode_os::ChildIdentity,
+    pub(crate) allow_hosts: Vec<String>,
+    /// `HOME` for the child; `None` keeps the caller's.
+    pub(crate) home: Option<OsString>,
+}
+
+/// A finished run: how the child ended, hits, and whether output was cut.
+pub(crate) struct Executed {
+    pub(crate) outcome: geode_os::ChildOutcome,
+    pub(crate) hits: BTreeMap<String, u64>,
+    pub(crate) truncated: bool,
+}
+
+/// The one executor for both transports: spawn through `geode_os`, redact
+/// and cap through `inject::Collector`, hand each safe chunk to `emit`,
+/// and write the audit row. Local `geode run` streams; custody buffers.
+pub(crate) fn execute_plan(
     plan: &inject::Plan,
+    opts: ExecOpts,
     chain: &mut Chain,
     row: &RowBase,
-) -> Result<i32, Refusal> {
-    // After authorization, before spawn (harmonized spec §3 Output).
-    eprintln!(
-        "geode: injected: {} (values withheld)",
-        plan.names().join(", ")
-    );
+    mut emit: impl FnMut(Channel, Vec<u8>),
+) -> Result<Executed, Refusal> {
     let spec = geode_os::SpawnSpec {
         program: PathBuf::from(&plan.exe),
         args: plan.args.iter().map(OsString::from).collect(),
-        env: child_env(plan),
-        cwd: args.cwd.clone(),
-        inherit_stdin: args.stdin,
-        timeout: Duration::from_secs(args.timeout),
+        env: child_env(plan, opts.home.as_deref()),
+        cwd: opts.cwd,
+        inherit_stdin: opts.inherit_stdin,
+        timeout: opts.timeout,
     };
     let mut collector = Collector::new(plan);
-    let (mut buf_out, mut buf_err) = (Vec::new(), Vec::new());
-    let mut emit = |ch: Channel, bytes: Vec<u8>| match (out, ch) {
-        (OutMode::Json, Channel::Stdout) => buf_out.extend_from_slice(&bytes),
-        (OutMode::Json, Channel::Stderr) => buf_err.extend_from_slice(&bytes),
-        (OutMode::Text, Channel::Stdout) => {
-            let mut o = std::io::stdout().lock();
-            let _ = o.write_all(&bytes);
-            let _ = o.flush();
-        }
-        (OutMode::Text, Channel::Stderr) => {
-            let _ = std::io::stderr().lock().write_all(&bytes);
-        }
-    };
-    let spawned = geode_os::spawn(spec, |s, chunk| {
+    let spawned = geode_os::spawn_with(spec, &opts.identity, &opts.allow_hosts, |s, chunk| {
         let ch = match s {
             geode_os::Stream::Stdout => Channel::Stdout,
             geode_os::Stream::Stderr => Channel::Stderr,
@@ -441,11 +467,21 @@ fn execute(
                 None,
                 BTreeMap::new(),
             );
-            return Err(refuse(
-                exit::USAGE,
-                "spawn_failed",
-                format!("{}: cannot start: {e}", plan.exe),
-            ));
+            // A list that cannot be enforced is a refusal, never an
+            // unconfined run.
+            return Err(if opts.allow_hosts.is_empty() {
+                refuse(
+                    exit::USAGE,
+                    "spawn_failed",
+                    format!("{}: cannot start: {e}", plan.exe),
+                )
+            } else {
+                refuse(
+                    exit::POLICY,
+                    "policy_deny",
+                    format!("allow_hosts: cannot isolate the child network: {e}"),
+                )
+            });
         }
     };
     for ch in [Channel::Stdout, Channel::Stderr] {
@@ -453,7 +489,6 @@ fn execute(
         emit(ch, tail);
     }
     let hits = collector.hits();
-    let code = outcome.process_exit();
     let argv = ArgvCommit::Clean {
         argv0: plan.exe.clone(),
         args: plan.args.clone(),
@@ -463,7 +498,61 @@ fn execute(
     } else {
         "spawned"
     };
-    append(chain, row, label, argv, Some(code), hits.clone());
+    append(
+        chain,
+        row,
+        label,
+        argv,
+        Some(outcome.process_exit()),
+        hits.clone(),
+    );
+    Ok(Executed {
+        outcome,
+        hits,
+        truncated: collector.truncated(),
+    })
+}
+
+fn execute(
+    args: &RunArgs,
+    out: OutMode,
+    plan: &inject::Plan,
+    chain: &mut Chain,
+    row: &RowBase,
+) -> Result<i32, Refusal> {
+    // After authorization, before spawn (harmonized spec §3 Output).
+    eprintln!(
+        "geode: injected: {} (values withheld)",
+        plan.names().join(", ")
+    );
+    let opts = ExecOpts {
+        cwd: args.cwd.clone(),
+        inherit_stdin: args.stdin,
+        timeout: Duration::from_secs(args.timeout),
+        identity: geode_os::ChildIdentity::Inherit,
+        allow_hosts: Vec::new(),
+        home: None,
+    };
+    let (mut buf_out, mut buf_err) = (Vec::new(), Vec::new());
+    let emit = |ch: Channel, bytes: Vec<u8>| match (out, ch) {
+        (OutMode::Json, Channel::Stdout) => buf_out.extend_from_slice(&bytes),
+        (OutMode::Json, Channel::Stderr) => buf_err.extend_from_slice(&bytes),
+        (OutMode::Text, Channel::Stdout) => {
+            let mut o = std::io::stdout().lock();
+            let _ = o.write_all(&bytes);
+            let _ = o.flush();
+        }
+        (OutMode::Text, Channel::Stderr) => {
+            let _ = std::io::stderr().lock().write_all(&bytes);
+        }
+    };
+    let done = execute_plan(plan, opts, chain, row, emit)?;
+    let Executed {
+        outcome,
+        hits,
+        truncated,
+    } = done;
+    let code = outcome.process_exit();
     match out {
         OutMode::Json => println!(
             "{}",
@@ -474,7 +563,7 @@ fn execute(
                 "timed_out": outcome.timed_out,
                 "stdout_redacted": String::from_utf8_lossy(&buf_out),
                 "stderr_redacted": String::from_utf8_lossy(&buf_err),
-                "truncated": collector.truncated(),
+                "truncated": truncated,
                 "redaction_hits": hits,
             })
         ),

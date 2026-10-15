@@ -1391,6 +1391,20 @@ impl<'g> StdioServer<'g> {
             .and_then(|p| p.get("name"))
             .and_then(|n| n.as_str())
             .unwrap_or("");
+        if name == "geode_run" {
+            // Design §5: a server that does not advertise `geode_run`
+            // answers it with `policy_deny`, not an unknown-tool error.
+            return rpc_ok(
+                id,
+                &serde_json::json!({
+                    "content": [{"type": "text", "text": serde_json::json!({
+                        "ok": false,
+                        "error": {"code": "policy_deny", "message": "geode_run is served only by the custody daemon"},
+                    }).to_string()}],
+                    "isError": true,
+                }),
+            );
+        }
         if !matches!(name, "geode_list" | "geode_read" | "geode_write") {
             return rpc_error(id, -32602, &format!("unknown tool '{name}'"));
         }

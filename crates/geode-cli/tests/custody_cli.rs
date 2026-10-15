@@ -292,3 +292,37 @@ fn custody_help_has_no_key_material_or_mount() {
     let o = geode(&dir).args(["custody", "mount"]).output().unwrap();
     assert_eq!(o.status.code(), Some(1), "custody has no mount verb");
 }
+
+#[test]
+fn stdio_answers_geode_run_with_policy_deny() {
+    let (_t, dir) = tmp();
+    let mut child = geode(&dir)
+        .args(["agent", "serve", "--stdio"])
+        // A GTOK-shaped token is enough to start; nothing here opens it.
+        .env("GEODE_TOKEN", "47544f4b00")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"tools/list"}}"#).unwrap();
+        writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"geode_run","arguments":{{}}}}}}"#).unwrap();
+    }
+    drop(child.stdin.take());
+    let o = child.wait_with_output().unwrap();
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let names: Vec<&str> = lines[0]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["geode_list", "geode_read", "geode_write"]);
+    assert_eq!(lines[1]["result"]["isError"], true, "{}", lines[1]);
+    assert!(lines[1].to_string().contains("policy_deny"), "{}", lines[1]);
+    assert!(lines[1].get("error").is_none(), "not a protocol error");
+}
