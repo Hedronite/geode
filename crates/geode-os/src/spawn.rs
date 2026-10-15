@@ -10,7 +10,7 @@ use std::ffi::OsString;
 use std::io::{self, Read};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -94,9 +94,51 @@ pub fn spawn(spec: SpawnSpec, on_chunk: impl FnMut(Stream, &[u8])) -> io::Result
 pub fn spawn_as(
     spec: SpawnSpec,
     identity: &ChildIdentity,
-    mut on_chunk: impl FnMut(Stream, &[u8]),
+    on_chunk: impl FnMut(Stream, &[u8]),
 ) -> io::Result<ChildOutcome> {
-    let mut cmd = build_command(&spec, identity)?;
+    spawn_with(spec, identity, &[], on_chunk)
+}
+
+/// Env names the child gets pointing at the egress proxy.
+#[cfg(target_os = "linux")]
+const PROXY_VARS: [&str; 6] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+];
+
+/// [`spawn_as`] with `allow_hosts` (SPEC-v034 G8). Empty: unrestricted, no
+/// namespace. Non-empty, Linux: the child runs in its own network namespace
+/// with only loopback, where a userspace proxy admits listed hosts; the
+/// proxy env vars point at it. Non-empty elsewhere: `Unsupported`, nothing
+/// runs. If the namespace cannot be made, nothing runs.
+///
+/// # Errors
+///
+/// As [`spawn_as`], plus the namespace error.
+pub fn spawn_with(
+    spec: SpawnSpec,
+    identity: &ChildIdentity,
+    allow_hosts: &[String],
+    on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
+    let cmd = prepared(&spec, identity)?;
+    if allow_hosts.is_empty() {
+        let mut cmd = cmd;
+        let child = cmd.spawn()?;
+        drop(cmd);
+        return supervise(child, spec.timeout, on_chunk);
+    }
+    isolated(cmd, allow_hosts, spec.timeout, on_chunk)
+}
+
+/// The command with its identity, a cleared env plus `spec.env`, piped
+/// output, stdin, cwd, and its own process group.
+fn prepared(spec: &SpawnSpec, identity: &ChildIdentity) -> io::Result<Command> {
+    let mut cmd = build_command(spec, identity)?;
     cmd.env_clear()
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .stdin(if spec.inherit_stdin {
@@ -110,8 +152,106 @@ pub fn spawn_as(
     if let Some(dir) = &spec.cwd {
         cmd.current_dir(dir);
     }
-    let mut child = cmd.spawn()?;
-    drop(cmd);
+    Ok(cmd)
+}
+
+#[cfg(target_os = "linux")]
+fn isolated(
+    cmd: Command,
+    allow_hosts: &[String],
+    timeout: Duration,
+    on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let allow = crate::egress::AllowList::parse(allow_hosts);
+    if allow.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "allow_hosts has no usable entry",
+        ));
+    }
+    // Workers are spawned from this host-namespace thread, so they dial out
+    // from the daemon's namespace.
+    let (conn_tx, conn_rx) = mpsc::channel::<TcpStream>();
+    let dispatcher = thread::spawn(move || {
+        for s in conn_rx {
+            let a = allow.clone();
+            thread::spawn(move || {
+                let _ = crate::egress::handle_client(s, &a);
+            });
+        }
+    });
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_bridge = Arc::clone(&stop);
+    let (child_tx, child_rx) = mpsc::channel::<io::Result<Child>>();
+    // Only this thread enters the child's namespace. It binds the proxy
+    // there, forks the child from there, then accepts for the proxy.
+    let bridge = thread::spawn(move || {
+        let listener =
+            match crate::netns::enter_new_netns().and_then(|()| TcpListener::bind("127.0.0.1:0")) {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = child_tx.send(Err(e));
+                    return;
+                }
+            };
+        let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
+        let url = format!("http://127.0.0.1:{port}");
+        let mut cmd = cmd;
+        for k in PROXY_VARS {
+            cmd.env(k, &url);
+        }
+        let spawned = cmd.spawn();
+        drop(cmd);
+        let ok = spawned.is_ok();
+        let _ = child_tx.send(spawned);
+        if !ok || listener.set_nonblocking(true).is_err() {
+            return;
+        }
+        while !stop_bridge.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((s, _)) => {
+                    if s.set_nonblocking(false).is_ok() && conn_tx.send(s).is_err() {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(POLL),
+                Err(_) => break,
+            }
+        }
+    });
+    let child = child_rx
+        .recv()
+        .map_err(|_| io::Error::other("network namespace thread failed"))?;
+    let outcome = child.and_then(|c| supervise(c, timeout, on_chunk));
+    stop.store(true, Ordering::Relaxed);
+    let _ = bridge.join();
+    let _ = dispatcher.join();
+    outcome
+}
+
+#[cfg(not(target_os = "linux"))]
+fn isolated(
+    _cmd: Command,
+    _allow_hosts: &[String],
+    _timeout: Duration,
+    _on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "allow_hosts: unsupported on this host",
+    ))
+}
+
+/// Read both pipes, enforce the timeout, and reap the group.
+fn supervise(
+    mut child: Child,
+    timeout: Duration,
+    mut on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
     let pgid = i32::try_from(child.id()).unwrap_or(0);
 
     let (tx, rx) = mpsc::channel::<(Stream, Vec<u8>)>();
@@ -124,7 +264,7 @@ pub fn spawn_as(
     }
     drop(tx);
 
-    let deadline = Instant::now() + spec.timeout;
+    let deadline = Instant::now() + timeout;
     let mut term_at: Option<Instant> = None;
     let mut timed_out = false;
     let status = loop {
@@ -411,6 +551,115 @@ mod tests {
             deny: vec!["/x".into()],
         };
         assert!(spawn_as(spec("true", Duration::from_secs(1)), &id, |_, _| {}).is_err());
+    }
+
+    /// One-shot HTTP upstream on 127.0.0.1 in this (host) namespace that
+    /// reports each connection.
+    fn http_upstream() -> (u16, mpsc::Receiver<()>) {
+        use std::io::Write as _;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            for mut s in l.incoming().flatten() {
+                let _ = tx.send(());
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\nhello-upstream\n");
+            }
+        });
+        (port, rx)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn allow_hosts_blocks_unlisted_hosts_in_a_netns() {
+        let curl = ["/usr/bin/curl", "/bin/curl"]
+            .into_iter()
+            .find(|p| std::path::Path::new(p).exists());
+        let Some(curl) = curl else {
+            eprintln!("GAP: no curl on this host; netns end-to-end not run");
+            return;
+        };
+        let (ok_port, ok_seen) = http_upstream();
+        let (bad_port, bad_seen) = http_upstream();
+        let script = format!(
+            "{curl} -s -p --max-time 5 http://127.0.0.1:{ok_port}/; echo rc1=$?; \
+             {curl} -s -p --max-time 5 http://127.0.0.1:{bad_port}/; echo rc2=$?; \
+             {curl} -s --noproxy '*' --max-time 3 http://127.0.0.1:{ok_port}/; echo rc3=$?"
+        );
+        let mut sp = spec(&script, Duration::from_secs(30));
+        sp.env.push(("PATH".into(), "/usr/bin:/bin".into()));
+        let mut out = Vec::new();
+        let r = spawn_with(
+            sp,
+            &ChildIdentity::Inherit,
+            &[format!("127.0.0.1:{ok_port}")],
+            |st, c| {
+                if st == Stream::Stdout {
+                    out.extend_from_slice(c);
+                }
+            },
+        );
+        match r {
+            Err(e) if e.raw_os_error() == Some(libc::EPERM) => {
+                // GitHub runners lack CAP_SYS_ADMIN: the run is refused, not
+                // run unconfined. The proxy itself is tested in `egress`.
+                eprintln!(
+                    "GAP: cannot create a network namespace here ({e}); refused, nothing ran"
+                );
+                assert!(ok_seen.try_recv().is_err() && bad_seen.try_recv().is_err());
+            }
+            Err(e) => panic!("unexpected: {e}"),
+            Ok(o) => {
+                let out = String::from_utf8_lossy(&out);
+                assert_eq!(o.exit_code, Some(0), "{out}");
+                assert!(
+                    out.contains("hello-upstream") && out.contains("rc1=0"),
+                    "allowed host: {out}"
+                );
+                assert!(!out.contains("rc2=0"), "unlisted host got through: {out}");
+                assert!(!out.contains("rc3=0"), "direct connect got through: {out}");
+                assert!(ok_seen.try_recv().is_ok());
+                assert!(bad_seen.try_recv().is_err(), "unlisted upstream was dialed");
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn allow_hosts_refuses_before_spawn_off_linux() {
+        let marker = std::env::temp_dir().join(format!("geode-os-hosts-{}", std::process::id()));
+        let sp = spec(
+            &format!("echo x > '{}'", marker.display()),
+            Duration::from_secs(5),
+        );
+        let r = spawn_with(
+            sp,
+            &ChildIdentity::Inherit,
+            &["api.example.com".into()],
+            |_, _| {},
+        );
+        assert_eq!(r.unwrap_err().kind(), io::ErrorKind::Unsupported);
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn empty_allow_hosts_is_unrestricted() {
+        let (port, seen) = http_upstream();
+        let mut sp = spec(
+            &format!("exec 3<>/dev/tcp/127.0.0.1/{port} 2>/dev/null || true"),
+            Duration::from_secs(5),
+        );
+        sp.program = std::fs::canonicalize("/bin/bash").unwrap_or_else(|_| sh());
+        let o = spawn_with(sp, &ChildIdentity::Inherit, &[], |_, _| {}).unwrap();
+        assert_eq!(o.exit_code, Some(0));
+        if std::path::Path::new("/bin/bash").exists() {
+            assert!(
+                seen.recv_timeout(Duration::from_secs(2)).is_ok(),
+                "empty list must not deny"
+            );
+        }
     }
 
     #[test]

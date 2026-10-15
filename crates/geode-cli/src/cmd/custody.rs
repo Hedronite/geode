@@ -30,7 +30,10 @@ use crate::cmd::agent::{
     mcp_error_code, normalize_sealed, now_secs, rpc_error, rpc_line_too_large, rpc_ok,
     tool_descriptors_for, write_frame, AgentCall, StdioServer, MCP_PROTOCOL_VERSION,
 };
+use crate::cmd::run;
 use crate::{cmd, GlobalArgs, OutMode, TokenSource};
+use geode_grotto::inject;
+use geode_grotto::policy::Op;
 
 /// Idle lock for the custody session (core `session::DEFAULT_IDLE_LOCK`).
 const IDLE_LOCK: Duration = geode_grotto::session::DEFAULT_IDLE_LOCK;
@@ -39,6 +42,82 @@ const CUSTODY_ERROR: i64 = -32000;
 const RATE_MAX: u32 = 128;
 const RATE_WINDOW: Duration = Duration::from_secs(10);
 const AGENT_TOOLS: [&str; 3] = ["geode_list", "geode_read", "geode_write"];
+const RUN_TOOL: &str = "geode_run";
+/// `geode_run` default and ceiling, in seconds (design §3).
+const RUN_TIMEOUT_DEFAULT: u64 = 120;
+const RUN_TIMEOUT_MAX: u64 = 3600;
+
+/// The `geode_run` descriptor (design §5). The token is never an argument.
+fn run_descriptor() -> serde_json::Value {
+    serde_json::json!({
+        "name": RUN_TOOL,
+        "description": "Run an allowlisted command with vault secrets injected into its env. Values never return: stdout and stderr come back redacted in one buffered result. A non-zero child exit is a normal result with exit_code; isError means Geode refused.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "vault": {"type": "string", "description": "The daemon's vault directory"},
+                "argv": {"type": "array", "items": {"type": "string"}, "description": "Command and arguments; argv[0] must be in the token's allow_cmds"},
+                "secrets": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Env NAME to vault path"},
+                "files": {"type": "object", "additionalProperties": {"type": "string"}, "description": "File bindings (not available in this build)"},
+                "cwd": {"type": "string", "description": "Working directory for the child"},
+                "timeout_s": {"type": "integer", "description": "Seconds before SIGTERM (default 120)"},
+            },
+            "required": ["vault", "argv", "secrets"],
+        },
+    })
+}
+
+/// Parsed `geode_run` arguments.
+struct RunRequest {
+    argv: Vec<String>,
+    bindings: Vec<inject::BindingSpec>,
+    cwd: Option<PathBuf>,
+    timeout: Duration,
+}
+
+impl RunRequest {
+    fn parse(args: &serde_json::Value) -> std::result::Result<Self, Refusal> {
+        let usage = |m: &str| refusal("usage", m.to_owned());
+        let argv = args["argv"]
+            .as_array()
+            .ok_or_else(|| usage("argv must be an array of strings"))?
+            .iter()
+            .map(|a| a.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| usage("argv must be an array of strings"))?;
+        let secrets = args["secrets"]
+            .as_object()
+            .ok_or_else(|| usage("secrets must be an object of NAME to vault path"))?;
+        let bindings = secrets
+            .iter()
+            .map(|(name, path)| {
+                path.as_str().map(|p| inject::BindingSpec {
+                    name: name.clone(),
+                    path: p.to_owned(),
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| usage("secrets values must be vault paths"))?;
+        if args["files"].as_object().is_some_and(|f| !f.is_empty()) {
+            return Err(usage(
+                "files bindings are not available in this build; use secrets",
+            ));
+        }
+        let timeout = match args.get("timeout_s") {
+            None | Some(serde_json::Value::Null) => RUN_TIMEOUT_DEFAULT,
+            Some(v) => v
+                .as_u64()
+                .filter(|t| (1..=RUN_TIMEOUT_MAX).contains(t))
+                .ok_or_else(|| usage("timeout_s must be 1..3600"))?,
+        };
+        Ok(Self {
+            argv,
+            bindings,
+            cwd: args["cwd"].as_str().map(PathBuf::from),
+            timeout: Duration::from_secs(timeout),
+        })
+    }
+}
 
 /// The fixed custody socket. The parent comes from systemd
 /// `RuntimeDirectory=` or the launchd plist; Geode does not create it.
@@ -309,14 +388,21 @@ pub(crate) fn serve(
     if geode_os::deny_core_dumps().is_err() {
         eprintln!("geode: warning: could not refuse core dumps for this process");
     }
+    let audit_db = crate::cmd::audit::local_db_path()
+        .ok_or_else(|| Error::Format("no audit path for the custody user: set HOME".into()))?;
     let socket = default_socket();
     let listener = bind_custody(&socket, Some(agents_gid))?;
+    let paths = DaemonPaths {
+        vault: vault.to_path_buf(),
+        key,
+        socket: socket.clone(),
+        audit_db,
+    };
     let daemon = Arc::new(Daemon::new(
-        vault,
-        &key,
-        &socket,
+        paths,
         me,
         Agents::Gid(agents_gid),
+        ChildRule::Os,
     ));
     let result = daemon.listen(&listener);
     let _ = std::fs::remove_file(&socket);
@@ -387,6 +473,27 @@ pub(crate) struct Daemon {
     agents: Agents,
     idle: Duration,
     session: Mutex<Option<Unlocked>>,
+    audit_db: PathBuf,
+    child: ChildRule,
+}
+
+/// The files a daemon owns. The seatbelt denies `key`, `audit_db`, and
+/// `socket` to a macOS child.
+pub(crate) struct DaemonPaths {
+    pub(crate) vault: PathBuf,
+    pub(crate) key: PathBuf,
+    pub(crate) socket: PathBuf,
+    pub(crate) audit_db: PathBuf,
+}
+
+/// How a `geode_run` child identity is chosen.
+pub(crate) enum ChildRule {
+    /// Production: `geode-run` on Linux, the seatbelted daemon on macOS
+    /// (`geode_os::ident::child_identity`). Never the agent uid.
+    Os,
+    /// Tests: a fixed identity, since the runner has no custody accounts.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Fixed(geode_os::ChildIdentity),
 }
 
 /// One custody refusal, sent as a JSON-RPC error with `data.code`.
@@ -422,20 +529,21 @@ struct Conn {
 
 impl Daemon {
     pub(crate) fn new(
-        vault: &Path,
-        key: &Path,
-        socket: &Path,
+        paths: DaemonPaths,
         daemon_uid: u32,
         agents: Agents,
+        child: ChildRule,
     ) -> Self {
         Self {
-            vault: vault.to_path_buf(),
-            key: key.to_path_buf(),
-            socket: socket.to_path_buf(),
+            vault: paths.vault,
+            key: paths.key,
+            socket: paths.socket,
             daemon_uid,
             agents,
             idle: IDLE_LOCK,
             session: Mutex::new(None),
+            audit_db: paths.audit_db,
+            child,
         }
     }
 
@@ -579,15 +687,22 @@ impl Daemon {
             .ok_or_else(|| refusal("locked", "custody is locked"))
     }
 
+    /// The frozen three, plus `geode_run` only when the bound token holds
+    /// `Inject` (design §5).
     fn tools(&self, conn: &Conn) -> Vec<serde_json::Value> {
-        let prefixes = conn.sealed.as_ref().and_then(|sealed| {
+        let claims = conn.sealed.as_ref().and_then(|sealed| {
             let mut guard = self.session.lock().ok()?;
             let s = self.live(&mut guard).ok()?;
-            token::inspect(sealed, &s.ctx.ek, now_secs())
-                .ok()
-                .map(|t| t.allow_prefix)
+            token::inspect(sealed, &s.ctx.ek, now_secs()).ok()
         });
-        tool_descriptors_for(prefixes)
+        let inject = claims
+            .as_ref()
+            .is_some_and(|c| c.allow_ops.contains(&Op::Inject));
+        let mut tools = tool_descriptors_for(claims.map(|c| c.allow_prefix));
+        if inject {
+            tools.push(run_descriptor());
+        }
+        tools
     }
 
     fn tool_call(&self, conn: &mut Conn, params: &serde_json::Value) -> serde_json::Value {
@@ -609,9 +724,9 @@ impl Daemon {
         params: &serde_json::Value,
     ) -> std::result::Result<serde_json::Value, Refusal> {
         let name = params["name"].as_str().unwrap_or("");
-        if !AGENT_TOOLS.contains(&name) {
-            // `geode_run` is not advertised before G8; any other name is
-            // refused the same way, never as a protocol error.
+        if !AGENT_TOOLS.contains(&name) && name != RUN_TOOL {
+            // Unknown names are refused like an unadvertised tool, never as
+            // a protocol error.
             return Err(refusal(
                 "policy_deny",
                 format!("tool '{name}' is not available"),
@@ -631,6 +746,10 @@ impl Daemon {
         }
         let empty = serde_json::json!({});
         let args = params.get("arguments").unwrap_or(&empty);
+        let claims = self.verify_token(conn.peer, &sealed)?;
+        if name == RUN_TOOL && !claims.allow_ops.contains(&Op::Inject) {
+            return Err(refusal("policy_deny", "token does not hold inject"));
+        }
         let vault = args["vault"].as_str().unwrap_or("");
         if !same_dir(Path::new(vault), &self.vault) {
             return Err(refusal(
@@ -638,7 +757,9 @@ impl Daemon {
                 "vault is not this daemon's vault",
             ));
         }
-        let claims = self.verify_token(conn.peer, &sealed)?;
+        if name == RUN_TOOL {
+            return self.run_tool(conn.peer, &claims, args);
+        }
         let mut guard = self
             .session
             .lock()
@@ -660,6 +781,130 @@ impl Daemon {
             "geode_read" => StdioServer::read_tool(&call),
             _ => StdioServer::write_tool(&call),
         }?)
+    }
+
+    /// `geode_run` (design §3, §5): the same `inject::plan` and executor as
+    /// local `geode run`, with the token as the authority. One buffered
+    /// result; `isError` only for a Geode-side refusal.
+    fn run_tool(
+        &self,
+        peer: PeerCred,
+        claims: &Token,
+        args: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, Refusal> {
+        if !claims.allow_ops.contains(&Op::Inject) {
+            return Err(refusal("policy_deny", "token does not hold inject"));
+        }
+        let req = RunRequest::parse(args)?;
+        let row_paths: Vec<String> = req.bindings.iter().map(|b| b.path.clone()).collect();
+        let mut chain = geode_grotto::audit::open(&self.audit_db)
+            .map_err(|e| refusal("io", format!("audit db: {e}")))?;
+        // Plan under the session lock; the child runs after it is released.
+        let (plan, row) = {
+            let mut guard = self
+                .session
+                .lock()
+                .map_err(|_| refusal("io", "session poisoned"))?;
+            let s = self.live(&mut guard)?;
+            s.last_used = Instant::now();
+            let ctx = &s.ctx;
+            let mk = geode_grotto::kdf::derive_meta_key(&ctx.ek, ctx.vault_id, ctx.epoch);
+            let policy =
+                geode_grotto::policy::load_policy(&self.vault, &mk, ctx.vault_id, ctx.epoch)?;
+            let row = run::RowBase {
+                principal: claims.principal_id.0.clone(),
+                token_id: cmd::hex(&claims.token_id.0),
+                peer_uid: Some(peer.uid),
+                peer_pid: peer.pid.and_then(|p| u32::try_from(p).ok()),
+                vault_id: cmd::hex(&ctx.vault_id.0),
+                paths: row_paths,
+                custody: true,
+                hosts: inject::hosts_label(&claims.allow_hosts),
+            };
+            let caller = inject::Caller {
+                principal: &claims.principal_id,
+                policy: &policy,
+                token: Some(claims),
+                allow_cmds: &claims.allow_cmds,
+                allow_hosts: &claims.allow_hosts,
+                redact: claims.redact,
+                enforce_hosts: cfg!(target_os = "linux"),
+            };
+            let view = inject::VaultView {
+                root: &self.vault,
+                ek: &ctx.ek,
+                epoch: ctx.epoch,
+                manifest: &ctx.manifest,
+            };
+            let base_path = std::env::var_os("PATH");
+            let planned = inject::plan(
+                &caller,
+                &view,
+                &inject::PlanRequest {
+                    bindings: &req.bindings,
+                    argv: &req.argv,
+                    base_path: base_path.as_deref(),
+                    no_redact: false,
+                },
+            );
+            match planned {
+                Ok(p) => (p, row),
+                Err(e) => {
+                    let r = run::plan_refusal(&mut chain, &row, e);
+                    return Err(refusal(r.kind, r.msg));
+                }
+            }
+        };
+        let identity = self.child_identity(peer)?;
+        let opts = run::ExecOpts {
+            cwd: req.cwd,
+            inherit_stdin: false,
+            timeout: req.timeout,
+            identity,
+            allow_hosts: claims.allow_hosts.clone(),
+            home: Some(std::ffi::OsString::from("/")),
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let done = run::execute_plan(&plan, opts, &mut chain, &row, |ch, bytes| match ch {
+            inject::Channel::Stdout => out.extend_from_slice(&bytes),
+            inject::Channel::Stderr => err.extend_from_slice(&bytes),
+        })
+        .map_err(|r| refusal(r.kind, r.msg))?;
+        Ok(serde_json::json!({
+            "spawned": true,
+            "exit_code": done.outcome.exit_code,
+            "signal": done.outcome.signal,
+            "timed_out": done.outcome.timed_out,
+            "stdout_redacted": String::from_utf8_lossy(&out),
+            "stderr_redacted": String::from_utf8_lossy(&err),
+            "truncated": done.truncated,
+            "redaction_hits": done.hits,
+        }))
+    }
+
+    fn child_identity(
+        &self,
+        peer: PeerCred,
+    ) -> std::result::Result<geode_os::ChildIdentity, Refusal> {
+        match &self.child {
+            ChildRule::Fixed(id) => Ok(id.clone()),
+            ChildRule::Os => {
+                let run_user = ident::lookup_user(ident::RUN_USER).ok().flatten();
+                let deny = [
+                    self.key.as_path(),
+                    self.audit_db.as_path(),
+                    self.socket.as_path(),
+                ];
+                ident::child_identity(
+                    ident::Os::current(),
+                    self.daemon_uid,
+                    peer.uid,
+                    run_user,
+                    &deny,
+                )
+                .map_err(|e| refusal("policy_deny", e))
+            }
+        }
     }
 
     fn require_control(&self, peer: PeerCred) -> std::result::Result<(), Refusal> {
@@ -795,12 +1040,17 @@ mod tests {
         std::fs::create_dir(dir.join("run")).unwrap();
         let socket = dir.join("run/custody.sock");
         let listener = bind_custody(&socket, None).unwrap();
+        let paths = DaemonPaths {
+            vault: dir.join("v.geode"),
+            key: dir.join("k.gkey"),
+            socket: socket.clone(),
+            audit_db: dir.join("state/audit.db"),
+        };
         let d = Arc::new(Daemon::new(
-            &dir.join("v.geode"),
-            &dir.join("k.gkey"),
-            &socket,
+            paths,
             4242,
             agents,
+            ChildRule::Fixed(geode_os::ChildIdentity::Inherit),
         ));
         std::thread::spawn(move || d.listen(&listener));
         Fx {
@@ -853,6 +1103,51 @@ mod tests {
     /// A token for `human:local` (the default policy grants it) with
     /// `peer_uid`, sealed under the vault's EK.
     fn token_hex(fx: &Fx, peer_uid: Option<u32>) -> String {
+        token_with(
+            fx,
+            peer_uid,
+            vec![Op::List, Op::Read],
+            Vec::new(),
+            Vec::new(),
+        )
+    }
+
+    /// The first `name` on PATH, canonicalized, as the plan resolves it.
+    fn canonical_on_path(name: &str) -> String {
+        let path = std::env::var_os("PATH").unwrap();
+        let found = std::env::split_paths(&path)
+            .map(|d| d.join(name))
+            .find(|p| p.is_file())
+            .unwrap();
+        std::fs::canonicalize(found)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn inject_token(fx: &Fx, hosts: Vec<String>) -> String {
+        let sh = geode_grotto::token::CmdRule {
+            path: canonical_on_path("sh"),
+            sha256: None,
+            args_prefix: Vec::new(),
+        };
+        token_with(
+            fx,
+            Some(ident::euid()),
+            vec![Op::List, Op::Inject],
+            vec![sh],
+            hosts,
+        )
+    }
+
+    fn token_with(
+        fx: &Fx,
+        peer_uid: Option<u32>,
+        allow_ops: Vec<Op>,
+        allow_cmds: Vec<geode_grotto::token::CmdRule>,
+        allow_hosts: Vec<String>,
+    ) -> String {
         let isk = cmd::load_isk_given(&fx.key(), None).unwrap();
         let ctx = cmd::load_vault(&fx.vault(), &isk).unwrap();
         let now = now_secs();
@@ -863,11 +1158,11 @@ mod tests {
             principal_id: PrincipalId("human:local".into()),
             not_before: now,
             not_after: now + 600,
-            allow_ops: vec![Op::List, Op::Read],
+            allow_ops,
             allow_prefix: vec!["cfg/".into()],
             max_bytes: 1 << 20,
-            allow_cmds: Vec::new(),
-            allow_hosts: Vec::new(),
+            allow_cmds,
+            allow_hosts,
             peer_uid,
             redact: RedactLevel::Strict,
         };
@@ -880,6 +1175,151 @@ mod tests {
     fn isk_hex(fx: &Fx) -> String {
         let raw = std::fs::read(fx.key()).unwrap();
         cmd::hex(&raw[6..38])
+    }
+
+    /// Unlock `fx`, then open a connection bound to `tok`.
+    fn bound(fx: &Fx, tok: &str) -> Raw {
+        let mut c = raw(fx);
+        c.call("geode/custody.unlock", serde_json::json!({}));
+        let mut a = raw(fx);
+        let r = a.call(
+            "initialize",
+            serde_json::json!({"_meta": {"geode_token": tok}}),
+        );
+        assert!(r.get("error").is_none(), "{r}");
+        a
+    }
+
+    fn run_call(a: &mut Raw, fx: &Fx, argv: &[&str]) -> serde_json::Value {
+        let vault = fx.vault().to_str().unwrap().to_owned();
+        a.call(
+            "tools/call",
+            serde_json::json!({"name": "geode_run", "arguments": {
+                "vault": vault, "argv": argv, "secrets": {"KEY": "cfg/note"},
+            }}),
+        )
+    }
+
+    fn tool_doc(resp: &serde_json::Value) -> serde_json::Value {
+        assert!(
+            resp["result"]["isError"].is_null(),
+            "unexpected isError: {resp}"
+        );
+        serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    fn rows(fx: &Fx) -> Vec<(String, i64, String, Option<i64>)> {
+        let conn = rusqlite::Connection::open(fx.dir.join("state/audit.db")).unwrap();
+        let mut st = conn
+            .prepare("SELECT outcome, custody, hosts, exit_code FROM audit ORDER BY seq")
+            .unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(std::result::Result::unwrap)
+            .collect()
+    }
+
+    #[test]
+    fn geode_run_is_advertised_only_with_inject() {
+        let fx = start(Agents::Uids(Vec::new()));
+        let names = |a: &mut Raw| -> Vec<String> {
+            let r = a.call("tools/list", serde_json::json!({}));
+            r["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let mut reader = bound(&fx, &token_hex(&fx, Some(ident::euid())));
+        assert_eq!(names(&mut reader), AGENT_TOOLS);
+        let mut injector = bound(&fx, &inject_token(&fx, Vec::new()));
+        let n = names(&mut injector);
+        assert_eq!(n, ["geode_list", "geode_read", "geode_write", "geode_run"]);
+        // Without Inject the call is policy_deny, never unknown-tool.
+        let r = run_call(&mut reader, &fx, &["sh", "-c", "true"]);
+        assert_eq!(tool_err(&r), "policy_deny");
+    }
+
+    #[test]
+    fn geode_run_child_exit_1_is_one_buffered_result() {
+        let fx = start(Agents::Uids(Vec::new()));
+        let mut a = bound(&fx, &inject_token(&fx, Vec::new()));
+        let r = run_call(
+            &mut a,
+            &fx,
+            &["sh", "-c", "echo $KEY; echo $KEY >&2; exit 1"],
+        );
+        let doc = tool_doc(&r);
+        assert_eq!(doc["spawned"], true);
+        assert_eq!(doc["exit_code"], 1);
+        assert_eq!(doc["timed_out"], false);
+        assert_eq!(doc["stdout_redacted"], "[REDACTED:KEY]\n");
+        assert_eq!(doc["stderr_redacted"], "[REDACTED:KEY]\n");
+        assert_eq!(doc["redaction_hits"]["KEY"], 2);
+        assert!(!r.to_string().contains(DUMMY), "dummy in the MCP result");
+        let rows = rows(&fx);
+        let (outcome, custody, hosts, exit) = rows.last().unwrap();
+        assert_eq!(
+            (outcome.as_str(), *custody, hosts.as_str(), *exit),
+            ("spawned", 1, "unrestricted", Some(1))
+        );
+        let db = std::fs::read(fx.dir.join("state/audit.db")).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&db).contains(DUMMY),
+            "dummy in the audit db"
+        );
+    }
+
+    #[test]
+    fn geode_run_refusals_are_is_error() {
+        let fx = start(Agents::Uids(Vec::new()));
+        let mut a = bound(&fx, &inject_token(&fx, Vec::new()));
+        let wrong = a.call(
+            "tools/call",
+            serde_json::json!({"name": "geode_run", "arguments": {
+                "vault": fx.dir.to_str().unwrap(), "argv": ["sh"], "secrets": {"KEY": "cfg/note"},
+            }}),
+        );
+        assert_eq!(tool_err(&wrong), "vault_mismatch");
+        // argv[0] outside allow_cmds.
+        let geode = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let r = run_call(&mut a, &fx, &[geode.to_str().unwrap()]);
+        assert_eq!(tool_err(&r), "policy_deny");
+        // A needle in argv.
+        let r = run_call(&mut a, &fx, &["sh", "-c", &format!("echo {DUMMY}")]);
+        assert_eq!(tool_err(&r), "argv_rejected");
+        assert!(!r.to_string().contains(DUMMY));
+        let outcomes: Vec<String> = rows(&fx).into_iter().map(|r| r.0).collect();
+        assert_eq!(outcomes, ["policy_deny", "argv_rejected"]);
+    }
+
+    #[test]
+    fn geode_run_allow_hosts_per_os() {
+        let fx = start(Agents::Uids(Vec::new()));
+        let mut a = bound(&fx, &inject_token(&fx, vec!["api.example.com".into()]));
+        let marker = fx.dir.join("ran.marker");
+        let script = format!("echo x > '{}'", marker.display());
+        let r = run_call(&mut a, &fx, &["sh", "-c", &script]);
+        if cfg!(target_os = "linux") {
+            // Enforced in a netns, or refused when the host cannot make one.
+            if r["result"]["isError"] == true {
+                assert_eq!(tool_err(&r), "policy_deny");
+                assert!(r.to_string().contains("allow_hosts"), "{r}");
+                assert!(!marker.exists(), "ran without isolation");
+            } else {
+                assert_eq!(tool_doc(&r)["exit_code"], 0);
+                assert_eq!(rows(&fx).last().unwrap().2, "api.example.com");
+            }
+        } else {
+            assert_eq!(tool_err(&r), "policy_deny");
+            assert!(
+                r.to_string()
+                    .contains("allow_hosts: unsupported on this host"),
+                "{r}"
+            );
+            assert!(!marker.exists(), "macOS must refuse before spawn");
+        }
     }
 
     #[test]

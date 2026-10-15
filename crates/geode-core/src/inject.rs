@@ -68,6 +68,17 @@ impl std::fmt::Display for PlanError {
 
 impl std::error::Error for PlanError {}
 
+/// The audit `hosts` value: `unrestricted` for an empty list, else the
+/// list itself.
+#[must_use]
+pub fn hosts_label(allow_hosts: &[String]) -> String {
+    if allow_hosts.is_empty() {
+        "unrestricted".to_owned()
+    } else {
+        allow_hosts.join(",")
+    }
+}
+
 /// Who is asking, and what it may run. Local mode passes the policy
 /// principal and no token; the daemon passes the verified token too.
 pub struct Caller<'a> {
@@ -77,6 +88,10 @@ pub struct Caller<'a> {
     pub allow_cmds: &'a [CmdRule],
     pub allow_hosts: &'a [String],
     pub redact: RedactLevel,
+    /// The transport can enforce a non-empty `allow_hosts` (Linux custody,
+    /// per-child netns and egress proxy). When false, a non-empty list is
+    /// refused before spawn. An empty list is unrestricted either way.
+    pub enforce_hosts: bool,
 }
 
 impl std::fmt::Debug for Caller<'_> {
@@ -87,6 +102,7 @@ impl std::fmt::Debug for Caller<'_> {
             .field("allow_cmds", &self.allow_cmds.len())
             .field("allow_hosts", &self.allow_hosts.len())
             .field("redact", &self.redact)
+            .field("enforce_hosts", &self.enforce_hosts)
             .finish()
     }
 }
@@ -182,7 +198,7 @@ pub fn plan(
     if req.argv.is_empty() {
         return Err(PlanError::Usage("no command after --".into()));
     }
-    if !caller.allow_hosts.is_empty() {
+    if !caller.allow_hosts.is_empty() && !caller.enforce_hosts {
         return Err(deny("allow_hosts: unsupported on this host", None));
     }
     for b in req.bindings {
@@ -604,6 +620,7 @@ mod tests {
             allow_cmds: cmds,
             allow_hosts: hosts,
             redact: RedactLevel::Strict,
+            enforce_hosts: false,
         };
         let vault = VaultView {
             root: &root,
@@ -670,6 +687,15 @@ mod tests {
         assert!(
             matches!(r, Err(PlanError::Usage(ref m)) if m == "no command after --"),
             "{r:?}"
+        );
+    }
+
+    #[test]
+    fn hosts_label_empty_is_unrestricted() {
+        assert_eq!(hosts_label(&[]), "unrestricted");
+        assert_eq!(
+            hosts_label(&["a.example".into(), "b.example:443".into()]),
+            "a.example,b.example:443"
         );
     }
 
