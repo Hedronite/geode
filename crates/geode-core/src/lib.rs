@@ -155,6 +155,7 @@ pub mod audit;
 pub mod chunk;
 pub mod event;
 pub mod hctr2;
+pub mod inject;
 pub mod jev;
 pub mod kdf;
 pub mod keyfile;
