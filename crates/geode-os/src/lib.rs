@@ -4,13 +4,16 @@
 //! `PR_SET_DUMPABLE` to 0. macOS also calls `ptrace(PT_DENY_ATTACH)`.
 //!
 //! `spawn` (SPEC-v034 G6) is the only place Geode starts a user child for
-//! `geode run`. It takes an already-authorized plan: an absolute program, an
+//! `geode run`. `spawn_as` and `ident` (G7) add the custody child identity,
+//! peer credentials, and the user and group lookups. It takes an already-authorized plan: an absolute program, an
 //! env built from scratch, and a timeout. It never reads a vault or a key.
 
 use std::io;
 
+pub mod ident;
 mod spawn;
-pub use spawn::{spawn, ChildOutcome, SpawnSpec, Stream};
+pub use ident::ChildIdentity;
+pub use spawn::{spawn, spawn_as, ChildOutcome, SpawnSpec, Stream};
 
 /// Append one line to the FIFO at `path` without blocking (SPEC-v034 G6
 /// audit mirror). A FIFO with no reader is an error, not a wait. A path

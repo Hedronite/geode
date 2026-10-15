@@ -9,6 +9,7 @@
 
 pub mod agent;
 pub mod audit;
+pub mod custody;
 pub mod git;
 pub mod key;
 pub mod keyring;
@@ -74,6 +75,25 @@ const GKEY_KIND_WRAP: u8 = 0x01;
 /// passphrase-wrapped form (6.2, via the public wrap API from G5a).
 /// Permissions are checked before any byte is read (core `keyfile`).
 pub fn load_isk(path: &Path) -> Result<IdentitySecret> {
+    load_isk_inner(path, passphrase)
+}
+
+/// [`load_isk`] with the passphrase supplied by the caller (the custody
+/// daemon's `unlock` request). Never reads `GEODE_PASSPHRASE`, an fd, or a
+/// prompt. A wrapped key with no passphrase is a usage error.
+pub fn load_isk_given(path: &Path, pass: Option<&str>) -> Result<IdentitySecret> {
+    load_isk_inner(path, || {
+        pass.map(|p| zeroize::Zeroizing::new(p.to_owned()))
+            .ok_or_else(|| {
+                Error::Format("key is passphrase-wrapped: unlock needs a passphrase".into())
+            })
+    })
+}
+
+fn load_isk_inner(
+    path: &Path,
+    passphrase: impl FnOnce() -> Result<zeroize::Zeroizing<String>>,
+) -> Result<IdentitySecret> {
     let raw = geode_grotto::keyfile::load_key_file_bytes(path)?;
     if raw.len() < 6 {
         return Err(Error::Format("key file too short".into()));
