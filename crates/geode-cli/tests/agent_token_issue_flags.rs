@@ -52,6 +52,26 @@ fn geode_token(dir: &Path, args: &[&str], token: &str, stdin_bytes: &[u8]) -> Ou
     child.wait_with_output().expect("wait")
 }
 
+/// A canonical executable on every host: the built `geode` binary,
+/// canonicalized. `/bin/sh` is not canonical on Ubuntu (it resolves to
+/// `/usr/bin/dash`), so the tests never name a system path.
+fn exe_a() -> String {
+    canonical(Path::new(env!("CARGO_BIN_EXE_geode")))
+}
+
+/// A second, distinct canonical executable: this test binary.
+fn exe_b() -> String {
+    canonical(&std::env::current_exe().expect("current_exe"))
+}
+
+fn canonical(p: &Path) -> String {
+    std::fs::canonicalize(p)
+        .expect("canonicalize")
+        .to_str()
+        .expect("utf-8 path")
+        .to_owned()
+}
+
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
@@ -252,7 +272,8 @@ fn inject_grant_policy_lacks_is_policy_deny_and_policy_unchanged() {
     let dir = tmp.path();
     setup(dir, "list,read,write");
     let before = policy_doc(dir);
-    let out = issue_out(dir, "list,inject", &["--allow-cmd", "/bin/sh"]);
+    let exe = exe_a();
+    let out = issue_out(dir, "list,inject", &["--allow-cmd", &exe]);
     assert_code(&out, 3, "inject outside policy");
     assert!(out.stdout.is_empty() || !String::from_utf8_lossy(&out.stdout).contains("\"token\""));
     assert_eq!(policy_doc(dir), before, "policy changed");
@@ -264,17 +285,18 @@ fn issue_flags_round_trip_through_inspect() {
     let dir = tmp.path();
     setup(dir, "list,read,write,inject");
     let sum = "AB".repeat(32);
-    let rules =
-        format!(r#"[{{"path":"/usr/bin/env","sha256":"{sum}","args_prefix":["printenv"]}}]"#);
-    std::fs::write(dir.join("cmds.json"), rules).expect("cmds.json");
+    let (a, b) = (exe_a(), exe_b());
+    assert_ne!(a, b);
+    let rules = serde_json::json!([{"path": b, "sha256": sum, "args_prefix": ["printenv"]}]);
+    std::fs::write(dir.join("cmds.json"), rules.to_string()).expect("cmds.json");
     let token = issue(
         dir,
         "list,inject",
         &[
             "--allow-cmd",
-            "/bin/sh",
+            &a,
             "--allow-cmd",
-            "/bin/sh",
+            &a,
             "--allow-cmds-file",
             "cmds.json",
             "--allow-host",
@@ -293,9 +315,9 @@ fn issue_flags_round_trip_through_inspect() {
     let doc: serde_json::Value = serde_json::from_slice(&j.stdout).expect("inspect json");
     let cmds = doc["allow_cmds"].as_array().expect("allow_cmds");
     assert_eq!(cmds.len(), 2, "{doc}");
-    assert_eq!(cmds[0]["path"], "/bin/sh");
+    assert_eq!(cmds[0]["path"], a.as_str());
     assert!(cmds[0].get("sha256").is_none());
-    assert_eq!(cmds[1]["path"], "/usr/bin/env");
+    assert_eq!(cmds[1]["path"], b.as_str());
     assert_eq!(cmds[1]["sha256"], "ab".repeat(32));
     assert_eq!(cmds[1]["args_prefix"], serde_json::json!(["printenv"]));
     assert_eq!(doc["allow_hosts"], serde_json::json!(["api.example.com"]));
@@ -306,8 +328,9 @@ fn issue_flags_round_trip_through_inspect() {
     let t = inspect(dir, &token, false);
     assert_ok(&t, "inspect text");
     let text = String::from_utf8_lossy(&t.stdout).into_owned() + &stderr(&t);
+    let cmds_line = format!("allow-cmds {a}, {b} sha256=");
     for want in [
-        "allow-cmds /bin/sh, /usr/bin/env sha256=",
+        cmds_line.as_str(),
         "args=printenv",
         "allow-hosts api.example.com",
         "peer-uid 501",
@@ -353,18 +376,51 @@ fn bad_inject_flags_are_usage() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
     setup(dir, "list,read,write,inject");
-    std::fs::write(dir.join("unk.json"), r#"[{"path":"/bin/sh","glob":"*"}]"#).unwrap();
+    let exe = exe_a();
+    let exe_path = Path::new(&exe);
+    let parent = exe_path.parent().expect("parent");
+    // `<dir>/../<dirname>/geode`: same file, not canonical.
+    let dotdot = format!(
+        "{}/../{}/{}",
+        parent.display(),
+        parent
+            .file_name()
+            .expect("dir name")
+            .to_str()
+            .expect("utf-8"),
+        exe_path
+            .file_name()
+            .expect("file name")
+            .to_str()
+            .expect("utf-8"),
+    );
+    // A symlink to a canonical executable is itself not canonical.
+    let real_dir = canonical(dir);
+    let link = format!("{real_dir}/geode-link");
+    std::os::unix::fs::symlink(&exe, &link).expect("symlink");
+    // A canonical regular file without an execute bit.
+    let plain = format!("{real_dir}/plain.txt");
+    std::fs::write(&plain, b"not a program").expect("plain");
+    let rule = |extra: &str| format!(r#"[{{"path":{}{extra}}}]"#, serde_json::json!(exe));
+    std::fs::write(dir.join("unk.json"), rule(r#","glob":"*""#)).unwrap();
+    std::fs::write(dir.join("sha.json"), rule(r#","sha256":"xyz""#)).unwrap();
     std::fs::write(
-        dir.join("sha.json"),
-        r#"[{"path":"/bin/sh","sha256":"xyz"}]"#,
+        dir.join("obj.json"),
+        serde_json::json!({"path": exe}).to_string(),
     )
     .unwrap();
-    std::fs::write(dir.join("obj.json"), r#"{"path":"/bin/sh"}"#).unwrap();
+    std::fs::write(
+        dir.join("link.json"),
+        serde_json::json!([{"path": link}]).to_string(),
+    )
+    .unwrap();
     for (extra, what) in [
         (vec!["--allow-cmd", "sh"], "relative"),
-        (vec!["--allow-cmd", "/bin/../bin/sh"], "non-canonical"),
+        (vec!["--allow-cmd", dotdot.as_str()], "non-canonical"),
+        (vec!["--allow-cmd", link.as_str()], "symlink"),
+        (vec!["--allow-cmds-file", "link.json"], "symlink in file"),
         (vec!["--allow-cmd", "/nonexistent/geode-cmd"], "missing"),
-        (vec!["--allow-cmd", "/etc/hosts"], "not executable"),
+        (vec!["--allow-cmd", plain.as_str()], "not executable"),
         (vec!["--allow-cmds-file", "unk.json"], "unknown key"),
         (vec!["--allow-cmds-file", "sha.json"], "bad sha256"),
         (vec!["--allow-cmds-file", "obj.json"], "not a list"),
@@ -375,6 +431,20 @@ fn bad_inject_flags_are_usage() {
     ] {
         let out = issue_out(dir, "list,inject", &extra);
         assert_code(&out, 1, what);
+    }
+    for (path, what) in [(dotdot.as_str(), "dotdot"), (link.as_str(), "symlink")] {
+        let out = issue_out(dir, "list,inject", &["--allow-cmd", path]);
+        let all = String::from_utf8_lossy(&out.stdout).into_owned() + &stderr(&out);
+        assert!(all.contains("is not canonical"), "{what}: {all}");
+    }
+
+    // Where `/bin/sh` is a symlink (Ubuntu: `/usr/bin/dash`), it is refused,
+    // not quietly resolved.
+    if canonical(Path::new("/bin/sh")) != "/bin/sh" {
+        let out = issue_out(dir, "list,inject", &["--allow-cmd", "/bin/sh"]);
+        assert_code(&out, 1, "/bin/sh symlink");
+        let all = String::from_utf8_lossy(&out.stdout).into_owned() + &stderr(&out);
+        assert!(all.contains("is not canonical"), "{all}");
     }
 }
 
@@ -391,7 +461,8 @@ fn agent_read_follows_g3_defaults() {
     assert_eq!(r.stdout, BODY);
 
     // Inject-only: default is `hash` — digest, no body.
-    let injector = issue(dir, "list,inject", &["--allow-cmd", "/bin/sh"]);
+    let exe = exe_a();
+    let injector = issue(dir, "list,inject", &["--allow-cmd", &exe]);
     let h = read(dir, &injector, None);
     assert_ok(&h, "inject-only default");
     let line = String::from_utf8(h.stdout.clone()).expect("utf8");
