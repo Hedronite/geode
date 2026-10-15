@@ -22,13 +22,18 @@ fn abort_after_deny_core_dumps_leaves_no_core() {
         note.push_str(&format!("rlim_cur={cur}\n"));
         #[cfg(target_os = "linux")]
         {
-            let status = fs::read_to_string("/proc/self/status").expect("proc status");
-            let line = status
-                .lines()
-                .find(|l| l.starts_with("Dumpable:"))
-                .expect("Dumpable line");
-            note.push_str(line);
-            note.push('\n');
+            // `PR_GET_DUMPABLE` returns the attribute. `0` is
+            // `SUID_DUMP_DISABLE`, not an error. Ubuntu kernels omit the
+            // `Dumpable:` line from `/proc/self/status`, so that file is
+            // not the check. When the line is present, record it too.
+            let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
+            note.push_str(&format!("prctl_dumpable={dumpable}\n"));
+            if let Ok(status) = fs::read_to_string("/proc/self/status") {
+                if let Some(line) = status.lines().find(|l| l.starts_with("Dumpable:")) {
+                    note.push_str(line);
+                    note.push('\n');
+                }
+            }
         }
         let path = std::env::var("GEODE_OS_STATUS").expect("status path");
         fs::write(&path, note).expect("write status");
@@ -68,14 +73,16 @@ fn abort_after_deny_core_dumps_leaves_no_core() {
     );
     #[cfg(target_os = "linux")]
     {
-        let dumpable = note
-            .lines()
-            .find(|l| l.starts_with("Dumpable:"))
-            .expect("Dumpable line");
         assert!(
-            dumpable.trim_end().ends_with('0'),
-            "dumpable was not 0: {dumpable}"
+            note.lines().any(|l| l == "prctl_dumpable=0"),
+            "dumpable was not 0: {note}"
         );
+        if let Some(proc_line) = note.lines().find(|l| l.starts_with("Dumpable:")) {
+            assert!(
+                proc_line.trim_end().ends_with('0'),
+                "proc Dumpable was not 0: {proc_line}"
+            );
+        }
     }
     assert_no_core(&dir, pid);
     let _ = fs::remove_dir_all(&dir);
