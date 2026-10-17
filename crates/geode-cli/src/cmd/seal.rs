@@ -28,6 +28,40 @@ pub struct SealArgs {
     /// Output shows public ids only (`vault_id`, `key_id`, `epoch`, hashes).
     #[arg(long)]
     pub seal_names: bool,
+    /// Store a single file under this vault path instead of its basename, for example `api/svc-a.txt`.
+    #[arg(long = "as", value_name = "PATH")]
+    pub as_path: Option<String>,
+}
+
+/// Check an `--as` path as given. It is stored verbatim, so anything that
+/// is not already a plain relative path with `/` separators is refused
+/// rather than rewritten.
+fn check_as_path(p: &str) -> Result<()> {
+    let bad = |why: &str| Err(Error::Format(format!("--as {p:?}: {why}")));
+    if p.is_empty() {
+        return bad("empty path");
+    }
+    if p.contains('\0') {
+        return bad("contains NUL");
+    }
+    if p.contains('\\') {
+        return bad("contains a backslash; use /");
+    }
+    if p.starts_with('/') {
+        return bad("absolute path; give a vault-relative path");
+    }
+    if p.ends_with('/') {
+        return bad("trailing slash; give a file path");
+    }
+    for comp in p.split('/') {
+        match comp {
+            ".." => return bad("contains a .. component"),
+            "." => return bad("contains a . component"),
+            "" => return bad("contains an empty component"),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Vault-relative path with forward slashes (03-format 5).
@@ -132,6 +166,9 @@ pub(crate) fn display_path(ctx: &cmd::VaultCtx, entry: &Entry) -> Result<String>
 }
 
 pub fn run(args: &SealArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
+    if let Some(p) = &args.as_path {
+        check_as_path(p)?;
+    }
     let key_path = cmd::require_key(global)?;
     let isk = cmd::load_isk(&key_path)?;
     let mut ctx = cmd::load_vault(&args.vault, &isk)?;
@@ -147,14 +184,23 @@ pub fn run(args: &SealArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     // Gather (abs, rel) pairs, sorted by rel path.
     let mut items: Vec<(PathBuf, String)> = Vec::new();
     if args.src.is_file() || args.src.is_symlink() {
-        let name = args
-            .src
-            .file_name()
-            .ok_or_else(|| Error::Format("bad source name".into()))?
-            .to_string_lossy()
-            .into_owned();
+        let name = match &args.as_path {
+            Some(p) => p.clone(),
+            None => args
+                .src
+                .file_name()
+                .ok_or_else(|| Error::Format("bad source name".into()))?
+                .to_string_lossy()
+                .into_owned(),
+        };
         items.push((args.src.clone(), name));
     } else if args.src.is_dir() {
+        if args.as_path.is_some() {
+            return Err(Error::Format(format!(
+                "--as is for one file; {} is a directory",
+                args.src.display()
+            )));
+        }
         for e in walkdir::WalkDir::new(&args.src)
             .follow_links(false)
             .sort_by_file_name()
@@ -313,4 +359,21 @@ pub fn run(args: &SealArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         ),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_as_path;
+
+    #[test]
+    fn as_path_rules() {
+        for ok in ["svc-a.txt", "api/svc-a.txt", "a/b/c.env", "..x", "x.."] {
+            assert!(check_as_path(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "", ".", "/tmp/x", "../x", "api/../x", "api/..", "api/", "a\\b", "a\0b", "./x", "a//b",
+        ] {
+            assert!(check_as_path(bad).is_err(), "{bad:?}");
+        }
+    }
 }
