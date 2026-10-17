@@ -299,6 +299,15 @@ pub fn run(args: &SealArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         }
     }
 
+    // One line per stored path that is already a manifest entry. PATH is
+    // that stored path, sealed when `--seal-names` is set. The seal still
+    // replaces the entry and exits 0.
+    for stored_rel in &stored {
+        if ctx.manifest.entries.iter().any(|e| &e.path == stored_rel) {
+            eprintln!("warning: replacing existing vault path {stored_rel}");
+        }
+    }
+
     // Merge: mutation allocates a new object_id; same-path entries replaced.
     // Comparison is on the stored path (sealed form when `--seal-names`).
     ctx.manifest
