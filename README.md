@@ -75,6 +75,12 @@ geode --key ./demo.gkey cat ./vault.geode note.txt
 
 Pass `--key` or set `GEODE_KEY_FILE`, unless a keyring default or `~/.config/hedronite/geode/default.gkey` exists (`$XDG_CONFIG_HOME` is honored). `geode keygen` with no path writes `./secret.gkey` and warns you to move it. Key files are mode `0600`. Never commit one; `*.gkey` belongs in `.gitignore`.
 
+Where a seal lands in the vault:
+
+- A file is stored under its basename, so `seal ./docs/note.txt` stores `note.txt`. Pass `--as api/svc-a.txt` to pick the vault path; `--as` takes one file, not a directory.
+- A directory keeps paths relative to that directory: `seal ./site` stores `site/index.html` as `index.html`.
+- Sealing a path that is already in the vault replaces it, exits 0, and prints `warning: replacing existing vault path PATH` on stderr. With `--seal-names`, `PATH` is the stored ciphertext name.
+
 Run `geode --help`, or `geode <command> --help`, for the full command list.
 
 ## What you get
