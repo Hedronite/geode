@@ -1019,6 +1019,7 @@ dependencies = [
  "fuser",
  "geode-grotto",
  "geode-os",
+ "geode-redact",
  "geode-tui",
  "getrandom 0.3.4",
  "rpassword",
@@ -1075,8 +1076,10 @@ version = "1.2.1"
 dependencies = [
  "aho-corasick",
  "base64",
+ "blake3",
  "proptest",
  "serde_json",
+ "zeroize",
 ]
 
 [[package]]

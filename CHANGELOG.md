@@ -30,6 +30,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+### Added
+
+- `geode scan PATH... [--json] [--hook] [--allow FILE] [--max-bytes N]` finds secret-looking values in files. Rules: AWS access key ids (`AKIA` + 16), GitHub tokens (`gh[pousr]_`, `github_pat_`), Slack tokens (`xox[abpr]-`), PEM private-key blocks, and high-entropy base64 or hex runs of 20 or more characters (defaults 4.0 and 3.0 bits per character; `--base64-bits` and `--hex-bits` tune them). Binary files are scanned.
+- Each finding prints the path, line, column, rule, and a 128-bit keyed BLAKE3 fingerprint. The matched value, an excerpt, and context are never printed, and `geode scan` writes nothing to the audit log. The fingerprint key is derived from `--key` under `geode/v1/scan-fp` when a key is given. Otherwise it is a per-user random key at `~/.config/hedronite/geode/scan.key` (mode 0600, created on first use). Fingerprints and allowlists do not carry across keys.
+- `--hook` exits 2 on any finding, 0 when clean, and 1 on any error. An unreadable file, a file larger than `--max-bytes` (default 16 MiB), a symlink that resolves outside its scan root, and a special file are errors, not skips.
+- The allowlist (`--allow FILE`, default `.geode/scan-allow`) holds fingerprints only, one per line. Output reports how many findings it suppressed. `scan.key`, the default identity key, the `--key` in use, and any `default.gkey` inside a scan root are always findings (rule `geode-key-file`) and cannot be allowlisted.
+
+### Changed
+
+- CI actions are pinned by commit SHA. `ci.yml` runs with `contents: read`, and its cosign download requires HTTPS and TLS 1.2.
+- The workspace `repository` field points at `https://github.com/Hedronite/geode`.
+
 ## [1.2.1] — 2026-10-15
 
 ### Changed

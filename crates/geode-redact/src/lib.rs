@@ -13,6 +13,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use base64::Engine as _;
 
 mod named;
+pub mod scan;
 pub use named::{NamedIndexError, NamedRedactor, NamedStream, Placeholder};
 
 const MIN_VALUE: usize = 8;

@@ -106,6 +106,7 @@ Commands at a glance:
 | Mount | `mount VAULT MOUNTPOINT`, `unmount` |
 | Agents | `agent token issue` / `inspect`, `agent list` / `read` / `write`, `agent scope`, `agent serve` |
 | Secrets | `run`, `custody unlock` / `lock` / `status`, `audit verify` |
+| Scanning | `scan PATH...` (`--hook` for git hooks and CI) |
 | UI | `tui [VAULT]` |
 
 `geode sign pub` prints the vault identity's Ed25519 public key as SPKI PEM. `geode sign blob PATH` signs a file's raw bytes. The signing key never leaves Geode, and cosign `verify-blob` can check the signature.
@@ -189,6 +190,7 @@ vectors/v1/           # golden vectors: kdf, chunk, wrap, name
 | Cipher suites | Suite `0x01` is the only suite. There is no post-quantum build. |
 | Other formats | Geode reads GDE1 only. It does not import or decrypt another custody tool's format. |
 | Redaction | Catches known encodings of a bound value. It does not stop a command that transforms or sends the value. |
+| Secret scan | `geode scan` matches known token shapes and high-entropy strings. It misses low-entropy secrets such as Wi-Fi passphrases and short passwords, so it is a backstop: decide what to capture with an allowlist first. It also flags public keys, hashes, and other random-looking strings. Findings show a keyed fingerprint, never the value, but paths, line numbers and fingerprints in CI logs are kept by the CI provider. An allowlist works only under the key that made it. |
 | Terminal UI | A human surface. It unlocks with your key, never with a token. |
 | Without default features | `cargo install geode-cli --no-default-features` has no terminal UI; `geode tui` exits 1. |
 
