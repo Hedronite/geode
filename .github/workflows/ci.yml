@@ -7,15 +7,19 @@ on:
     branches: [main, "feat/**"]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
         with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       # SPEC-v033 G1: cosign v2.6.5, asset selected by uname, SHA-256 from
       # that release's cosign_checksums.txt. An unexpected checksum aborts
       # the install before the binary touches PATH.
@@ -31,7 +35,7 @@ jobs:
             Darwin-x86_64) asset=cosign-darwin-amd64; sum=0f8a1a70c81de9740a2b62e91307ff396ce54e7dd80568d42411bb2d9d44269c ;;
             *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
           esac
-          curl -fsSL --retry 3 -o cosign \
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o cosign \
             "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/${asset}"
           echo "${sum}  cosign" | sha256sum -c -
           install -m 0755 cosign /usr/local/bin/cosign

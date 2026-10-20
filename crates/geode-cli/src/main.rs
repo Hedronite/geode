@@ -164,6 +164,12 @@ enum Commands {
     Run(cmd::run::RunArgs),
     /// Audit log: verify the append-only hash chain.
     Audit(cmd::audit::AuditArgs),
+    /// Find secret-looking values in files.
+    ///
+    /// Prints the path, line, rule and a keyed fingerprint for each finding,
+    /// never the value. --hook exits 2 on any finding, 0 when clean, and 1
+    /// on any error. Low-entropy secrets such as short passwords are missed.
+    Scan(cmd::scan::ScanArgs),
     /// Unlock, lock, or check the custody daemon.
     Custody(cmd::custody::CustodyArgs),
     /// Open the terminal UI.
@@ -223,6 +229,7 @@ impl Commands {
             Self::Agent(_) => "agent",
             Self::Run(_) => "run",
             Self::Audit(_) => "audit_verify",
+            Self::Scan(_) => "scan",
             Self::Custody(_) => "custody",
             Self::Tui { .. } => "tui",
         }
@@ -589,6 +596,7 @@ fn main() {
         Commands::Agent(a) => cmd::agent::run(a, &cli.global, out),
         Commands::Run(a) => cmd::run::run(a, &cli.global, out),
         Commands::Audit(a) => cmd::audit::run(a, out),
+        Commands::Scan(a) => cmd::scan::run(a, &cli.global, out),
         Commands::Custody(a) => cmd::custody::run(a, &cli.global, out),
         // Feature on: the TUI starts (14-tui 2), wired with the vault path
         // and the global `--key` / `GEODE_KEY_FILE` identity path (G5). The
