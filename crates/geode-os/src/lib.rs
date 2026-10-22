@@ -16,7 +16,7 @@ pub mod ident;
 pub mod netns;
 mod spawn;
 pub use ident::ChildIdentity;
-pub use spawn::{spawn, spawn_as, spawn_with, ChildOutcome, SpawnSpec, Stream};
+pub use spawn::{spawn, spawn_as, spawn_with, ChildOutcome, PinnedExe, SpawnSpec, Stream};
 
 /// Append one line to the FIFO at `path` without blocking (SPEC-v034 G6
 /// audit mirror). A FIFO with no reader is an error, not a wait. A path

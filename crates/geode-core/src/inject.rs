@@ -14,6 +14,8 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::fs::{File, Metadata};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 
 use geode_redact::{NamedRedactor, NamedStream, Placeholder};
@@ -152,10 +154,29 @@ impl std::fmt::Debug for PlanRequest<'_> {
     }
 }
 
+/// `argv[0]` after it matched `allow_cmds`.
+pub struct VerifiedExe {
+    /// Canonical absolute path. Audit `argv0` and errors use it.
+    pub canon: String,
+    /// Pinned rules only: the fd whose bytes matched `sha256`, and its
+    /// `fstat` from before the hash. Spawn execs this fd, not `canon`.
+    /// `None` for an unpinned rule, which execs `canon`.
+    pub fd: Option<(OwnedFd, Metadata)>,
+}
+
+impl std::fmt::Debug for VerifiedExe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifiedExe")
+            .field("canon", &self.canon)
+            .field("pinned", &self.fd.is_some())
+            .finish()
+    }
+}
+
 /// An authorized run. Values are `SecretBox`; nothing here prints them.
 pub struct Plan {
-    /// Canonical `argv[0]` that matched `allow_cmds`.
-    pub exe: String,
+    /// `argv[0]` that matched `allow_cmds`.
+    pub exe: VerifiedExe,
     /// `argv[1..]`.
     pub args: Vec<String>,
     /// Binding names in command-line order, with their values.
@@ -170,7 +191,7 @@ impl std::fmt::Debug for Plan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names: Vec<&str> = self.env.iter().map(|(n, _)| n.as_str()).collect();
         f.debug_struct("Plan")
-            .field("exe", &self.exe)
+            .field("exe", &self.exe.canon)
             .field("names", &names)
             .finish_non_exhaustive()
     }
@@ -214,7 +235,7 @@ pub fn plan(
     if req.no_redact && !may_skip_redaction(caller, req.bindings) {
         return Err(deny(
             "--no-redact needs a human:* principal with admin",
-            Some(exe),
+            Some(exe.canon),
         ));
     }
     let mut env = Vec::with_capacity(req.bindings.len());
@@ -224,13 +245,13 @@ pub fn plan(
         if v.contains(&0) || std::str::from_utf8(v).is_err() {
             return Err(deny(
                 &format!("binding {}: not env-safe", b.name),
-                Some(exe),
+                Some(exe.canon),
             ));
         }
         if v.len() < 8 {
             return Err(deny(
                 &format!("binding {}: too short to redact safely", b.name),
-                Some(exe),
+                Some(exe.canon),
             ));
         }
         env.push((b.name.clone(), value));
@@ -244,13 +265,13 @@ pub fn plan(
         .map(|(n, v)| (n.as_str(), v.expose_secret()))
         .collect();
     let redactor = NamedRedactor::try_new(&pairs, placeholder)
-        .map_err(|e| deny(&e.to_string(), Some(exe.clone())))?;
+        .map_err(|e| deny(&e.to_string(), Some(exe.canon.clone())))?;
     drop(pairs);
     if req.argv[1..]
         .iter()
         .any(|a| redactor.contains_binding(a.as_bytes()))
     {
-        return Err(PlanError::ArgvRejected { exe });
+        return Err(PlanError::ArgvRejected { exe: exe.canon });
     }
     Ok(Plan {
         exe,
@@ -343,12 +364,15 @@ fn may_skip_redaction(caller: &Caller<'_>, bindings: &[BindingSpec]) -> bool {
 /// Resolve `argv[0]` against the base `PATH`, canonicalize, and match one
 /// `allow_cmds` entry exactly (path, then `sha256` and `args_prefix` when
 /// the entry sets them). Shells get no special case. No globs.
+///
+/// A pinned entry opens `canon` once and hashes that fd; the fd travels in
+/// the result so spawn execs the bytes that were hashed (Fix 4).
 fn match_cmd(
     allow: &[CmdRule],
     argv0: &str,
     args: &[String],
     base_path: Option<&OsStr>,
-) -> Result<String, PlanError> {
+) -> Result<VerifiedExe, PlanError> {
     if allow.is_empty() {
         return Err(deny("allow_cmds is empty: nothing may run", None));
     }
@@ -367,16 +391,82 @@ fn match_cmd(
         .iter()
         .find(|r| r.path == canon && args_match(&r.args_prefix, args))
         .ok_or_else(not_listed)?;
-    if let Some(want) = &rule.sha256 {
-        let bytes = std::fs::read(&canon).map_err(|_| not_listed())?;
-        if !sha256_hex(&bytes).eq_ignore_ascii_case(want) {
-            return Err(deny(
-                &format!("argv[0] {canon} does not match its allow_cmds sha256"),
-                Some(canon.clone()),
-            ));
-        }
+    let Some(want) = &rule.sha256 else {
+        return Ok(VerifiedExe { canon, fd: None });
+    };
+    let pinned = open_pinned(Path::new(&canon), want).map_err(|e| match e {
+        PinError::Unusable => not_listed(),
+        PinError::Mismatch => deny(
+            &format!("argv[0] {canon} does not match its allow_cmds sha256"),
+            Some(canon.clone()),
+        ),
+        PinError::Script => deny(
+            &format!("argv[0] {canon} is a #! script; a sha256 pin needs a binary"),
+            Some(canon.clone()),
+        ),
+    })?;
+    Ok(VerifiedExe {
+        canon,
+        fd: Some(pinned),
+    })
+}
+
+/// Why a pinned `argv[0]` failed its check.
+#[derive(Debug, PartialEq, Eq)]
+enum PinError {
+    /// Cannot be opened without following a symlink, or is not a regular
+    /// file with an exec bit.
+    Unusable,
+    Mismatch,
+    /// Linux only: `fexecve` on an `O_CLOEXEC` fd cannot start a `#!`
+    /// script, and an inheritable fd would leak into the child.
+    Script,
+}
+
+/// Open `canon` once, check the fd is a regular executable file, and hash
+/// it from that fd. `O_NOFOLLOW` refuses a symlink swapped in at the final
+/// component after canonicalize. `O_CLOEXEC` keeps the fd out of the child.
+fn open_pinned(canon: &Path, want: &str) -> Result<(OwnedFd, Metadata), PinError> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(canon)
+        .map_err(|_| PinError::Unusable)?;
+    let meta = file.metadata().map_err(|_| PinError::Unusable)?;
+    if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+        return Err(PinError::Unusable);
     }
-    Ok(canon)
+    let (digest, head) = hash_fd(&mut file).map_err(|_| PinError::Unusable)?;
+    if !digest.eq_ignore_ascii_case(want) {
+        return Err(PinError::Mismatch);
+    }
+    if cfg!(target_os = "linux") && head.starts_with(b"#!") {
+        return Err(PinError::Script);
+    }
+    Ok((file.into(), meta))
+}
+
+/// SHA-256 hex of everything read from `file`, streamed, and its first two
+/// bytes.
+fn hash_fd(file: &mut File) -> std::io::Result<(String, Vec<u8>)> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read as _;
+    let mut hasher = Sha256::new();
+    let mut head = Vec::with_capacity(2);
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        let take = (2 - head.len()).min(n);
+        head.extend_from_slice(&buf[..take]);
+        hasher.update(&buf[..n]);
+    }
+    Ok((to_hex(&hasher.finalize()), head))
 }
 
 fn args_match(prefix: &[String], args: &[String]) -> bool {
@@ -403,11 +493,9 @@ fn is_exec(p: &Path) -> bool {
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
+fn to_hex(digest: &[u8]) -> String {
     use std::fmt::Write as _;
-    let digest = Sha256::digest(data);
-    let mut s = String::with_capacity(64);
+    let mut s = String::with_capacity(digest.len() * 2);
     for b in digest {
         let _ = write!(s, "{b:02x}");
     }
@@ -794,5 +882,125 @@ mod tests {
             &["sh", "-c", "false"],
         );
         assert!(matches!(r, Err(PlanError::Deny { .. })), "{r:?}");
+    }
+
+    fn sha_of(path: &Path) -> String {
+        use sha2::{Digest, Sha256};
+        to_hex(&Sha256::digest(std::fs::read(path).unwrap()))
+    }
+
+    /// A temp dir holding `name` with `body` at `mode`.
+    fn file_in(name: &str, body: &[u8], mode: u32) -> (tempfile::TempDir, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        (tmp, p)
+    }
+
+    #[test]
+    fn pinned_cmd_with_the_right_hash_carries_its_fd() {
+        let (mut rule, canon) = sh_rule();
+        rule.sha256 = Some(sha_of(Path::new(&canon)).to_ascii_uppercase());
+        let v = match_cmd(
+            std::slice::from_ref(&rule),
+            "sh",
+            &[],
+            Some(OsStr::new("/bin")),
+        )
+        .unwrap();
+        assert_eq!(v.canon, canon);
+        assert!(
+            v.fd.is_some(),
+            "a pinned rule must hand spawn the hashed fd"
+        );
+        // The rest of the plan runs as before.
+        let r = try_plan(
+            &default_policy("v"),
+            &[rule],
+            &[],
+            &bindings(&[("KEY", "cfg/x")]),
+            &["sh"],
+        );
+        assert!(
+            matches!(r, Err(PlanError::Usage(ref m)) if m.contains("binding KEY")),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn pinned_cmd_with_the_wrong_hash_denies() {
+        let (mut rule, canon) = sh_rule();
+        rule.sha256 = Some("00".repeat(32));
+        let r = try_plan(
+            &default_policy("v"),
+            &[rule],
+            &[],
+            &bindings(&[("KEY", "cfg/x")]),
+            &["sh"],
+        );
+        assert!(
+            matches!(r, Err(PlanError::Deny { ref reason, exe: Some(ref e) })
+                if reason.contains("sha256") && *e == canon),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn unpinned_cmd_execs_by_path() {
+        let (rule, canon) = sh_rule();
+        let v = match_cmd(&[rule], "sh", &[], Some(OsStr::new("/bin"))).unwrap();
+        assert_eq!(v.canon, canon);
+        assert!(v.fd.is_none());
+    }
+
+    #[test]
+    fn symlink_swapped_in_at_the_final_component_is_refused() {
+        let canon = std::fs::canonicalize("/bin/sh").unwrap();
+        let want = sha_of(&canon);
+        let (_tmp, real) = file_in("real", &std::fs::read(&canon).unwrap(), 0o755);
+        assert!(open_pinned(&real, &want).is_ok());
+        // What canonicalize returned is now a symlink to a file with the
+        // same bytes. O_NOFOLLOW refuses it anyway.
+        let link = real.with_file_name("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(open_pinned(&link, &want).unwrap_err(), PinError::Unusable);
+    }
+
+    #[test]
+    fn hash_is_streamed_from_the_fd() {
+        // Larger than the read buffer, so the hash spans several reads.
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let (_tmp, p) = file_in("big", &body, 0o755);
+        let want = sha_of(&p);
+        let mut f = File::open(&p).unwrap();
+        // With the path gone and replaced, only the fd can give the bytes.
+        std::fs::remove_file(&p).unwrap();
+        std::fs::write(&p, b"other").unwrap();
+        let (got, head) = hash_fd(&mut f).unwrap();
+        assert_eq!(got, want);
+        assert_eq!(head, body[..2]);
+    }
+
+    #[test]
+    fn pinned_non_executable_is_refused() {
+        let (_tmp, p) = file_in("plain", b"\x7fELF", 0o644);
+        assert_eq!(
+            open_pinned(&p, &sha_of(&p)).unwrap_err(),
+            PinError::Unusable
+        );
+    }
+
+    #[test]
+    fn pinned_script_is_refused_on_linux() {
+        let (_tmp, p) = file_in("s.sh", b"#!/bin/sh\necho hi\n", 0o755);
+        let r = open_pinned(&p, &sha_of(&p));
+        if cfg!(target_os = "linux") {
+            assert_eq!(r.unwrap_err(), PinError::Script);
+        } else {
+            assert!(r.is_ok(), "{r:?}");
+        }
     }
 }

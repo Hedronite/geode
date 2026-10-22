@@ -813,7 +813,7 @@ impl Daemon {
         let mut chain = geode_grotto::audit::open(&self.audit_db)
             .map_err(|e| refusal("io", format!("audit db: {e}")))?;
         // Plan under the session lock; the child runs after it is released.
-        let (plan, row) = {
+        let (mut plan, row) = {
             let mut guard = self
                 .session
                 .lock()
@@ -878,7 +878,7 @@ impl Daemon {
             home: Some(std::ffi::OsString::from("/")),
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let done = run::execute_plan(&plan, opts, &mut chain, &row, |ch, bytes| match ch {
+        let done = run::execute_plan(&mut plan, opts, &mut chain, &row, |ch, bytes| match ch {
             inject::Channel::Stdout => out.extend_from_slice(&bytes),
             inject::Channel::Stderr => err.extend_from_slice(&bytes),
         })
