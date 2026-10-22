@@ -1005,7 +1005,7 @@ mod tests {
     use super::*;
     use clap::Parser as _;
     use geode_grotto::policy::{Op, PrincipalId};
-    use geode_grotto::token::{RedactLevel, TokenId};
+    use geode_grotto::token::{RedactLevel, TokenId, TokenKind};
     use std::os::unix::fs::PermissionsExt as _;
 
     const DUMMY: &str = "sk-dummy-0000QA";
@@ -1122,6 +1122,7 @@ mod tests {
             vec![Op::List, Op::Read],
             Vec::new(),
             Vec::new(),
+            TokenKind::Full,
         )
     }
 
@@ -1151,6 +1152,23 @@ mod tests {
             vec![Op::List, Op::Inject],
             vec![sh],
             hosts,
+            TokenKind::Full,
+        )
+    }
+
+    fn run_inject_token(fx: &Fx) -> String {
+        let sh = geode_grotto::token::CmdRule {
+            path: canonical_on_path("sh"),
+            sha256: None,
+            args_prefix: Vec::new(),
+        };
+        token_with(
+            fx,
+            Some(ident::euid()),
+            vec![Op::List, Op::Inject],
+            vec![sh],
+            Vec::new(),
+            TokenKind::Run,
         )
     }
 
@@ -1160,6 +1178,7 @@ mod tests {
         allow_ops: Vec<Op>,
         allow_cmds: Vec<geode_grotto::token::CmdRule>,
         allow_hosts: Vec<String>,
+        kind: TokenKind,
     ) -> String {
         let isk = cmd::load_isk_given(&fx.key(), None).unwrap();
         let ctx = cmd::load_vault(&fx.vault(), &isk).unwrap();
@@ -1178,6 +1197,7 @@ mod tests {
             allow_hosts,
             peer_uid,
             redact: RedactLevel::Strict,
+            kind,
         };
         let mk = geode_grotto::kdf::derive_meta_key(&ctx.ek, ctx.vault_id, ctx.epoch);
         let policy =
@@ -1282,6 +1302,18 @@ mod tests {
             !String::from_utf8_lossy(&db).contains(DUMMY),
             "dummy in the audit db"
         );
+    }
+
+    #[test]
+    fn run_only_token_can_still_geode_run() {
+        let fx = start(Agents::Uids(Vec::new()));
+        let mut a = bound(&fx, &run_inject_token(&fx));
+        let r = run_call(&mut a, &fx, &["sh", "-c", "echo $KEY; exit 0"]);
+        let doc = tool_doc(&r);
+        assert_eq!(doc["spawned"], true);
+        assert_eq!(doc["exit_code"], 0);
+        assert_eq!(doc["stdout_redacted"], "[REDACTED:KEY]\n");
+        assert!(!r.to_string().contains(DUMMY), "dummy in the MCP result");
     }
 
     #[test]
@@ -1406,10 +1438,24 @@ mod tests {
         let vault = fx.vault().to_str().unwrap().to_owned();
         let read = a.call(
             "tools/call",
-            serde_json::json!({"name": "geode_read", "arguments": {"vault": vault, "path": "cfg/note"}}),
+            serde_json::json!({"name": "geode_read", "arguments": {"vault": vault, "path": "cfg/note", "mode": "text"}}),
         );
         assert!(read["result"]["isError"].is_null(), "{read}");
-        assert!(read.to_string().contains(DUMMY), "Read token reads text");
+        assert!(
+            read.to_string().contains(DUMMY),
+            "explicit text still returns the body"
+        );
+        let hashed = a.call(
+            "tools/call",
+            serde_json::json!({"name": "geode_read", "arguments": {"vault": vault, "path": "cfg/note"}}),
+        );
+        assert!(hashed["result"]["isError"].is_null(), "{hashed}");
+        let hashed_s = hashed.to_string();
+        assert!(hashed_s.contains("content_root"), "{hashed}");
+        assert!(
+            !hashed_s.contains(DUMMY),
+            "default MCP read leaked plaintext"
+        );
 
         let mism = a.call(
             "tools/call",

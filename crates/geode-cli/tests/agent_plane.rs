@@ -342,6 +342,8 @@ fn serve_stdio_mcp() {
         "\n",
         r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"geode_read","arguments":{"vault":"v.geode","path":"scratch/a.txt"}}}"#,
         "\n",
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"geode_read","arguments":{"vault":"v.geode","path":"scratch/a.txt","mode":"text"}}}"#,
+        "\n",
         r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"geode_mount","arguments":{}}}"#,
         "\n",
         r#"{"jsonrpc":"2.0","id":7,"method":"bogus_method"}"#,
@@ -380,6 +382,18 @@ fn serve_stdio_mcp() {
         .collect();
     names.sort_unstable();
     assert_eq!(names, ["geode_list", "geode_read", "geode_write"]);
+    let read_tool = tools
+        .iter()
+        .find(|t| t["name"] == "geode_read")
+        .expect("geode_read");
+    let mode_desc = read_tool["inputSchema"]["properties"]["mode"]["description"]
+        .as_str()
+        .expect("mode description");
+    assert!(
+        !mode_desc.contains("Default text when the token holds read"),
+        "{mode_desc}"
+    );
+    assert!(mode_desc.contains("hash"), "{mode_desc}");
 
     // tools/call geode_write.
     let wtext = frames[&3]["result"]["content"][0]["text"]
@@ -404,15 +418,30 @@ fn serve_stdio_mcp() {
         .collect();
     assert!(paths.contains(&"scratch/a.txt"), "entries: {paths:?}");
 
-    // tools/call geode_read returns the body + full-plaintext sha256.
+    // tools/call geode_read with no mode is hash: content_root, no body.
     let rtext = frames[&5]["result"]["content"][0]["text"]
         .as_str()
         .expect("read text");
     let rdoc: serde_json::Value = serde_json::from_str(rtext).expect("read doc");
     assert_eq!(rdoc["ok"], true);
-    assert_eq!(rdoc["text"], "mcp body\n");
     assert_eq!(rdoc["truncated"], false);
-    assert_eq!(rdoc["sha256"].as_str().expect("sha256").len(), 64);
+    assert!(rdoc.get("text").is_none(), "{rdoc}");
+    assert!(rdoc.get("hex").is_none(), "{rdoc}");
+    assert!(rdoc.get("sha256").is_none(), "{rdoc}");
+    assert!(rdoc.get("preview").is_none(), "{rdoc}");
+    assert!(rdoc.get("body").is_none(), "{rdoc}");
+    assert_eq!(
+        rdoc["content_root"].as_str().expect("content_root").len(),
+        64
+    );
+    assert!(!rtext.contains("mcp body"), "{rtext}");
+
+    let ttext = frames[&8]["result"]["content"][0]["text"]
+        .as_str()
+        .expect("text read");
+    let tdoc: serde_json::Value = serde_json::from_str(ttext).expect("text doc");
+    assert_eq!(tdoc["text"], "mcp body\n");
+    assert!(tdoc["sha256"].as_str().expect("sha256").len() == 64);
 
     // Unknown tool -> -32602; unknown method -> -32601.
     assert_eq!(frames[&6]["error"]["code"], -32602);
@@ -635,4 +664,291 @@ fn serve_socket_mcp() {
         String::from_utf8_lossy(&out.stdout).trim().is_empty(),
         "serve --socket must not write MCP frames to stdout"
     );
+}
+
+fn mcp_session(dir: &Path, token: &str, requests: &str, facet: bool) -> (String, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_geode"));
+    cmd.args(["--key", "k.gkey", "agent", "serve", "--stdio"])
+        .current_dir(dir)
+        .env("GEODE_TOKEN", token)
+        .env_remove("GEODE_KEY_FILE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if facet {
+        cmd.env("GEODE_FACET_EVENTS", "1");
+    } else {
+        cmd.env_remove("GEODE_FACET_EVENTS");
+    }
+    let mut child = cmd.spawn().expect("spawn serve");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(requests.as_bytes())
+        .expect("write");
+    let out = child.wait_with_output().expect("wait");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn mcp_docs(stdout: &str) -> Vec<serde_json::Value> {
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|frame| frame["id"].as_i64() == Some(1))
+        .map(|frame| {
+            let text = frame["result"]["content"][0]["text"]
+                .as_str()
+                .expect("tool text");
+            serde_json::from_str(text).expect("tool doc")
+        })
+        .collect()
+}
+
+/// Overwrite sealed object files so a later open fails authentication.
+fn trash_objects(vault: &Path) {
+    let epochs = vault.join("epochs");
+    for entry in walkdir_files(&epochs) {
+        if entry.extension().and_then(|e| e.to_str()) == Some("gobj") {
+            std::fs::write(&entry, b"not-an-object").expect("trash object");
+        }
+    }
+}
+
+fn walkdir_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let rd = match std::fs::read_dir(&d) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn mcp_hash_default_and_run_token_deny_plaintext() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_vault(dir);
+    let show = geode(
+        dir,
+        &[
+            "--key", "k.gkey", "--output", "json", "policy", "show", "v.geode",
+        ],
+    );
+    assert_ok(&show, "policy show");
+    let doc: serde_json::Value = serde_json::from_slice(&show.stdout).expect("policy json");
+    let vid = doc["policy"]["vault_id"].as_str().expect("vault_id");
+    let policy = format!(
+        r#"{{"version":1,"vault_id":"{vid}","default":"deny","principals":[{{"id":"human:local","ops":["list","read","inject","write","mount","verify","admin"],"prefixes":[""]}},{{"id":"agent:test","ops":["list","read","write","inject"],"prefixes":["scratch/"],"max_bytes":1048576}}]}}"#
+    );
+    std::fs::write(dir.join("policy.json"), policy).unwrap();
+    assert_ok(
+        &geode(
+            dir,
+            &[
+                "--key",
+                "k.gkey",
+                "policy",
+                "set",
+                "v.geode",
+                "--file",
+                "policy.json",
+                "--yes",
+                "--break-glass",
+            ],
+        ),
+        "policy set",
+    );
+
+    let reader = issue_token(dir, "list,read,write", "15m");
+    let body = b"sk-dummy-0000QA\n";
+    assert_ok(
+        &geode_token(
+            dir,
+            &[
+                "--key",
+                "k.gkey",
+                "agent",
+                "write",
+                "v.geode",
+                "scratch/a.txt",
+            ],
+            &reader,
+            body,
+        ),
+        "write",
+    );
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_geode"))
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let run = geode(
+        dir,
+        &[
+            "--key",
+            "k.gkey",
+            "--output",
+            "json",
+            "agent",
+            "token",
+            "issue",
+            "--vault",
+            "v.geode",
+            "--principal",
+            "agent:test",
+            "--ops",
+            "list,inject",
+            "--allow-prefix",
+            "scratch/",
+            "--allow-cmd",
+            &exe,
+            "--run-only",
+        ],
+    );
+    assert_ok(&run, "run-only issue");
+    let run_doc: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+    let runner = run_doc["token"].as_str().unwrap().to_owned();
+    let inspected = geode_token(
+        dir,
+        &[
+            "--key", "k.gkey", "--output", "json", "agent", "token", "inspect", "--vault",
+            "v.geode",
+        ],
+        &runner,
+        b"",
+    );
+    assert_ok(&inspected, "inspect run token");
+    let claims: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    assert_eq!(claims["kind"], "run");
+
+    let call = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"geode_read","arguments":{"vault":"v.geode","path":"scratch/a.txt"}}}"#,
+        "\n",
+    );
+    let (stdout, _) = mcp_session(dir, &runner, call, false);
+    let docs = mcp_docs(&stdout);
+    assert_eq!(docs.len(), 1, "{stdout}");
+    let hashed = &docs[0];
+    assert_eq!(hashed["ok"], true, "{hashed}");
+    assert!(hashed.get("text").is_none(), "{hashed}");
+    assert!(hashed.get("hex").is_none(), "{hashed}");
+    assert!(hashed.get("sha256").is_none(), "{hashed}");
+    assert!(hashed.get("preview").is_none(), "{hashed}");
+    assert!(hashed.get("body").is_none(), "{hashed}");
+    let root = hashed["content_root"]
+        .as_str()
+        .expect("content_root")
+        .to_owned();
+    assert_eq!(root.len(), 64);
+    assert!(!stdout.contains("sk-dummy"), "{stdout}");
+
+    trash_objects(dir.join("v.geode").as_path());
+    let (stdout, _) = mcp_session(dir, &runner, call, false);
+    let again = &mcp_docs(&stdout)[0];
+    assert_eq!(
+        again["content_root"], root,
+        "hash opened the trashed object: {again}"
+    );
+    assert!(!stdout.contains("sk-dummy"));
+
+    let deny_req = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"geode_read","arguments":{"vault":"v.geode","path":"scratch/a.txt","mode":"text"}}}"#,
+        "\n",
+    );
+    let (stdout, stderr) = mcp_session(dir, &runner, deny_req, true);
+    assert!(!stdout.contains("sk-dummy"), "{stdout}");
+    let denied = &mcp_docs(&stdout)[0];
+    assert_eq!(denied["ok"], false, "{denied}");
+    assert!(
+        denied["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("plaintext_denied"),
+        "{denied}"
+    );
+    for key in ["text", "hex", "preview", "body", "sha256", "content_root"] {
+        assert!(denied.get(key).is_none(), "{key} in {denied}");
+    }
+    let event = stderr
+        .lines()
+        .find(|line| line.contains("\"verb\":\"read\"") || line.contains("\"verb\": \"read\""))
+        .unwrap_or_else(|| panic!("no read event: {stderr}"));
+    assert!(event.contains("geode.event.v1"), "{event}");
+    assert!(!event.contains("sk-dummy"), "{event}");
+
+    let hex_req = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"geode_read","arguments":{"vault":"v.geode","path":"scratch/a.txt","mode":"hex"}}}"#,
+        "\n",
+    );
+    let (stdout, _) = mcp_session(dir, &runner, hex_req, false);
+    assert!(stdout.contains("plaintext_denied"), "{stdout}");
+    assert!(!stdout.contains("sk-dummy"), "{stdout}");
+
+    let (stdout, _) = mcp_session(dir, &reader, call, false);
+    let reader_hash = &mcp_docs(&stdout)[0];
+    assert_eq!(reader_hash["content_root"], root);
+    assert!(reader_hash.get("text").is_none(), "{reader_hash}");
+    assert!(!stdout.contains("sk-dummy"));
+
+    let text_req = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"geode_read","arguments":{"vault":"v.geode","path":"scratch/a.txt","mode":"text"}}}"#,
+        "\n",
+    );
+    // The object was trashed, so an explicit text read must fail closed
+    // rather than return a body. Re-seal by writing again, then read text.
+    assert_ok(
+        &geode_token(
+            dir,
+            &[
+                "--key",
+                "k.gkey",
+                "agent",
+                "write",
+                "v.geode",
+                "scratch/a.txt",
+            ],
+            &reader,
+            body,
+        ),
+        "rewrite",
+    );
+    let (stdout, _) = mcp_session(dir, &reader, text_req, false);
+    let body_doc = &mcp_docs(&stdout)[0];
+    assert_eq!(body_doc["text"], "sk-dummy-0000QA\n");
+
+    let cli = geode_token(
+        dir,
+        &[
+            "--key",
+            "k.gkey",
+            "agent",
+            "read",
+            "v.geode",
+            "scratch/a.txt",
+        ],
+        &reader,
+        b"",
+    );
+    assert_ok(&cli, "cli default read");
+    assert_eq!(cli.stdout, body);
 }

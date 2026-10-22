@@ -33,7 +33,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use geode_grotto::agent_ops::{self, ReadBody, ReadMode};
 use geode_grotto::kdf::EpochKey;
 use geode_grotto::policy::{Op, PrincipalId};
-use geode_grotto::token::{self, CmdRule, RedactLevel, Token, TokenId};
+use geode_grotto::token::{self, CmdRule, RedactLevel, Token, TokenId, TokenKind};
 use geode_grotto::{Error, Result};
 
 use crate::{
@@ -97,6 +97,7 @@ pub fn run(args: &AgentArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
                 allow_host,
                 peer_uid,
                 redact,
+                run_only,
             } => issue(
                 vault,
                 principal,
@@ -111,6 +112,7 @@ pub fn run(args: &AgentArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
                     peer_uid: *peer_uid,
                     redact: *redact,
                 },
+                *run_only,
                 global,
                 out,
             ),
@@ -393,6 +395,13 @@ fn redact_str(level: RedactLevel) -> &'static str {
     }
 }
 
+fn kind_str(kind: TokenKind) -> &'static str {
+    match kind {
+        TokenKind::Full => "full",
+        TokenKind::Run => "run",
+    }
+}
+
 /// One command rule as inspect text: the path, then any digest and
 /// argument prefix.
 fn cmd_rule_text(rule: &CmdRule) -> String {
@@ -417,6 +426,7 @@ fn issue(
     allow_prefix: &[String],
     max_bytes: Option<u64>,
     inject: &InjectClaimArgs<'_>,
+    run_only: bool,
     global: &GlobalArgs,
     out: OutMode,
 ) -> Result<()> {
@@ -425,6 +435,9 @@ fn issue(
     let principal = PrincipalId(principal.to_owned());
     principal.validate()?;
     let ops = parse_ops(ops)?;
+    if run_only && ops.contains(&Op::Read) {
+        return Err(Error::Format("run-only token cannot include read".into()));
+    }
     let prefixes = normalize_prefixes(allow_prefix)?;
     let ttl = parse_ttl(ttl)?;
     let max_bytes = max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
@@ -454,6 +467,11 @@ fn issue(
         allow_hosts: inject.allow_hosts,
         peer_uid: inject.peer_uid,
         redact: inject.redact,
+        kind: if run_only {
+            TokenKind::Run
+        } else {
+            TokenKind::Full
+        },
     };
     // 10-policy 2.5: a token may only narrow policy, never widen — issue
     // refuses a grant policy would deny (`Error::PolicyDeny`, exit 3).
@@ -571,6 +589,7 @@ fn inspect(
         "agent_token_inspect",
         serde_json::json!({
             "token_id": cmd::hex(&claims.token_id.0),
+            "kind": kind_str(claims.kind),
             "vault_id": cmd::hex(&claims.vault_id.0),
             "epoch": claims.epoch.0,
             "principal": claims.principal_id.0,
@@ -585,8 +604,9 @@ fn inspect(
             "redact": redact_str(claims.redact),
         }),
         &format!(
-            "token {}\n  principal {}\n  vault {} epoch {}\n  valid {}..{}\n  ops {}\n  prefixes {}\n  max-bytes {}\n  allow-cmds {}\n  allow-hosts {}\n  peer-uid {}\n  redact {}",
+            "token {}\n  kind {}\n  principal {}\n  vault {} epoch {}\n  valid {}..{}\n  ops {}\n  prefixes {}\n  max-bytes {}\n  allow-cmds {}\n  allow-hosts {}\n  peer-uid {}\n  redact {}",
             cmd::hex(&claims.token_id.0),
+            kind_str(claims.kind),
             claims.principal_id.0,
             cmd::hex(&claims.vault_id.0),
             claims.epoch.0,
@@ -816,8 +836,17 @@ fn read_doc(outcome: &agent_ops::ReadOutcome, mode: ReadMode) -> serde_json::Val
         "path": outcome.path,
         "plain_len": outcome.plain_len,
         "truncated": outcome.truncated,
-        "sha256": cmd::hex(&outcome.sha256),
     });
+    // Hash mode is the sealed content root only. No plaintext digest, no body.
+    if mode == ReadMode::Hash {
+        if let Some(root) = outcome.content_root {
+            doc["content_root"] = serde_json::json!(cmd::hex(&root));
+        }
+        return doc;
+    }
+    if let Some(sha) = outcome.sha256 {
+        doc["sha256"] = serde_json::json!(cmd::hex(&sha));
+    }
     match &outcome.body {
         ReadBody::Full(bytes) => match std::str::from_utf8(bytes) {
             Ok(text) if mode == ReadMode::Text => {
@@ -879,17 +908,21 @@ fn read(
                     stdout.write_all(bytes).map_err(Error::Io)?;
                 }
                 (ReadBody::None, _) => {
-                    // Hash mode: the digest only, never a body.
-                    writeln!(stdout, "{}", cmd::hex(&outcome.sha256)).map_err(Error::Io)?;
+                    // Hash mode: the sealed content root, never a plaintext digest.
+                    let root = outcome
+                        .content_root
+                        .ok_or_else(|| Error::Format("hash read missing content_root".into()))?;
+                    writeln!(stdout, "{}", cmd::hex(&root)).map_err(Error::Io)?;
                 }
             }
             stdout.flush().map_err(Error::Io)?;
             if let ReadBody::Preview { bytes, .. } = &outcome.body {
+                let sha = outcome.sha256.map(|s| cmd::hex(&s)).unwrap_or_default();
                 eprintln!(
                     "truncated: {} bytes shown of {} (sha256 {})",
                     bytes.len(),
                     outcome.plain_len,
-                    cmd::hex(&outcome.sha256),
+                    sha,
                 );
             }
         }
@@ -1279,20 +1312,17 @@ impl<'g> StdioServer<'g> {
             .args
             .get("max_bytes")
             .and_then(serde_json::Value::as_u64);
-        let mode = match call.args.get("mode").and_then(|m| m.as_str()).unwrap_or(
-            match agent_ops::default_read_mode(&call.claims.allow_ops) {
-                ReadMode::Hash => "hash",
-                ReadMode::Text | ReadMode::Hex => "text",
-            },
-        ) {
-            "text" => ReadMode::Text,
-            "hex" => ReadMode::Hex,
-            "hash" => ReadMode::Hash,
-            other => {
+        // MCP default is hash for every token. Text and hex are explicit.
+        // CLI `geode agent read` keeps `default_read_mode`.
+        let mode = match call.args.get("mode").and_then(|m| m.as_str()) {
+            None | Some("hash") => ReadMode::Hash,
+            Some("text") => ReadMode::Text,
+            Some("hex") => ReadMode::Hex,
+            Some(other) => {
                 return Err(Error::Format(format!("bad mode '{other}' (text|hex|hash)")));
             }
         };
-        let outcome = agent_ops::read(
+        let outcome = match agent_ops::read(
             &call.ctx.ek,
             Path::new(call.vault),
             call.sealed,
@@ -1301,7 +1331,15 @@ impl<'g> StdioServer<'g> {
             max_bytes,
             mode,
             false,
-        )?;
+        ) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                if matches!(&e, Error::Format(m) if m == "plaintext_denied") {
+                    Self::facet_event(call.facet_events, call.ctx, call.claims, "read", path, None);
+                }
+                return Err(e);
+            }
+        };
         Self::facet_event(
             call.facet_events,
             call.ctx,
@@ -1567,7 +1605,7 @@ pub(crate) fn tool_descriptors_for(grants: Option<Vec<String>>) -> Vec<serde_jso
                     "vault": vault_prop.clone(),
                     "path": {"type": "string", "description": "Vault-relative object path"},
                     "max_bytes": {"type": "integer", "description": "Read cap (default 64 KiB; hard cap from the token)"},
-                    "mode": {"type": "string", "enum": ["text", "hex", "hash"], "description": "Rendering mode. Default text when the token holds read; hash when it holds inject without read. text or hex without read returns plaintext_denied with no body."},
+                    "mode": {"type": "string", "enum": ["text", "hex", "hash"], "description": "Rendering mode. Omitted mode is hash for every token and returns content_root, with no body and no plaintext digest. text or hex require an explicit mode and the read op; without read, including a run-only token, they return plaintext_denied and no body."},
                     "intent": {"type": "string", "description": "Optional note. Not a credential, and it does not change what the token allows."},
                 },
                 "required": ["vault", "path"],

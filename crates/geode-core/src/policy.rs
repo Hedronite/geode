@@ -314,7 +314,7 @@ pub fn token_narrows_policy(token: &crate::token::Token, policy: &Policy) -> Res
 mod tests {
     use super::*;
     use crate::kdf::{Epoch, EpochKey, IdentitySecret, VaultId};
-    use crate::token::{inspect, issue_narrow, Token, TokenId};
+    use crate::token::{inspect, issue_narrow, Token, TokenId, TokenKind};
     use tempfile::tempdir;
 
     const NOW: i64 = 1_700_000_000;
@@ -343,6 +343,7 @@ mod tests {
             allow_hosts: Vec::new(),
             peer_uid: None,
             redact: crate::token::RedactLevel::Strict,
+            kind: TokenKind::Full,
         }
     }
 

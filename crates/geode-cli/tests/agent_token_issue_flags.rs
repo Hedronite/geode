@@ -470,9 +470,31 @@ fn agent_read_follows_g3_defaults() {
     assert_ok(&h, "inject-only default");
     let line = String::from_utf8(h.stdout.clone()).expect("utf8");
     let digest = line.trim_end();
-    assert_eq!(digest.len(), 64, "sha256 hex: {line:?}");
+    assert_eq!(digest.len(), 64, "content_root hex: {line:?}");
     assert!(digest.bytes().all(|b| b.is_ascii_hexdigit()));
     assert!(!line.contains("sk-dummy"), "body leaked: {line}");
+    let listing = geode_token(
+        dir,
+        &[
+            "--key", "k.gkey", "--output", "json", "agent", "list", "v.geode", "scratch/",
+        ],
+        &reader,
+        b"",
+    );
+    assert_ok(&listing, "list json");
+    let ldoc: serde_json::Value = serde_json::from_slice(&listing.stdout).expect("list json");
+    let root = ldoc["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .find(|e| e["path"] == "scratch/note.md")
+        .expect("note")["content_root"]
+        .as_str()
+        .expect("content_root");
+    assert_eq!(
+        digest, root,
+        "hash output must be the manifest content_root"
+    );
     let explicit = read(dir, &injector, Some("hash"));
     assert_ok(&explicit, "inject-only hash");
     assert_eq!(explicit.stdout, h.stdout);
@@ -503,4 +525,59 @@ fn agent_read_follows_g3_defaults() {
     assert_ok(&x, "read hex");
     let hex: String = BODY.iter().map(|b| format!("{b:02x}")).collect();
     assert_eq!(String::from_utf8_lossy(&x.stdout).trim_end(), hex);
+}
+
+#[test]
+fn run_only_issue_inspect_and_rejects_read() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup(dir, "list,read,write,inject");
+    let exe = exe_a();
+    let bad = issue_out(
+        dir,
+        "list,read,inject",
+        &["--allow-cmd", &exe, "--run-only"],
+    );
+    assert_code(&bad, 1, "run-only with read");
+    let bad_doc: serde_json::Value = serde_json::from_slice(&bad.stdout).expect("error json");
+    assert!(
+        bad_doc["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("cannot include read"),
+        "{bad_doc}"
+    );
+    assert!(bad_doc.get("token").is_none(), "{bad_doc}");
+
+    let token = issue(dir, "list,inject", &["--allow-cmd", &exe, "--run-only"]);
+    let j = inspect(dir, &token, true);
+    assert_ok(&j, "inspect run token");
+    let doc: serde_json::Value = serde_json::from_slice(&j.stdout).expect("json");
+    assert_eq!(doc["kind"], "run");
+    assert_eq!(doc["allow_ops"], serde_json::json!(["list", "inject"]));
+    let text = String::from_utf8_lossy(&inspect(dir, &token, false).stdout).into_owned();
+    assert!(text.contains("kind run"), "{text}");
+
+    let denied = read(dir, &token, Some("text"));
+    assert_code(&denied, 1, "run token text");
+    assert!(denied.stdout.is_empty(), "{:?}", denied.stdout);
+    assert!(
+        stderr(&denied).contains("plaintext_denied"),
+        "{}",
+        stderr(&denied)
+    );
+    assert!(!stderr(&denied).contains("sk-dummy"));
+
+    let hashed = read(dir, &token, None);
+    assert_ok(&hashed, "run token cli hash default");
+    assert!(!String::from_utf8_lossy(&hashed.stdout).contains("sk-dummy"));
+    assert_eq!(String::from_utf8_lossy(&hashed.stdout).trim_end().len(), 64);
+
+    let full = issue(dir, "list,read", &[]);
+    let full_doc: serde_json::Value =
+        serde_json::from_slice(&inspect(dir, &full, true).stdout).unwrap();
+    assert_eq!(full_doc["kind"], "full");
+    let body = read(dir, &full, None);
+    assert_ok(&body, "cli read token still prints the body");
+    assert_eq!(body.stdout, BODY);
 }
