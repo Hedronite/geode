@@ -1044,7 +1044,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = std::fs::canonicalize(tmp.path()).unwrap();
         let p = |s: &str| dir.join(s).to_str().unwrap().to_owned();
-        geode(&["keygen", &p("k.gkey")]);
+        geode(&["keygen", "--insecure-plaintext", &p("k.gkey")]);
         geode(&["--key", &p("k.gkey"), "vault", "init", &p("v.geode")]);
         std::fs::create_dir_all(dir.join("src/cfg")).unwrap();
         std::fs::write(dir.join("src/cfg/note"), DUMMY).unwrap();

@@ -76,7 +76,10 @@ fn stdout_text(out: &Output) -> String {
 fn sign_pub_pem_shape_and_stability() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
-    assert_ok(&geode(dir, &["keygen", "alice.gkey"]), "keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "alice.gkey"]),
+        "keygen",
+    );
 
     let a = geode(dir, &["--key", "alice.gkey", "sign", "pub"]);
     assert_ok(&a, "sign pub");
@@ -103,7 +106,10 @@ fn sign_pub_pem_shape_and_stability() {
     let b = geode(dir, &["--key", "alice.gkey", "sign", "pub"]);
     assert_ok(&b, "sign pub again");
     assert_eq!(stdout_text(&b), pem, "sign pub is byte-stable");
-    assert_ok(&geode(dir, &["keygen", "bob.gkey"]), "keygen bob");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "bob.gkey"]),
+        "keygen bob",
+    );
     let c = geode(dir, &["--key", "bob.gkey", "sign", "pub"]);
     assert_ok(&c, "sign pub bob");
     assert_ne!(stdout_text(&c), pem, "two identities have two PEMs");
@@ -133,7 +139,10 @@ fn sign_pub_pem_shape_and_stability() {
 fn sign_blob_signature_shape() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
-    assert_ok(&geode(dir, &["keygen", "alice.gkey"]), "keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "alice.gkey"]),
+        "keygen",
+    );
     std::fs::write(dir.join("payload"), b"geode g1 proof payload\n").expect("write payload");
 
     let out = geode(dir, &["--key", "alice.gkey", "sign", "blob", "payload"]);
@@ -184,8 +193,14 @@ fn sign_blob_signature_shape() {
 fn cross_identity_signature_fails() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
-    assert_ok(&geode(dir, &["keygen", "alice.gkey"]), "keygen");
-    assert_ok(&geode(dir, &["keygen", "bob.gkey"]), "keygen bob");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "alice.gkey"]),
+        "keygen",
+    );
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "bob.gkey"]),
+        "keygen bob",
+    );
     std::fs::write(dir.join("payload"), b"cross identity payload").expect("write payload");
 
     assert_ok(
@@ -287,11 +302,7 @@ fn wrapped_key_signs_and_bad_passphrase_exits_2() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
     assert_ok(
-        &env_geode(
-            dir,
-            "correct horse",
-            &["keygen", "w.gkey", "--password", "--cheap"],
-        ),
+        &env_geode(dir, "correct horse", &["keygen", "w.gkey", "--cheap"]),
         "keygen wrapped",
     );
     std::fs::write(dir.join("payload"), b"wrapped payload").expect("write payload");
@@ -336,7 +347,10 @@ fn wrapped_key_signs_and_bad_passphrase_exits_2() {
 fn json_output_carries_no_seed_or_isk() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
-    assert_ok(&geode(dir, &["keygen", "alice.gkey"]), "keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "alice.gkey"]),
+        "keygen",
+    );
     std::fs::write(dir.join("payload"), b"json discipline payload").expect("write payload");
 
     let gkey = std::fs::read(dir.join("alice.gkey")).expect("read gkey");

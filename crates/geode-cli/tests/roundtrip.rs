@@ -109,7 +109,7 @@ fn roundtrip_seal_verify_open() {
     let dir = tmp.path();
 
     // G3a: keygen writes a 0600 raw GKEY.
-    assert_ok(dir, &["keygen", "k.gkey"]);
+    assert_ok(dir, &["keygen", "--insecure-plaintext", "k.gkey"]);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -168,7 +168,7 @@ fn roundtrip_seal_verify_open() {
 fn bit_flip_fails_closed_exit_2() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
-    assert_ok(dir, &["keygen", "k.gkey"]);
+    assert_ok(dir, &["keygen", "--insecure-plaintext", "k.gkey"]);
     assert_ok(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]);
     std::fs::write(dir.join("note.txt"), b"integrity matters\n").expect("write");
     assert_ok(dir, &["--key", "k.gkey", "seal", "note.txt", "v.geode"]);

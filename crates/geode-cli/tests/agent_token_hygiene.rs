@@ -70,7 +70,9 @@ fn setup(dir: &Path, pass: Option<&str>) -> String {
     };
     let mut kg = cmd(dir, &["keygen", "k.gkey"]);
     if pass.is_some() {
-        kg.args(["--password", "--cheap"]);
+        kg.arg("--cheap");
+    } else {
+        kg.arg("--insecure-plaintext");
     }
     with_pass(&mut kg);
     assert_ok(&run(&mut kg), "keygen");

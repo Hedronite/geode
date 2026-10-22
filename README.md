@@ -65,7 +65,7 @@ Generate a key, create a vault, seal one file, and read it back:
 ```sh
 mkdir /tmp/geode-demo && cd /tmp/geode-demo
 
-geode keygen ./demo.gkey
+geode keygen ./demo.gkey            # prompts for a passphrase
 geode --key ./demo.gkey vault init ./vault.geode
 printf 'stone outside\n' > note.txt
 geode --key ./demo.gkey seal note.txt ./vault.geode
@@ -74,6 +74,8 @@ geode --key ./demo.gkey cat ./vault.geode note.txt
 ```
 
 Pass `--key` or set `GEODE_KEY_FILE`, unless a keyring default or `~/.config/hedronite/geode/default.gkey` exists (`$XDG_CONFIG_HOME` is honored). `geode keygen` with no path writes `./secret.gkey` and warns you to move it. Key files are mode `0600`. Never commit one; `*.gkey` belongs in `.gitignore`.
+
+`geode keygen` protects the key by default: it prompts for a passphrase, or with `--keychain` keeps one in the OS keychain so later commands do not prompt. Upgrading from 1.2.x: scripts and CI that run `geode keygen` without a terminal now fail with exit 1 and write nothing. Add `--keychain`, or `--insecure-plaintext` for a throwaway test key. `--password` is now the default and can be dropped. Existing raw keys keep working.
 
 Where a seal lands in the vault:
 
@@ -100,7 +102,7 @@ Commands at a glance:
 
 | Area | Commands |
 |---|---|
-| Keys | `keygen` (raw, or `--password` to wrap it), `keyring list` / `add`, `sign pub`, `sign blob PATH` |
+| Keys | `keygen` (passphrase by default, `--keychain`, or `--insecure-plaintext`), `keyring list` / `add`, `sign pub`, `sign blob PATH` |
 | Vault | `vault init`, `vault recipients`, `vault add-recipient`, `vault rotate`, `policy show` / `set` / `check` |
 | Data | `seal`, `open`, `list`, `cat`, `verify`, `snapshot`, `gc` |
 | Mount | `mount VAULT MOUNTPOINT`, `unmount` |

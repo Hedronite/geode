@@ -90,7 +90,7 @@ impl Fixture {
         // Raw identity key (no passphrase) so the in-process open path is
         // headless — no tty prompt. `keygen` takes PATH as a positional.
         let k = Command::new(geode_bin())
-            .args(["keygen"])
+            .args(["keygen", "--insecure-plaintext"])
             .arg(&self.key)
             .output()
             .expect("keygen");

@@ -52,8 +52,8 @@ jobs:
           BIN=target/debug/geode
           W=$(mktemp -d)
           printf 'geode g1 gha payload\n' > "$W/payload"
-          "$BIN" keygen "$W/alice.gkey"
-          "$BIN" keygen "$W/bob.gkey"
+          "$BIN" keygen --insecure-plaintext "$W/alice.gkey"
+          "$BIN" keygen --insecure-plaintext "$W/bob.gkey"
           "$BIN" --key "$W/alice.gkey" sign pub -o "$W/pub.pem"
           "$BIN" --key "$W/alice.gkey" sign blob "$W/payload" -o "$W/sig"
           cosign verify-blob --key "$W/pub.pem" --signature "$W/sig" \

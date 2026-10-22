@@ -80,11 +80,10 @@ fn first_object(root: &std::path::Path) -> PathBuf {
 
 #[test]
 fn wrong_passphrase_gap_is_exit_1() {
-    // G4b/G5c: `keygen --password` hits the tracked geode-core keyfile
-    // API gap. `cmd::fail` renders it via `output::human_error` → exit 1
-    // (usage), not 2 (auth). An operator seeing "exit 1" knows it is a
-    // tooling gap, not a compromised vault.
-    let (code, out) = run(&["keygen", "--password", "/dev/null/nonexistent"]);
+    // G4b/G5c: a keygen that cannot write its file renders via
+    // `output::human_error` → exit 1 (usage), not 2 (auth). An operator
+    // seeing "exit 1" knows it is a tooling gap, not a compromised vault.
+    let (code, out) = run(&["keygen", "--insecure-plaintext", "/dev/null/nonexistent"]);
     assert_eq!(
         code, 1,
         "wrong-passphrase gap is exit 1 (usage), not auth (2)"
@@ -108,7 +107,11 @@ fn flipped_bit_is_exit_2() {
     let src = tmp.join("note.txt");
     fs::write(&src, b"hello geode").expect("src");
 
-    assert_eq!(run(&["keygen", key.to_str().unwrap()]).0, 0, "keygen ok");
+    assert_eq!(
+        run(&["keygen", "--insecure-plaintext", key.to_str().unwrap()]).0,
+        0,
+        "keygen ok"
+    );
     assert_eq!(
         run(&[
             "vault",

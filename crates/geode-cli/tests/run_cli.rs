@@ -35,7 +35,7 @@ impl Fx {
             dir,
             sh: canonical_on_path("sh"),
         };
-        fx.ok(&["keygen", "k.gkey"]);
+        fx.ok(&["keygen", "--insecure-plaintext", "k.gkey"]);
         fx.ok(&["--key", "k.gkey", "vault", "init", "v.geode"]);
         std::fs::create_dir_all(fx.dir.join("src/cfg")).unwrap();
         std::fs::write(fx.dir.join("src/cfg/dummy.env"), DUMMY).unwrap();

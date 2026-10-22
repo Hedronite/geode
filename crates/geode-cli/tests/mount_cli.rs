@@ -127,7 +127,7 @@ fn mountpoint(dir: &Path) -> std::path::PathBuf {
 }
 
 fn setup_key(dir: &Path) {
-    let out = geode(dir, &["keygen", "k.gkey"]);
+    let out = geode(dir, &["keygen", "--insecure-plaintext", "k.gkey"]);
     assert!(out.status.success(), "keygen: {}", combined(&out));
 }
 

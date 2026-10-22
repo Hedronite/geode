@@ -76,9 +76,7 @@ fn list(out: OutMode) -> Result<()> {
 }
 
 fn add(path: &Path, label: &str, out: OutMode) -> Result<()> {
-    if label.is_empty() || label.chars().count() > 64 {
-        return Err(Error::Format("label must be 1-64 chars".into()));
-    }
+    check_label(label)?;
     let path = path.canonicalize().map_err(|e| {
         Error::Io(std::io::Error::new(
             e.kind(),
@@ -92,27 +90,7 @@ fn add(path: &Path, label: &str, out: OutMode) -> Result<()> {
     let key_id = cmd::hex(&geode_grotto::kdf::derive_key_id(&isk)?.0);
     drop(isk);
 
-    let index = index_path()?;
-    let mut kr = keyring::load_keyring(&index)?;
-    if kr.keys.iter().any(|k| k.label == label) {
-        return Err(Error::Format(format!("label {label} already in keyring")));
-    }
-    kr.keys
-        .retain(|k| k.id != key_id && k.path != path.display().to_string());
-    kr.keys.push(KeyringKey {
-        id: key_id.clone(),
-        path: path.display().to_string(),
-        label: label.to_string(),
-        hybrid: None,
-        has_passphrase: wrapped.then_some(true),
-    });
-    // The first added key becomes the default when none is set.
-    let mut note = String::new();
-    if kr.default.is_none() {
-        kr.default = Some(key_id.clone());
-        note = " (set as keyring default)".to_string();
-    }
-    keyring::save_keyring(&index, &kr)?;
+    let note = register(&path, label, &key_id, wrapped)?;
 
     cmd::emit(
         out,
@@ -125,4 +103,68 @@ fn add(path: &Path, label: &str, out: OutMode) -> Result<()> {
         &format!("added {label} = {key_id} ({}){note}", path.display()),
     );
     Ok(())
+}
+
+fn check_label(label: &str) -> Result<()> {
+    if label.is_empty() || label.chars().count() > 64 {
+        return Err(Error::Format("label must be 1-64 chars".into()));
+    }
+    Ok(())
+}
+
+/// Refuse a label that is malformed or already in the keyring.
+pub(crate) fn check_label_free(label: &str) -> Result<()> {
+    check_label(label)?;
+    let kr = keyring::load_keyring(&index_path()?)?;
+    if kr.keys.iter().any(|k| k.label == label) {
+        return Err(Error::Format(format!("label {label} already in keyring")));
+    }
+    Ok(())
+}
+
+/// Add a key (canonical `path`) to the index. Returns a note when it became
+/// the keyring default. Shared by `keyring add` and `keygen --keychain`.
+pub(crate) fn register(path: &Path, label: &str, key_id: &str, wrapped: bool) -> Result<String> {
+    check_label(label)?;
+    let index = index_path()?;
+    let mut kr = keyring::load_keyring(&index)?;
+    if kr.keys.iter().any(|k| k.label == label) {
+        return Err(Error::Format(format!("label {label} already in keyring")));
+    }
+    kr.keys
+        .retain(|k| k.id != key_id && k.path != path.display().to_string());
+    kr.keys.push(KeyringKey {
+        id: key_id.to_string(),
+        path: path.display().to_string(),
+        label: label.to_string(),
+        hybrid: None,
+        has_passphrase: wrapped.then_some(true),
+    });
+    // The first added key becomes the default when none is set.
+    let mut note = String::new();
+    if kr.default.is_none() {
+        kr.default = Some(key_id.to_string());
+        note = " (set as keyring default)".to_string();
+    }
+    keyring::save_keyring(&index, &kr)?;
+    Ok(note)
+}
+
+/// The wrap passphrase `keygen --keychain` stored for the key at `path`,
+/// when the index lists that path as wrapped and the OS keychain holds an
+/// entry for its key id. Any miss is `None`; the caller then prompts.
+pub(crate) fn keychain_passphrase(path: &Path) -> Option<zeroize::Zeroizing<String>> {
+    let canon = path.canonicalize().ok()?.display().to_string();
+    let kr = keyring::load_keyring(&index_path().ok()?).ok()?;
+    let k = kr
+        .keys
+        .iter()
+        .find(|k| k.path == canon && k.has_passphrase == Some(true))?;
+    if !keyring::os_store_available() {
+        return None;
+    }
+    let secret = zeroize::Zeroizing::new(keyring::load_secret_os(&k.id).ok()?);
+    std::str::from_utf8(&secret)
+        .ok()
+        .map(|p| zeroize::Zeroizing::new(p.to_owned()))
 }

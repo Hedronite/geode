@@ -98,7 +98,10 @@ fn assert_code(out: &Output, code: i32, what: &str) {
 /// Vault with a sealed policy granting `agent:test` `agent_ops` on
 /// `scratch/`, and one object at `scratch/note.md`.
 fn setup(dir: &Path, agent_ops: &str) {
-    assert_ok(&geode(dir, &["keygen", "k.gkey"]), "keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "k.gkey"]),
+        "keygen",
+    );
     assert_ok(
         &geode(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]),
         "vault init",
