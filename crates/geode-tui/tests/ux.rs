@@ -77,7 +77,7 @@ impl Fixture {
 
     fn build(&self) {
         let k = Command::new(geode_bin())
-            .args(["keygen"])
+            .args(["keygen", "--insecure-plaintext"])
             .arg(&self.key)
             .output()
             .expect("keygen");

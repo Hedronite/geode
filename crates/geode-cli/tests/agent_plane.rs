@@ -60,7 +60,10 @@ fn assert_ok(out: &Output, what: &str) {
 }
 
 fn setup_vault(dir: &Path) {
-    assert_ok(&geode(dir, &["keygen", "k.gkey"]), "keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "k.gkey"]),
+        "keygen",
+    );
     assert_ok(
         &geode(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]),
         "vault init",

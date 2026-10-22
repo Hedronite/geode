@@ -38,7 +38,10 @@ fn assert_ok(out: &Output, what: &str) {
 }
 
 fn setup_vault(dir: &Path) {
-    assert_ok(&geode(dir, &["keygen", "k.gkey"]), "keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "k.gkey"]),
+        "keygen",
+    );
     assert_ok(
         &geode(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]),
         "vault init",
@@ -49,7 +52,7 @@ fn setup_vault(dir: &Path) {
 fn keygen_emits_gpub() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
-    let out = geode(dir, &["keygen", "alice.gkey"]);
+    let out = geode(dir, &["keygen", "--insecure-plaintext", "alice.gkey"]);
     assert_ok(&out, "keygen");
     let gpub_path = dir.join("alice.gpub");
     assert!(gpub_path.is_file(), ".gpub written beside .gkey");
@@ -102,7 +105,10 @@ fn recipients_list_and_add() {
     assert!(!text.contains("wrap"), "wrap blobs never shown: {text}");
 
     // Second identity; add its .gpub as an x25519 recipient.
-    assert_ok(&geode(dir, &["keygen", "bob.gkey"]), "bob keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "bob.gkey"]),
+        "bob keygen",
+    );
     let add = geode(
         dir,
         &[
@@ -142,7 +148,10 @@ fn add_recipient_fail_closed() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
     setup_vault(dir);
-    assert_ok(&geode(dir, &["keygen", "bob.gkey"]), "bob keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "bob.gkey"]),
+        "bob keygen",
+    );
 
     // No --key: usage error, exit 1 — even with GEODE_TOKEN set (a token
     // never mints recipients).
@@ -230,7 +239,10 @@ fn symmetric_vault_still_opens() {
         &geode(dir, &["--key", "k.gkey", "seal", "note.txt", "v.geode"]),
         "seal",
     );
-    assert_ok(&geode(dir, &["keygen", "bob.gkey"]), "bob keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "bob.gkey"]),
+        "bob keygen",
+    );
     assert_ok(
         &geode(
             dir,

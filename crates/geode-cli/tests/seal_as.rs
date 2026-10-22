@@ -33,7 +33,9 @@ fn setup() -> (tempfile::TempDir, PathBuf) {
     let t = tempfile::tempdir().expect("tempdir");
     let dir = std::fs::canonicalize(t.path()).expect("canonicalize");
     assert!(
-        geode(&dir, &["keygen", "k.gkey"]).status.success(),
+        geode(&dir, &["keygen", "--insecure-plaintext", "k.gkey"])
+            .status
+            .success(),
         "keygen"
     );
     let init = geode(&dir, &["--key", "k.gkey", "vault", "init", "v.geode"]);

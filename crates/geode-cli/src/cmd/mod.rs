@@ -76,7 +76,7 @@ const GKEY_KIND_WRAP: u8 = 0x01;
 /// passphrase-wrapped form (6.2, via the public wrap API from G5a).
 /// Permissions are checked before any byte is read (core `keyfile`).
 pub fn load_isk(path: &Path) -> Result<IdentitySecret> {
-    load_isk_inner(path, passphrase)
+    load_isk_inner(path, || passphrase(path))
 }
 
 /// [`load_isk`] with the passphrase supplied by the caller (the custody
@@ -156,13 +156,17 @@ fn load_isk_inner(
 
 /// Passphrase for wrapped keys: `--passphrase-fd` when given (SPEC-v034
 /// G2), else `GEODE_PASSPHRASE` when set (the startup warning already fired
-/// in `main`), else the no-echo prompt.
-fn passphrase() -> Result<zeroize::Zeroizing<String>> {
+/// in `main`), else the OS keychain entry `keygen --keychain` stored for
+/// this path, else the no-echo prompt.
+fn passphrase(path: &Path) -> Result<zeroize::Zeroizing<String>> {
     if let Some(p) = crate::output::fd_passphrase() {
         return Ok(p);
     }
     if let Some(p) = std::env::var_os("GEODE_PASSPHRASE") {
         return Ok(zeroize::Zeroizing::new(p.to_string_lossy().into_owned()));
+    }
+    if let Some(p) = self::keyring::keychain_passphrase(path) {
+        return Ok(p);
     }
     crate::output::prompt_passphrase("passphrase: ").map_err(Error::Io)
 }

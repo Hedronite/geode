@@ -95,7 +95,10 @@ fn recs_epoch_and_types(dir: &Path) -> (u64, Vec<String>) {
 }
 
 fn setup_vault(dir: &Path) {
-    assert_ok(&geode(dir, &["keygen", "k.gkey"]), "keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "k.gkey"]),
+        "keygen",
+    );
     assert_ok(
         &geode(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]),
         "vault init",
@@ -103,7 +106,10 @@ fn setup_vault(dir: &Path) {
 }
 
 fn add_bob(dir: &Path) -> String {
-    assert_ok(&geode(dir, &["keygen", "bob.gkey"]), "bob keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "bob.gkey"]),
+        "bob keygen",
+    );
     assert_ok(
         &geode(
             dir,
@@ -246,7 +252,10 @@ fn rotate_add_recipient_wraps_new_ek() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path();
     setup_vault(dir);
-    assert_ok(&geode(dir, &["keygen", "bob.gkey"]), "bob keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "bob.gkey"]),
+        "bob keygen",
+    );
     let add = geode(
         dir,
         &[

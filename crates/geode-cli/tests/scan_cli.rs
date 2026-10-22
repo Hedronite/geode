@@ -419,7 +419,10 @@ fn fingerprints_are_keyed() {
     );
 
     // An identity key (--key) derives its own scan key.
-    assert!(e.geode(&["keygen", "id.gkey"]).status.success());
+    assert!(e
+        .geode(&["keygen", "--insecure-plaintext", "id.gkey"])
+        .status
+        .success());
     let c = e.geode(&["--key", "id.gkey", "scan", "--json", "tree"]);
     assert_eq!(c.status.code(), Some(0), "{}", err(&c));
     assert!(fp(&a1).iter().all(|f| !fp(&c).contains(f)));
@@ -478,7 +481,7 @@ fn key_files_inside_a_root_are_always_findings() {
     // An identity key named default.gkey anywhere in a root.
     let keys = e.dir.join("keys");
     std::fs::create_dir_all(&keys).unwrap();
-    let kg = e.geode(&["keygen", "keys/default.gkey"]);
+    let kg = e.geode(&["keygen", "--insecure-plaintext", "keys/default.gkey"]);
     assert!(kg.status.success(), "{}", err(&kg));
     let o = e.geode(&["scan", "--hook", "--json", "keys"]);
     assert_eq!(o.status.code(), Some(2), "{}", err(&o));

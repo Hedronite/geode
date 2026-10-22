@@ -18,7 +18,12 @@ fn geode(dir: &Path, args: &[&str]) -> Output {
 }
 
 fn setup_vault(dir: &Path) {
-    assert!(geode(dir, &["keygen", "k.gkey"]).status.success(), "keygen");
+    assert!(
+        geode(dir, &["keygen", "--insecure-plaintext", "k.gkey"])
+            .status
+            .success(),
+        "keygen"
+    );
     assert!(
         geode(dir, &["--key", "k.gkey", "vault", "init", "v.geode"])
             .status

@@ -85,7 +85,10 @@ fn assert_no_isk(out: &Output, dir: &Path, keys: &[&str], what: &str) {
 }
 
 fn setup_key(dir: &Path) {
-    assert_ok(&geode(dir, &["keygen", "k.gkey"]), "keygen");
+    assert_ok(
+        &geode(dir, &["keygen", "--insecure-plaintext", "k.gkey"]),
+        "keygen",
+    );
 }
 
 fn has_gobj(root: &Path) -> bool {
