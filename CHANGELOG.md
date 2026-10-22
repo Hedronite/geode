@@ -42,6 +42,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 - **BREAKING:** `geode keygen` no longer writes an unwrapped key by default. With no mode flag it prompts for a passphrase and writes the wrapped form (kind `0x01`). `--keychain` keeps a random wrap passphrase in the OS keychain, adds the key to `geode keyring`, and unlocks without a prompt. `--insecure-plaintext` is the only way to write a raw key (kind `0x00`), and it warns on stderr. Non-interactive `geode keygen` (stdin not a terminal, no `GEODE_PASSPHRASE`) now exits 1 and writes nothing unless it passes `--insecure-plaintext` or `--keychain`. `--password` is accepted as a deprecated no-op for one minor. `--cheap` now applies to the default passphrase mode and is refused with `--insecure-plaintext` or `--keychain`. An empty `GEODE_PASSPHRASE` is refused. Raw keys written by earlier releases still load.
 - **BREAKING:** MCP `geode_read` with no `mode` returns the sealed `content_root` for every token, including tokens that hold `read`. Clients that omitted `mode` must pass `"mode": "text"`. `text` and `hex` require that explicit mode and the `read` op. Hash mode does not return a plaintext `sha256`. CLI `geode agent read` still defaults to text when the token has `read`.
+- **BREAKING:** CLI hash output now prints `content_root` instead of `sha256`.
 - CI actions are pinned by commit SHA. `ci.yml` runs with `contents: read`, and its cosign download requires HTTPS and TLS 1.2.
 - The workspace `repository` field points at `https://github.com/Hedronite/geode`.
 
