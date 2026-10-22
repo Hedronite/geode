@@ -3,7 +3,7 @@ title: Geode changelog
 type: repo-changelog
 status: current
 created: "2026-09-15"
-updated: "2026-10-15"
+updated: "2026-10-22"
 related:
   - "[[foundry/geode/geode-spec-0.0.0/SPEC]]"
   - "[[foundry/geode/geode-spec-0.0.0/12-roadmap]]"
@@ -36,10 +36,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 - Each finding prints the path, line, column, rule, and a 128-bit keyed BLAKE3 fingerprint. The matched value, an excerpt, and context are never printed, and `geode scan` writes nothing to the audit log. The fingerprint key is derived from `--key` under `geode/v1/scan-fp` when a key is given. Otherwise it is a per-user random key at `~/.config/hedronite/geode/scan.key` (mode 0600, created on first use). Fingerprints and allowlists do not carry across keys.
 - `--hook` exits 2 on any finding, 0 when clean, and 1 on any error. An unreadable file, a file larger than `--max-bytes` (default 16 MiB), a symlink that resolves outside its scan root, and a special file are errors, not skips.
 - The allowlist (`--allow FILE`, default `.geode/scan-allow`) holds fingerprints only, one per line. Output reports how many findings it suppressed. `scan.key`, the default identity key, the `--key` in use, and any `default.gkey` inside a scan root are always findings (rule `geode-key-file`) and cannot be allowlisted.
+- `geode agent token issue --run-only` sets `kind: run`. The token may list, inject, and hash-read. The issuer rejects `read` on it. Text or hex is `plaintext_denied` before the object is opened. A token with no `kind` stays a full token. Suite `0x01` is unchanged.
 
 ### Changed
 
 - **BREAKING:** `geode keygen` no longer writes an unwrapped key by default. With no mode flag it prompts for a passphrase and writes the wrapped form (kind `0x01`). `--keychain` keeps a random wrap passphrase in the OS keychain, adds the key to `geode keyring`, and unlocks without a prompt. `--insecure-plaintext` is the only way to write a raw key (kind `0x00`), and it warns on stderr. Non-interactive `geode keygen` (stdin not a terminal, no `GEODE_PASSPHRASE`) now exits 1 and writes nothing unless it passes `--insecure-plaintext` or `--keychain`. `--password` is accepted as a deprecated no-op for one minor. `--cheap` now applies to the default passphrase mode and is refused with `--insecure-plaintext` or `--keychain`. An empty `GEODE_PASSPHRASE` is refused. Raw keys written by earlier releases still load.
+- **BREAKING:** MCP `geode_read` with no `mode` returns the sealed `content_root` for every token, including tokens that hold `read`. Clients that omitted `mode` must pass `"mode": "text"`. `text` and `hex` require that explicit mode and the `read` op. Hash mode does not return a plaintext `sha256`. CLI `geode agent read` still defaults to text when the token has `read`.
+- **BREAKING:** CLI hash output now prints `content_root` instead of `sha256`.
 - CI actions are pinned by commit SHA. `ci.yml` runs with `contents: read`, and its cosign download requires HTTPS and TLS 1.2.
 - The workspace `repository` field points at `https://github.com/Hedronite/geode`.
 

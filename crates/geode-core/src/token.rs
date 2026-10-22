@@ -53,6 +53,20 @@ pub enum RedactLevel {
     Hidden,
 }
 
+/// How broad a token is. Absent JSON is the legacy [`TokenKind::Full`].
+///
+/// [`TokenKind::Run`] may list, inject, and hash-read. It cannot include
+/// [`Op::Read`]. Text and hex on a run token are `plaintext_denied`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenKind {
+    /// Legacy token. Plaintext reads follow `allow_ops`.
+    #[default]
+    Full,
+    /// Run-only. No plaintext body.
+    Run,
+}
+
 /// Unwrap token claims (02-cryptography 9).
 ///
 /// A token is **not the ISK** and never carries key material; it only narrows
@@ -80,6 +94,9 @@ pub struct Token {
     /// Absent JSON decodes as [`RedactLevel::Strict`].
     #[serde(default)]
     pub redact: RedactLevel,
+    /// Absent JSON decodes as [`TokenKind::Full`].
+    #[serde(default)]
+    pub kind: TokenKind,
 }
 
 impl Token {
@@ -135,6 +152,9 @@ fn validate(token: &Token) -> Result<()> {
     }
     if token.max_bytes == 0 {
         return Err(Error::Format("token max_bytes must be > 0".into()));
+    }
+    if token.kind == TokenKind::Run && token.allow_ops.contains(&Op::Read) {
+        return Err(Error::Format("run-only token cannot include read".into()));
     }
     Ok(())
 }
@@ -315,6 +335,7 @@ mod tests {
             allow_hosts: Vec::new(),
             peer_uid: None,
             redact: RedactLevel::Strict,
+            kind: TokenKind::Full,
         }
         .with_ttl(ttl_secs)
     }
@@ -473,11 +494,13 @@ mod tests {
         obj.remove("allow_hosts");
         obj.remove("peer_uid");
         obj.remove("redact");
+        obj.remove("kind");
         let old: Token = serde_json::from_value(value).unwrap();
         assert!(old.allow_cmds.is_empty());
         assert!(old.allow_hosts.is_empty());
         assert!(old.peer_uid.is_none());
         assert_eq!(old.redact, RedactLevel::Strict);
+        assert_eq!(old.kind, TokenKind::Full);
         assert!(!old.allow_ops.contains(&Op::Inject));
         assert!(!old.allows_inject());
         let sealed = issue(&old, &ek()).unwrap();
@@ -498,6 +521,35 @@ mod tests {
         });
         assert!(t.allows_inject());
         assert!(!t.allow_ops.contains(&Op::Read));
+    }
+
+    #[test]
+    fn absent_kind_parses_as_full_and_run_rejects_read() {
+        let t = token(1_700_000_000, DEFAULT_TTL_SECS);
+        let mut value = serde_json::to_value(&t).unwrap();
+        value.as_object_mut().unwrap().remove("kind");
+        let old: Token = serde_json::from_value(value).unwrap();
+        assert_eq!(old.kind, TokenKind::Full);
+        let sealed = issue(&old, &ek()).unwrap();
+        assert_eq!(sealed[4], SUITE_0X01);
+        let opened = inspect(&sealed, &ek(), 1_700_000_000).unwrap();
+        assert_eq!(opened.kind, TokenKind::Full);
+
+        let mut run = token(1_700_000_000, DEFAULT_TTL_SECS);
+        run.kind = TokenKind::Run;
+        run.allow_ops = vec![Op::List, Op::Read];
+        let denied = issue(&run, &ek());
+        assert!(
+            matches!(denied, Err(Error::Format(ref m)) if m.contains("cannot include read")),
+            "got {denied:?}"
+        );
+
+        run.allow_ops = vec![Op::List, Op::Inject];
+        let sealed = issue(&run, &ek()).unwrap();
+        assert_eq!(sealed[4], SUITE_0X01);
+        let opened = inspect(&sealed, &ek(), 1_700_000_000).unwrap();
+        assert_eq!(opened.kind, TokenKind::Run);
+        assert!(!opened.allow_ops.contains(&Op::Read));
     }
 
     #[test]
@@ -524,6 +576,7 @@ mod tests {
             allow_hosts: Vec::new(),
             peer_uid: None,
             redact: RedactLevel::Strict,
+            kind: TokenKind::Full,
         }
     }
     proptest! {

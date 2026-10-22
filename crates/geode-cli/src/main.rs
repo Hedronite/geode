@@ -454,7 +454,7 @@ pub enum ReadModeArg {
     Text,
     /// Lowercase hex of the bytes.
     Hex,
-    /// sha256 only, no body.
+    /// Sealed content root only, no body.
     Hash,
 }
 
@@ -505,6 +505,10 @@ pub enum TokenCmd {
         /// `hidden` does not.
         #[arg(long, value_enum, default_value = "strict")]
         redact: RedactArg,
+        /// Issue a run-only token (`kind: run`). It may list, inject, and
+        /// hash-read. It cannot include `read`.
+        #[arg(long)]
+        run_only: bool,
     },
     /// Show a token's principal, operations, prefixes, and expiry.
     ///

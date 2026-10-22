@@ -131,6 +131,9 @@ On one machine, the agent commands and `geode agent serve` still open the vault 
 - `geode agent serve` serves the MCP tools `geode_list`, `geode_read`, and `geode_write`, either over `--stdio` or on a mode-`0600` Unix socket (`--socket PATH`). Pick one.
 - Pass the token as `--token-file` (mode `0600`, owned by you), `--token-fd`, or `$GEODE_TOKEN`. Raw `--token` on argv still works, but it warns, because ps and shell history can see it.
 - A token with `read` reads plaintext. A token with `inject` and no `read` can use a secret without seeing it. `geode_read` then returns a hash, and a request for text is refused with no body.
+
+MCP `geode_read` with no `mode` returns a hash for every token, including a token that holds `read`. The value is the sealed `content_root`, not a digest of the plaintext. Clients that omitted `mode` must pass `"mode": "text"` (or `"hex"`), and the token must hold `read`. CLI `geode agent read` still prints the body when the token has `read`. A run-only token (`geode agent token issue --run-only`) is the harness default: it can list, inject, and hash-read. Run-only tokens cannot read secret plaintext through Geode's read paths (reads return hashes), but any command they are allowed to run receives the secret in its environment, so only allow pinned, specific commands and never a shell.
+
 - `geode agent scope` checks that a path under an allow prefix is still in scope. It takes no token and does not touch the vault.
 - [`examples/facet-geode.yaml`](examples/facet-geode.yaml) drives the agent tools from a Facet collection. The token and key path come from the environment, never from literals.
 

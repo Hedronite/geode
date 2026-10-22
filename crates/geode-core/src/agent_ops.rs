@@ -28,7 +28,7 @@ use crate::manifest::{entries_root, Entry, EntryKind, Manifest};
 use crate::object::{self, HEADER_SIZE};
 use crate::policy::{prefix_covers, Op};
 use crate::snapshot::read_manifest_file;
-use crate::token::{self, Token};
+use crate::token::{self, Token, TokenKind};
 use crate::vault as corevault;
 use crate::{Error, Result};
 use secrecy::{ExposeSecret, SecretBox, SecretString};
@@ -52,6 +52,9 @@ impl ReadMode {
 }
 
 /// Default `geode_read` mode for `ops`.
+///
+/// CLI default only. MCP `geode_read` does not use this; a missing `mode`
+/// is hash for every token.
 ///
 /// A token with `Read` stays on `text`. A token with `Inject` and without
 /// `Read` uses `hash`. Any other token stays on `text`, which `read` then
@@ -154,9 +157,10 @@ impl serde::Serialize for SecretText {
 
 /// Outcome of a token-gated read (06-agent-plane 4).
 ///
-/// `sha256` is always the hash of the **full** plaintext (not the preview),
-/// so a truncated read still lets the agent address the artifact by hash.
-/// `body` is `Preview { .. }` only when `truncated`; `None` in `Hash` mode.
+/// `sha256` is the hash of the **full** plaintext when text or hex returns
+/// the body. Hash mode leaves it empty and sets `content_root` from the
+/// manifest so the result is not a plaintext oracle. `body` is `None` in
+/// hash mode.
 ///
 /// `Debug` prints `path`, `truncated`, and `sha256` only. It does not print
 /// `plain_len` or the plaintext.
@@ -165,7 +169,10 @@ pub struct ReadOutcome {
     pub path: String,
     pub plain_len: u64,
     pub truncated: bool,
-    pub sha256: [u8; 32],
+    /// Plaintext SHA-256. `None` on the hash path.
+    pub sha256: Option<[u8; 32]>,
+    /// Manifest content root. `Some` only on the hash path.
+    pub content_root: Option<[u8; 32]>,
     pub body: ReadBody,
 }
 
@@ -258,10 +265,14 @@ fn normalize_strict(path: &str) -> Result<String> {
 /// Returns `Ok(())` if both hold. Op missing -> [`Error::PolicyDeny`].
 /// Prefix miss -> [`Error::PolicyDeny`] when `leak_denies`, else
 /// [`Error::Io`](`std::io::ErrorKind::NotFound`) (06 §6.4, default off).
-/// `text` and `hex` require `Read`. `Inject` without `Read` is
-/// `plaintext_denied` and returns no body. `hash` requires `Read` or
-/// `Inject`; a list-only token is [`Error::PolicyDeny`].
+/// `text` and `hex` require `Read`. A run token, and `Inject` without
+/// `Read`, is `plaintext_denied` and returns no body. `hash` requires
+/// `Read` or `Inject`; a list-only token is [`Error::PolicyDeny`].
 fn authorize_read(token: &Token, mode: ReadMode, norm_path: &str, leak_denies: bool) -> Result<()> {
+    // Kind is a capability boundary: deny before the manifest or the object.
+    if token.kind == TokenKind::Run && matches!(mode, ReadMode::Text | ReadMode::Hex) {
+        return Err(Error::Format("plaintext_denied".into()));
+    }
     let has_read = token.allow_ops.contains(&Op::Read);
     let has_inject = token.allow_ops.contains(&Op::Inject);
     match mode {
@@ -429,8 +440,8 @@ pub fn list(
 /// `min(max_bytes.unwrap_or(DEFAULT_READ_CAP), token.max_bytes)`. Oversize
 /// reads return [`ReadOutcome`] with `truncated == true`, the SHA-256 of the
 /// full plaintext, and a preview (first cap bytes; UTF-8 text preview when
-/// `mode == Text` and the preview is valid UTF-8). `Hash` mode returns only
-/// the digest.
+/// `mode == Text` and the preview is valid UTF-8). `Hash` mode returns the
+/// manifest `content_root` and `plain_len` and does not open the object.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // MCP tool entry
 pub fn read(
     ek: &EpochKey,
@@ -456,6 +467,16 @@ pub fn read(
                 "agent path not in manifest",
             ))
         })?;
+    if !mode.includes_body() {
+        return Ok(ReadOutcome {
+            path: norm,
+            plain_len: entry.plain_len,
+            truncated: false,
+            sha256: None,
+            content_root: Some(entry.content_root),
+            body: ReadBody::None,
+        });
+    }
     let oid = entry.object_id;
     let obj_path = corevault::object_path(vault_root, token.epoch, &oid)?;
     assert_within_vault(vault_root, &obj_path)?;
@@ -500,8 +521,9 @@ pub fn read(
     Ok(ReadOutcome {
         path: norm,
         plain_len,
-        truncated: truncated && mode.includes_body(),
-        sha256: sha,
+        truncated,
+        sha256: Some(sha),
+        content_root: None,
         body,
     })
 }
@@ -626,6 +648,7 @@ mod tests {
             allow_hosts: Vec::new(),
             peer_uid: None,
             redact: crate::token::RedactLevel::Strict,
+            kind: TokenKind::Full,
         };
         issue(&t, &ek()).unwrap()
     }
@@ -645,6 +668,7 @@ mod tests {
             allow_hosts: Vec::new(),
             peer_uid: None,
             redact: crate::token::RedactLevel::Strict,
+            kind: TokenKind::Full,
         };
         issue(&t, &ek()).unwrap()
     }
@@ -746,7 +770,8 @@ mod tests {
             path: "cfg/dummy.env".into(),
             plain_len: u64::try_from(dummy.len()).unwrap(),
             truncated: false,
-            sha256: [0x11; 32],
+            sha256: Some([0x11; 32]),
+            content_root: None,
             body: ReadBody::Full(SecretBytes::new(dummy.clone())),
         };
         let shown = format!("{full:?}");
@@ -760,7 +785,8 @@ mod tests {
             path: "cfg/dummy.env".into(),
             plain_len: u64::try_from(dummy.len()).unwrap(),
             truncated: true,
-            sha256: [0x22; 32],
+            sha256: Some([0x22; 32]),
+            content_root: None,
             body: ReadBody::Preview {
                 bytes: SecretBytes::new(dummy.clone()),
                 text: Some(SecretText::new(String::from_utf8(dummy).unwrap())),
@@ -902,7 +928,7 @@ mod tests {
         let mut h = Sha256::new();
         h.update(&big);
         want.copy_from_slice(&h.finalize());
-        assert_eq!(o.sha256, want);
+        assert_eq!(o.sha256, Some(want));
         match o.body {
             ReadBody::Preview { bytes, text } => {
                 assert_eq!(bytes.len(), usize::try_from(DEFAULT_READ_CAP).unwrap());
@@ -977,7 +1003,34 @@ mod tests {
         assert!(!o.truncated, "hash mode is never truncated");
         assert!(matches!(o.body, ReadBody::None));
         assert_eq!(o.plain_len, 11);
-        assert_ne!(o.sha256, [0u8; 32]);
+        assert!(
+            o.sha256.is_none(),
+            "hash mode must not emit a plaintext digest"
+        );
+        let manifest =
+            crate::snapshot::read_manifest_file(&root, Epoch(1), &manifest_key()).unwrap();
+        let entry = manifest
+            .entries
+            .iter()
+            .find(|e| e.path == "scratch/plan.md")
+            .unwrap();
+        assert_eq!(o.content_root, Some(entry.content_root));
+        assert_ne!(o.content_root.unwrap(), sha256(b"hello agent"));
+        let obj = crate::vault::object_path(&root, Epoch(1), &entry.object_id).unwrap();
+        std::fs::write(&obj, b"not an object").unwrap();
+        let again = read(
+            &ek(),
+            &root,
+            &tok,
+            NOW,
+            "scratch/plan.md",
+            None,
+            ReadMode::Hash,
+            false,
+        )
+        .unwrap();
+        assert_eq!(again.content_root, Some(entry.content_root));
+        assert!(again.sha256.is_none());
     }
 
     #[test]
@@ -1082,6 +1135,7 @@ mod tests {
             allow_hosts: Vec::new(),
             peer_uid: None,
             redact: crate::token::RedactLevel::Strict,
+            kind: TokenKind::Full,
         };
         let tok = issue(&t, &ek()).unwrap();
         let r = write(&ek(), &root, &tok, NOW, "scratch/x", b"x", false);
@@ -1276,5 +1330,75 @@ mod tests {
             false,
         );
         assert!(matches!(text, Err(Error::PolicyDeny)), "got {text:?}");
+    }
+
+    #[test]
+    fn run_token_denies_plaintext_before_open_and_hash_skips_the_object() {
+        let body = b"sk-dummy-0000QA";
+        let d = setup_vault(&[("scratch/plan.md", body)]);
+        let root = d.path().join("v.geode");
+        let t = Token {
+            token_id: TokenId([0xd4; 16]),
+            vault_id: VaultId([0x01; 16]),
+            epoch: Epoch(1),
+            principal_id: crate::policy::PrincipalId("agent:facet-coder-3".into()),
+            not_before: NOW,
+            not_after: NOW + 900,
+            allow_ops: vec![Op::List, Op::Inject],
+            allow_prefix: vec!["scratch/".into()],
+            max_bytes: 1 << 20,
+            allow_cmds: Vec::new(),
+            allow_hosts: Vec::new(),
+            peer_uid: None,
+            redact: crate::token::RedactLevel::Strict,
+            kind: TokenKind::Run,
+        };
+        let tok = issue(&t, &ek()).unwrap();
+        let manifest =
+            crate::snapshot::read_manifest_file(&root, Epoch(1), &manifest_key()).unwrap();
+        let entry = manifest
+            .entries
+            .iter()
+            .find(|e| e.path == "scratch/plan.md")
+            .unwrap();
+        let want = entry.content_root;
+        let obj = crate::vault::object_path(&root, Epoch(1), &entry.object_id).unwrap();
+        std::fs::remove_file(&obj).unwrap();
+
+        for mode in [ReadMode::Text, ReadMode::Hex] {
+            let denied = read(
+                &ek(),
+                &root,
+                &tok,
+                NOW,
+                "scratch/plan.md",
+                None,
+                mode,
+                false,
+            );
+            assert!(
+                matches!(denied, Err(Error::Format(ref m)) if m == "plaintext_denied"),
+                "{mode:?}: {denied:?}"
+            );
+            let shown = format!("{denied:?}");
+            assert!(!shown.contains("sk-dummy-0000QA"), "{shown}");
+        }
+
+        let hashed = read(
+            &ek(),
+            &root,
+            &tok,
+            NOW,
+            "scratch/plan.md",
+            None,
+            ReadMode::Hash,
+            false,
+        )
+        .unwrap();
+        assert_eq!(hashed.content_root, Some(want));
+        assert!(hashed.sha256.is_none());
+        assert!(matches!(hashed.body, ReadBody::None));
+        assert_eq!(hashed.plain_len, u64::try_from(body.len()).unwrap());
+        assert!(!format!("{hashed:?}").contains("sk-dummy-0000QA"));
     }
 }

@@ -302,3 +302,27 @@ fn passphrase_fd_unlocks_wrapped_key() {
     assert_eq!(bad.status.code(), Some(2), "{}", stderr(&bad));
     assert!(!stderr(&bad).contains("wrong-pass-0000QA"));
 }
+
+#[test]
+fn issued_token_without_run_only_inspects_as_full() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    let token = setup(dir, None);
+    write_token_file(dir, "t.ok", &token, 0o600);
+    let out = run(cmd(
+        dir,
+        &[
+            "--key", "k.gkey", "--output", "json", "agent", "token", "inspect", "--vault",
+            "v.geode",
+        ],
+    )
+    .env("GEODE_TOKEN", &token));
+    assert_ok(&out, "inspect");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(doc["kind"], "full");
+    let all = String::from_utf8_lossy(&out.stdout).into_owned() + &stderr(&out);
+    assert!(!all.contains(&token[..16]), "sealed token printed");
+    let read = run(cmd(dir, &READ).args(["--token-file", "t.ok"]));
+    assert_ok(&read, "0600 read token still returns the body");
+    assert_eq!(read.stdout, b"hello agent\n");
+}
