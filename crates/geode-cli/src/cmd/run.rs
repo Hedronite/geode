@@ -475,29 +475,28 @@ pub(crate) fn execute_plan(
     row: &RowBase,
     mut emit: impl FnMut(Channel, Vec<u8>),
 ) -> Result<Executed, Refusal> {
+    let pin = plan
+        .take_pin()
+        .map(|(fd, meta)| geode_os::PinnedExe { fd, meta });
+    let plan = &*plan;
     let spec = geode_os::SpawnSpec {
-        program: PathBuf::from(&plan.exe.canon),
+        program: PathBuf::from(&plan.exe),
         args: plan.args.iter().map(OsString::from).collect(),
         env: child_env(plan, opts.home.as_deref()),
         cwd: opts.cwd,
         inherit_stdin: opts.inherit_stdin,
         timeout: opts.timeout,
-        pinned: plan
-            .exe
-            .fd
-            .take()
-            .map(|(fd, meta)| geode_os::PinnedExe { fd, meta }),
     };
-    let plan = &*plan;
     let mut collector = Collector::new(plan);
-    let spawned = geode_os::spawn_with(spec, &opts.identity, &opts.allow_hosts, |s, chunk| {
-        let ch = match s {
-            geode_os::Stream::Stdout => Channel::Stdout,
-            geode_os::Stream::Stderr => Channel::Stderr,
-        };
-        let bytes = collector.push(ch, chunk);
-        emit(ch, bytes);
-    });
+    let spawned =
+        geode_os::spawn_with_pin(spec, pin, &opts.identity, &opts.allow_hosts, |s, chunk| {
+            let ch = match s {
+                geode_os::Stream::Stdout => Channel::Stdout,
+                geode_os::Stream::Stderr => Channel::Stderr,
+            };
+            let bytes = collector.push(ch, chunk);
+            emit(ch, bytes);
+        });
     let outcome = match spawned {
         Ok(o) => o,
         Err(e) => {
@@ -515,7 +514,7 @@ pub(crate) fn execute_plan(
                 refuse(
                     exit::USAGE,
                     "spawn_failed",
-                    format!("{}: cannot start: {e}", plan.exe.canon),
+                    format!("{}: cannot start: {e}", plan.exe),
                 )
             } else {
                 refuse(
@@ -532,7 +531,7 @@ pub(crate) fn execute_plan(
     }
     let hits = collector.hits();
     let argv = ArgvCommit::Clean {
-        argv0: plan.exe.canon.clone(),
+        argv0: plan.exe.clone(),
         args: plan.args.clone(),
     };
     let label = if outcome.timed_out {

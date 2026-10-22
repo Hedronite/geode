@@ -155,28 +155,18 @@ impl std::fmt::Debug for PlanRequest<'_> {
 }
 
 /// `argv[0]` after it matched `allow_cmds`.
-pub struct VerifiedExe {
-    /// Canonical absolute path. Audit `argv0` and errors use it.
-    pub canon: String,
+pub(crate) struct VerifiedExe {
+    /// Canonical absolute path.
+    canon: String,
     /// Pinned rules only: the fd whose bytes matched `sha256`, and its
-    /// `fstat` from before the hash. Spawn execs this fd, not `canon`.
-    /// `None` for an unpinned rule, which execs `canon`.
-    pub fd: Option<(OwnedFd, Metadata)>,
-}
-
-impl std::fmt::Debug for VerifiedExe {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VerifiedExe")
-            .field("canon", &self.canon)
-            .field("pinned", &self.fd.is_some())
-            .finish()
-    }
+    /// `fstat` from before the hash. `None` for an unpinned rule.
+    fd: Option<(OwnedFd, Metadata)>,
 }
 
 /// An authorized run. Values are `SecretBox`; nothing here prints them.
 pub struct Plan {
-    /// `argv[0]` that matched `allow_cmds`.
-    pub exe: VerifiedExe,
+    /// Canonical `argv[0]` that matched `allow_cmds`.
+    pub exe: String,
     /// `argv[1..]`.
     pub args: Vec<String>,
     /// Binding names in command-line order, with their values.
@@ -185,13 +175,16 @@ pub struct Plan {
     pub paths: Vec<String>,
     /// `None` only for an admitted `--no-redact`.
     pub redactor: Option<NamedRedactor>,
+    /// See [`Plan::take_pin`].
+    pin: Option<(OwnedFd, Metadata)>,
 }
 
 impl std::fmt::Debug for Plan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names: Vec<&str> = self.env.iter().map(|(n, _)| n.as_str()).collect();
         f.debug_struct("Plan")
-            .field("exe", &self.exe.canon)
+            .field("exe", &self.exe)
+            .field("pinned", &self.pin.is_some())
             .field("names", &names)
             .finish_non_exhaustive()
     }
@@ -202,6 +195,14 @@ impl Plan {
     #[must_use]
     pub fn names(&self) -> Vec<&str> {
         self.env.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    /// Pinned rules only: the `O_CLOEXEC` fd of [`Plan::exe`] whose bytes
+    /// matched `sha256`, and its `fstat` from before the hash. Spawn must
+    /// exec this fd, not the path. The first call takes it; later calls and
+    /// unpinned rules return `None`.
+    pub fn take_pin(&mut self) -> Option<(OwnedFd, Metadata)> {
+        self.pin.take()
     }
 }
 
@@ -226,7 +227,10 @@ pub fn plan(
         authorize(caller, &b.path)
             .map_err(|reason| deny(&format!("binding {}: {reason}", b.name), None))?;
     }
-    let exe = match_cmd(
+    let VerifiedExe {
+        canon: exe,
+        fd: pin,
+    } = match_cmd(
         caller.allow_cmds,
         &req.argv[0],
         &req.argv[1..],
@@ -235,7 +239,7 @@ pub fn plan(
     if req.no_redact && !may_skip_redaction(caller, req.bindings) {
         return Err(deny(
             "--no-redact needs a human:* principal with admin",
-            Some(exe.canon),
+            Some(exe),
         ));
     }
     let mut env = Vec::with_capacity(req.bindings.len());
@@ -245,13 +249,13 @@ pub fn plan(
         if v.contains(&0) || std::str::from_utf8(v).is_err() {
             return Err(deny(
                 &format!("binding {}: not env-safe", b.name),
-                Some(exe.canon),
+                Some(exe),
             ));
         }
         if v.len() < 8 {
             return Err(deny(
                 &format!("binding {}: too short to redact safely", b.name),
-                Some(exe.canon),
+                Some(exe),
             ));
         }
         env.push((b.name.clone(), value));
@@ -265,13 +269,13 @@ pub fn plan(
         .map(|(n, v)| (n.as_str(), v.expose_secret()))
         .collect();
     let redactor = NamedRedactor::try_new(&pairs, placeholder)
-        .map_err(|e| deny(&e.to_string(), Some(exe.canon.clone())))?;
+        .map_err(|e| deny(&e.to_string(), Some(exe.clone())))?;
     drop(pairs);
     if req.argv[1..]
         .iter()
         .any(|a| redactor.contains_binding(a.as_bytes()))
     {
-        return Err(PlanError::ArgvRejected { exe: exe.canon });
+        return Err(PlanError::ArgvRejected { exe });
     }
     Ok(Plan {
         exe,
@@ -279,6 +283,7 @@ pub fn plan(
         env,
         paths: req.bindings.iter().map(|b| b.path.clone()).collect(),
         redactor: if req.no_redact { None } else { Some(redactor) },
+        pin,
     })
 }
 
@@ -946,6 +951,21 @@ mod tests {
                 if reason.contains("sha256") && *e == canon),
             "{r:?}"
         );
+    }
+
+    #[test]
+    fn take_pin_hands_the_fd_out_once() {
+        let canon = std::fs::canonicalize("/bin/sh").unwrap();
+        let mut p = Plan {
+            exe: canon.to_str().unwrap().to_owned(),
+            args: Vec::new(),
+            env: Vec::new(),
+            paths: Vec::new(),
+            redactor: None,
+            pin: Some(open_pinned(&canon, &sha_of(&canon)).unwrap()),
+        };
+        assert!(p.take_pin().is_some());
+        assert!(p.take_pin().is_none());
     }
 
     #[test]

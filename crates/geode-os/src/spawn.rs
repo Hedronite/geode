@@ -6,7 +6,7 @@
 //! callback; redaction is the caller's job. On timeout: SIGTERM to the
 //! group, 2 seconds, then SIGKILL.
 //!
-//! A pinned program ([`SpawnSpec::pinned`]) runs from the fd that was
+//! A pinned program ([`spawn_with_pin`]) runs from the fd that was
 //! hashed. Linux execs that fd. macOS has no `fexecve`, so it execs the
 //! path after checking, in the child just before exec, that the path and
 //! the fd are still the hashed file.
@@ -44,12 +44,10 @@ pub struct SpawnSpec {
     pub cwd: Option<PathBuf>,
     pub inherit_stdin: bool,
     pub timeout: Duration,
-    /// Set when the matching rule pins `sha256`. `None` execs `program`.
-    pub pinned: Option<PinnedExe>,
 }
 
-/// The `O_CLOEXEC` fd of `program` whose bytes matched the pin, and its
-/// `fstat` from before the hash.
+/// The `O_CLOEXEC` fd of [`SpawnSpec::program`] whose bytes matched the
+/// pin, and its `fstat` from before the hash.
 #[derive(Debug)]
 pub struct PinnedExe {
     pub fd: OwnedFd,
@@ -64,7 +62,6 @@ impl std::fmt::Debug for SpawnSpec {
             .field("program", &self.program)
             .field("env_keys", &keys)
             .field("timeout", &self.timeout)
-            .field("pinned", &self.pinned.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -138,13 +135,32 @@ const PROXY_VARS: [&str; 6] = [
 ///
 /// As [`spawn_as`], plus the namespace error.
 pub fn spawn_with(
-    mut spec: SpawnSpec,
+    spec: SpawnSpec,
+    identity: &ChildIdentity,
+    allow_hosts: &[String],
+    on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
+    spawn_with_pin(spec, None, identity, allow_hosts, on_chunk)
+}
+
+/// [`spawn_with`] for a rule that pins `sha256` (Fix 4). `pin` is the fd of
+/// `spec.program` whose bytes matched. Linux execs that fd; macOS execs
+/// `spec.program` after the child re-checks it against `pin`. `None` is
+/// exactly [`spawn_with`].
+///
+/// # Errors
+///
+/// As [`spawn_with`]. A pin that no longer matches, or on macOS a program
+/// writable by group or other, is an error and nothing runs.
+pub fn spawn_with_pin(
+    spec: SpawnSpec,
+    pin: Option<PinnedExe>,
     identity: &ChildIdentity,
     allow_hosts: &[String],
     on_chunk: impl FnMut(Stream, &[u8]),
 ) -> io::Result<ChildOutcome> {
     let cmd = prepared(&spec, identity)?;
-    let pin = spec.pinned.take().map(|p| (p, spec.program.clone()));
+    let pin = pin.map(|p| (p, spec.program.clone()));
     #[cfg(test)]
     tests::before_exec();
     if allow_hosts.is_empty() {
@@ -635,7 +651,6 @@ mod tests {
             cwd: None,
             inherit_stdin: false,
             timeout,
-            pinned: None,
         }
     }
 
@@ -670,29 +685,30 @@ mod tests {
         d
     }
 
-    /// Spec running `prog original` with `prog` pinned, and a hook that
-    /// renames a copy of `/bin/sh` over `prog` before exec.
-    fn swapped_spec(dir: &Path) -> SpawnSpec {
+    /// Spec running `prog -c 'echo swapped'` with `prog` (a copy of echo)
+    /// pinned, and a hook that renames a copy of `/bin/sh` over `prog`
+    /// before exec.
+    fn swapped_spec(dir: &Path) -> (SpawnSpec, PinnedExe) {
         let prog = copy_exe(dir, "/bin/echo");
         let pinned = pin(&prog);
         let evil = dir.join("evil");
         std::fs::copy(sh(), &evil).unwrap();
         let target = prog.clone();
         set_before_exec(move || std::fs::rename(&evil, &target).unwrap());
-        SpawnSpec {
+        let spec = SpawnSpec {
             program: prog,
             args: vec!["-c".into(), "echo swapped".into()],
             env: Vec::new(),
             cwd: None,
             inherit_stdin: false,
             timeout: Duration::from_secs(10),
-            pinned: Some(pinned),
-        }
+        };
+        (spec, pinned)
     }
 
-    fn run(spec: SpawnSpec) -> io::Result<(ChildOutcome, String)> {
+    fn run(spec: SpawnSpec, pin: PinnedExe) -> io::Result<(ChildOutcome, String)> {
         let mut out = Vec::new();
-        let o = spawn(spec, |s, c| {
+        let o = spawn_with_pin(spec, Some(pin), &ChildIdentity::Inherit, &[], |s, c| {
             if s == Stream::Stdout {
                 out.extend_from_slice(c);
             }
@@ -704,11 +720,11 @@ mod tests {
     fn pinned_program_runs_from_its_fd() {
         // Not a copy: macOS kills a relocated copy of a platform binary.
         let prog = std::fs::canonicalize("/bin/echo").unwrap();
+        let pinned = pin(&prog);
         let mut s = spec("", Duration::from_secs(10));
-        s.pinned = Some(pin(&prog));
         s.program = prog;
         s.args = vec!["pinned-ok".into()];
-        let (o, out) = run(s).unwrap();
+        let (o, out) = run(s, pinned).unwrap();
         assert_eq!((o.exit_code, out.as_str()), (Some(0), "pinned-ok\n"));
     }
 
@@ -716,7 +732,8 @@ mod tests {
     #[test]
     fn swap_after_verify_still_runs_the_hashed_file() {
         let dir = tmpdir("pin-swap");
-        let (o, out) = run(swapped_spec(&dir)).unwrap();
+        let (s, pinned) = swapped_spec(&dir);
+        let (o, out) = run(s, pinned).unwrap();
         // echo prints its args; the swapped-in sh would print "swapped".
         assert_eq!(o.exit_code, Some(0));
         assert_eq!(out, "-c echo swapped\n");
@@ -730,7 +747,8 @@ mod tests {
     #[test]
     fn swap_after_verify_is_refused_by_the_inode_recheck() {
         let dir = tmpdir("pin-swap");
-        let r = run(swapped_spec(&dir));
+        let (s, pinned) = swapped_spec(&dir);
+        let r = run(s, pinned);
         assert!(r.is_err(), "swapped program ran: {r:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -740,8 +758,8 @@ mod tests {
         use std::io::Write as _;
         let dir = tmpdir("pin-write");
         let prog = copy_exe(&dir, "/bin/echo");
+        let pinned = pin(&prog);
         let mut s = spec("", Duration::from_secs(10));
-        s.pinned = Some(pin(&prog));
         s.program = prog.clone();
         s.args = vec!["ran".into()];
         set_before_exec(move || {
@@ -751,7 +769,7 @@ mod tests {
                 .unwrap();
             f.write_all(b"\0").unwrap();
         });
-        let r = run(s);
+        let r = run(s, pinned);
         assert!(r.is_err(), "modified program ran: {r:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -767,8 +785,7 @@ mod tests {
             Duration::from_secs(10),
         );
         s.env.push(("PATH".into(), "/usr/bin:/bin".into()));
-        s.pinned = Some(pinned);
-        let (o, out) = run(s).unwrap();
+        let (o, out) = run(s, pinned).unwrap();
         assert_eq!(o.exit_code, Some(0), "{out}");
         assert!(
             !out.contains("leaked"),
@@ -787,10 +804,10 @@ mod tests {
         let dir = tmpdir("pin-mode");
         let prog = copy_exe(&dir, "/bin/echo");
         std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let pinned = pin(&prog);
         let mut s = spec("", Duration::from_secs(10));
-        s.pinned = Some(pin(&prog));
         s.program = prog;
-        let e = run(s).unwrap_err();
+        let e = run(s, pinned).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
         let _ = std::fs::remove_dir_all(&dir);
     }

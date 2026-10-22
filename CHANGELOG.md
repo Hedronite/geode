@@ -48,6 +48,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 - Linux execs the hashed fd (`fexecve`). A file renamed over the path after the check never runs. The fd is `O_CLOEXEC` and never reaches the child.
 - Pinned `#!` scripts on Linux now fail with `is a #! script; a sha256 pin needs a binary`. `fexecve` cannot start a script from an `O_CLOEXEC` fd, and Geode will not hand the child an inheritable fd. Pin the interpreter and put the script in `args_prefix`.
 - macOS has no `fexecve`. The child checks, just before it execs the path, that the path and the hashed fd still match the device, inode, size, and mtime recorded before the hash. A pinned program writable by group or other is refused. Residual risk: a swap that lands between that check and the kernel's open at exec still wins. Under `ChildIdentity::Seatbelt`, `sandbox-exec` opens the path later still.
+- The published API is unchanged. `inject::Plan.exe` is still `pub exe: String`, and `geode_os::SpawnSpec` keeps its six fields. Two additions carry the pin. `Plan::take_pin()` hands over the hashed fd and its `fstat`. `geode_os::spawn_with_pin(spec, pin, identity, allow_hosts, on_chunk)` takes it as a `PinnedExe`. `spawn`, `spawn_as`, and `spawn_with` keep their signatures and exec by path.
 
 ## [1.2.1] — 2026-10-15
 
