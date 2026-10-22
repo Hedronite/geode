@@ -5,11 +5,18 @@
 //! timeout reaches grandchildren. Output arrives in chunks through a
 //! callback; redaction is the caller's job. On timeout: SIGTERM to the
 //! group, 2 seconds, then SIGKILL.
+//!
+//! A pinned program ([`spawn_with_pin`]) runs from the fd that was
+//! hashed. Linux execs that fd. macOS has no `fexecve`, so it execs the
+//! path after checking, in the child just before exec, that the path and
+//! the fd are still the hashed file.
 
 use std::ffi::OsString;
+use std::fs::Metadata;
 use std::io::{self, Read};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -37,6 +44,14 @@ pub struct SpawnSpec {
     pub cwd: Option<PathBuf>,
     pub inherit_stdin: bool,
     pub timeout: Duration,
+}
+
+/// The `O_CLOEXEC` fd of [`SpawnSpec::program`] whose bytes matched the
+/// pin, and its `fstat` from before the hash.
+#[derive(Debug)]
+pub struct PinnedExe {
+    pub fd: OwnedFd,
+    pub meta: Metadata,
 }
 
 /// `Debug` names the program and env keys only, never env values or args.
@@ -125,14 +140,195 @@ pub fn spawn_with(
     allow_hosts: &[String],
     on_chunk: impl FnMut(Stream, &[u8]),
 ) -> io::Result<ChildOutcome> {
+    spawn_with_pin(spec, None, identity, allow_hosts, on_chunk)
+}
+
+/// [`spawn_with`] for a rule that pins `sha256` (Fix 4). `pin` is the fd of
+/// `spec.program` whose bytes matched. Linux execs that fd; macOS execs
+/// `spec.program` after the child re-checks it against `pin`. `None` is
+/// exactly [`spawn_with`].
+///
+/// # Errors
+///
+/// As [`spawn_with`]. A pin that no longer matches, or on macOS a program
+/// writable by group or other, is an error and nothing runs.
+pub fn spawn_with_pin(
+    spec: SpawnSpec,
+    pin: Option<PinnedExe>,
+    identity: &ChildIdentity,
+    allow_hosts: &[String],
+    on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
     let cmd = prepared(&spec, identity)?;
+    let pin = pin.map(|p| (p, spec.program.clone()));
+    #[cfg(test)]
+    tests::before_exec();
     if allow_hosts.is_empty() {
-        let mut cmd = cmd;
-        let child = cmd.spawn()?;
-        drop(cmd);
+        let child = launch(cmd, pin)?;
         return supervise(child, spec.timeout, on_chunk);
     }
-    isolated(cmd, allow_hosts, spec.timeout, on_chunk)
+    isolated(cmd, pin, allow_hosts, spec.timeout, on_chunk)
+}
+
+/// Spawn `cmd`. With a pin, the last pre-exec hook checks the pin and, on
+/// Linux, execs its fd. `cmd` is dropped before return, which closes the
+/// parent's copy of the fd.
+fn launch(mut cmd: Command, pin: Option<(PinnedExe, PathBuf)>) -> io::Result<Child> {
+    if let Some((pin, program)) = pin {
+        arm_pin(&mut cmd, pin, &program)?;
+    }
+    cmd.spawn()
+}
+
+/// What the pin recorded: identity, size, and mtime of the hashed file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime: i64,
+    mtime_nsec: i64,
+}
+
+impl FileStamp {
+    fn of(m: &Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: m.dev(),
+            ino: m.ino(),
+            size: m.size(),
+            mtime: m.mtime(),
+            mtime_nsec: m.mtime_nsec(),
+        }
+    }
+
+    // The `stat` field types differ between Linux and macOS.
+    #[allow(clippy::unnecessary_cast)]
+    fn of_stat(st: &libc::stat) -> Self {
+        Self {
+            dev: st.st_dev as u64,
+            ino: st.st_ino as u64,
+            size: st.st_size as u64,
+            mtime: st.st_mtime as i64,
+            mtime_nsec: st.st_mtime_nsec as i64,
+        }
+    }
+
+    /// `fstat(fd)` still matches. Async-signal-safe: no allocation.
+    fn matches_fd(self, fd: i32) -> bool {
+        // SAFETY: fstat writes only into `st`, a local of the right type.
+        unsafe {
+            let mut st: libc::stat = std::mem::zeroed();
+            libc::fstat(fd, &mut st) == 0 && Self::of_stat(&st) == self
+        }
+    }
+}
+
+/// A NULL-terminated `char *[]`, built before fork for `fexecve`.
+#[cfg(target_os = "linux")]
+struct CArray {
+    _owned: Vec<std::ffi::CString>,
+    ptrs: Vec<*const libc::c_char>,
+}
+
+// SAFETY: `ptrs` point into the heap buffers of `_owned`, which are never
+// moved or written after construction. The array is only read.
+#[cfg(target_os = "linux")]
+unsafe impl Send for CArray {}
+#[cfg(target_os = "linux")]
+unsafe impl Sync for CArray {}
+
+#[cfg(target_os = "linux")]
+impl CArray {
+    fn new(items: impl Iterator<Item = Vec<u8>>) -> io::Result<Self> {
+        let owned = items
+            .map(std::ffi::CString::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in argv or env"))?;
+        let mut ptrs: Vec<*const libc::c_char> = owned.iter().map(|s| s.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+        Ok(Self {
+            _owned: owned,
+            ptrs,
+        })
+    }
+
+    // A method, not a field access, so a closure captures the whole
+    // `CArray` (Send + Sync) rather than the bare pointer `Vec`.
+    fn as_ptr(&self) -> *const *const libc::c_char {
+        self.ptrs.as_ptr()
+    }
+}
+
+/// Linux: exec the hashed fd itself, so a file swapped in at `program`
+/// after the hash never runs. argv and envp are copied from `cmd` now, so
+/// call this after the env is final. Registered after the identity hook.
+#[cfg(target_os = "linux")]
+fn arm_pin(cmd: &mut Command, pin: PinnedExe, _program: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let argv = CArray::new(
+        std::iter::once(cmd.get_program())
+            .chain(cmd.get_args())
+            .map(|a| a.as_bytes().to_vec()),
+    )?;
+    let envp = CArray::new(cmd.get_envs().filter_map(|(k, v)| {
+        let mut kv = k.as_bytes().to_vec();
+        kv.push(b'=');
+        kv.extend_from_slice(v?.as_bytes());
+        Some(kv)
+    }))?;
+    let stamp = FileStamp::of(&pin.meta);
+    // SAFETY: the hook runs in the forked child after std's own setup and
+    // the identity hook. It only calls fstat and fexecve, both
+    // async-signal-safe, on an fd and arrays built before the fork. The fd
+    // is O_CLOEXEC, so the new image does not inherit it. On success
+    // fexecve does not return; on failure the errno aborts the spawn.
+    unsafe {
+        cmd.pre_exec(move || {
+            let fd = pin.fd.as_raw_fd();
+            if !stamp.matches_fd(fd) {
+                return Err(io::Error::from_raw_os_error(libc::EACCES));
+            }
+            libc::fexecve(fd, argv.as_ptr(), envp.as_ptr());
+            Err(io::Error::last_os_error())
+        });
+    }
+    Ok(())
+}
+
+/// No `fexecve` here: the child execs `program` by path. Residual: between
+/// this check and the kernel's open of `program` at exec, a swap can still
+/// win. The hook narrows that to the last syscalls before exec. A program
+/// writable by group or other is refused outright.
+#[cfg(not(target_os = "linux"))]
+fn arm_pin(cmd: &mut Command, pin: PinnedExe, program: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    if pin.meta.permissions().mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "pinned program is writable by group or other",
+        ));
+    }
+    let path = std::ffi::CString::new(program.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in program"))?;
+    let stamp = FileStamp::of(&pin.meta);
+    // SAFETY: the hook runs in the forked child just before exec. It only
+    // calls fstat and lstat, both async-signal-safe, on an fd and a path
+    // built before the fork. The fd is O_CLOEXEC.
+    unsafe {
+        cmd.pre_exec(move || {
+            let mut st: libc::stat = std::mem::zeroed();
+            let path_ok =
+                libc::lstat(path.as_ptr(), &mut st) == 0 && FileStamp::of_stat(&st) == stamp;
+            if path_ok && stamp.matches_fd(pin.fd.as_raw_fd()) {
+                Ok(())
+            } else {
+                Err(io::Error::from_raw_os_error(libc::EACCES))
+            }
+        });
+    }
+    Ok(())
 }
 
 /// The command with its identity, a cleared env plus `spec.env`, piped
@@ -158,6 +354,7 @@ fn prepared(spec: &SpawnSpec, identity: &ChildIdentity) -> io::Result<Command> {
 #[cfg(target_os = "linux")]
 fn isolated(
     cmd: Command,
+    pin: Option<(PinnedExe, PathBuf)>,
     allow_hosts: &[String],
     timeout: Duration,
     on_chunk: impl FnMut(Stream, &[u8]),
@@ -204,8 +401,7 @@ fn isolated(
         for k in PROXY_VARS {
             cmd.env(k, &url);
         }
-        let spawned = cmd.spawn();
-        drop(cmd);
+        let spawned = launch(cmd, pin);
         let ok = spawned.is_ok();
         let _ = child_tx.send(spawned);
         if !ok || listener.set_nonblocking(true).is_err() {
@@ -236,6 +432,7 @@ fn isolated(
 #[cfg(not(target_os = "linux"))]
 fn isolated(
     _cmd: Command,
+    _pin: Option<(PinnedExe, PathBuf)>,
     _allow_hosts: &[String],
     _timeout: Duration,
     _on_chunk: impl FnMut(Stream, &[u8]),
@@ -424,6 +621,23 @@ fn signal_group(pgid: i32, sig: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static BEFORE_EXEC: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs the hook a test set on this thread: after the pin is verified
+    /// and taken, before exec.
+    pub(super) fn before_exec() {
+        if let Some(f) = BEFORE_EXEC.with(|h| h.borrow_mut().take()) {
+            f();
+        }
+    }
+
+    fn set_before_exec(f: impl FnOnce() + 'static) {
+        BEFORE_EXEC.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
 
     fn sh() -> PathBuf {
         std::fs::canonicalize("/bin/sh").expect("sh")
@@ -438,6 +652,164 @@ mod tests {
             inherit_stdin: false,
             timeout,
         }
+    }
+
+    /// Open `p` as `inject::match_cmd` does for a pinned rule. The hash
+    /// itself is geode-core's; here only the fd and its stamp matter.
+    fn pin(p: &Path) -> PinnedExe {
+        use std::os::unix::fs::OpenOptionsExt;
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(p)
+            .unwrap();
+        let meta = f.metadata().unwrap();
+        PinnedExe { fd: f.into(), meta }
+    }
+
+    /// A temp dir with a copy of `src` at `prog` (mode 0755). Returns the
+    /// canonical `prog`.
+    fn copy_exe(dir: &Path, src: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::fs::canonicalize(dir).unwrap();
+        let prog = dir.join("prog");
+        std::fs::copy(std::fs::canonicalize(src).unwrap(), &prog).unwrap();
+        std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+        prog
+    }
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("geode-os-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Spec running `prog -c 'echo swapped'` with `prog` (a copy of echo)
+    /// pinned, and a hook that renames a copy of `/bin/sh` over `prog`
+    /// before exec.
+    fn swapped_spec(dir: &Path) -> (SpawnSpec, PinnedExe) {
+        let prog = copy_exe(dir, "/bin/echo");
+        let pinned = pin(&prog);
+        let evil = dir.join("evil");
+        std::fs::copy(sh(), &evil).unwrap();
+        let target = prog.clone();
+        set_before_exec(move || std::fs::rename(&evil, &target).unwrap());
+        let spec = SpawnSpec {
+            program: prog,
+            args: vec!["-c".into(), "echo swapped".into()],
+            env: Vec::new(),
+            cwd: None,
+            inherit_stdin: false,
+            timeout: Duration::from_secs(10),
+        };
+        (spec, pinned)
+    }
+
+    fn run(spec: SpawnSpec, pin: PinnedExe) -> io::Result<(ChildOutcome, String)> {
+        let mut out = Vec::new();
+        let o = spawn_with_pin(spec, Some(pin), &ChildIdentity::Inherit, &[], |s, c| {
+            if s == Stream::Stdout {
+                out.extend_from_slice(c);
+            }
+        })?;
+        Ok((o, String::from_utf8_lossy(&out).into_owned()))
+    }
+
+    #[test]
+    fn pinned_program_runs_from_its_fd() {
+        // Not a copy: macOS kills a relocated copy of a platform binary.
+        let prog = std::fs::canonicalize("/bin/echo").unwrap();
+        let pinned = pin(&prog);
+        let mut s = spec("", Duration::from_secs(10));
+        s.program = prog;
+        s.args = vec!["pinned-ok".into()];
+        let (o, out) = run(s, pinned).unwrap();
+        assert_eq!((o.exit_code, out.as_str()), (Some(0), "pinned-ok\n"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn swap_after_verify_still_runs_the_hashed_file() {
+        let dir = tmpdir("pin-swap");
+        let (s, pinned) = swapped_spec(&dir);
+        let (o, out) = run(s, pinned).unwrap();
+        // echo prints its args; the swapped-in sh would print "swapped".
+        assert_eq!(o.exit_code, Some(0));
+        assert_eq!(out, "-c echo swapped\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // TODO(Jupi macOS CI): un-ignore once the macOS runner lands. Passes on a
+    // local macOS host with `cargo test -p geode-os -- --ignored`.
+    #[cfg(not(target_os = "linux"))]
+    #[ignore = "macOS inode re-check; needs Jupi's macOS CI"]
+    #[test]
+    fn swap_after_verify_is_refused_by_the_inode_recheck() {
+        let dir = tmpdir("pin-swap");
+        let (s, pinned) = swapped_spec(&dir);
+        let r = run(s, pinned);
+        assert!(r.is_err(), "swapped program ran: {r:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_in_place_after_verify_is_refused() {
+        use std::io::Write as _;
+        let dir = tmpdir("pin-write");
+        let prog = copy_exe(&dir, "/bin/echo");
+        let pinned = pin(&prog);
+        let mut s = spec("", Duration::from_secs(10));
+        s.program = prog.clone();
+        s.args = vec!["ran".into()];
+        set_before_exec(move || {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&prog)
+                .unwrap();
+            f.write_all(b"\0").unwrap();
+        });
+        let r = run(s, pinned);
+        assert!(r.is_err(), "modified program ran: {r:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_does_not_inherit_the_pin_fd() {
+        let canon = sh();
+        let pinned = pin(&canon);
+        let raw = pinned.fd.as_raw_fd();
+        let mut s = spec(
+            &format!("[ -e /proc/self/fd/{raw} ] && echo leaked; ls -l /proc/$$/fd"),
+            Duration::from_secs(10),
+        );
+        s.env.push(("PATH".into(), "/usr/bin:/bin".into()));
+        let (o, out) = run(s, pinned).unwrap();
+        assert_eq!(o.exit_code, Some(0), "{out}");
+        assert!(
+            !out.contains("leaked"),
+            "pin fd {raw} reached the child: {out}"
+        );
+        assert!(
+            !out.contains(canon.to_str().unwrap()),
+            "the child holds an fd on its own program: {out}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn group_writable_pin_is_refused_on_macos() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmpdir("pin-mode");
+        let prog = copy_exe(&dir, "/bin/echo");
+        std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let pinned = pin(&prog);
+        let mut s = spec("", Duration::from_secs(10));
+        s.program = prog;
+        let e = run(s, pinned).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn collect(spec: SpawnSpec) -> (ChildOutcome, Vec<u8>, Vec<u8>) {

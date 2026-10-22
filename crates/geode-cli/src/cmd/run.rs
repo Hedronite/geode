@@ -314,7 +314,7 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         custody: false,
         hosts: inject::hosts_label(&[]),
     };
-    let plan = match inject::plan(
+    let mut plan = match inject::plan(
         &caller,
         &view,
         &PlanRequest {
@@ -327,7 +327,7 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         Ok(p) => p,
         Err(e) => return Err(plan_refusal(&mut chain, &row, e)),
     };
-    execute(args, out, &plan, &mut chain, &row)
+    execute(args, out, &mut plan, &mut chain, &row)
 }
 
 /// Fields every audit row of one run shares. Local runs are
@@ -467,13 +467,18 @@ pub(crate) struct Executed {
 /// The one executor for both transports: spawn through `geode_os`, redact
 /// and cap through `inject::Collector`, hand each safe chunk to `emit`,
 /// and write the audit row. Local `geode run` streams; custody buffers.
+/// A pinned exe's fd moves out of `plan` into the spawn.
 pub(crate) fn execute_plan(
-    plan: &inject::Plan,
+    plan: &mut inject::Plan,
     opts: ExecOpts,
     chain: &mut Chain,
     row: &RowBase,
     mut emit: impl FnMut(Channel, Vec<u8>),
 ) -> Result<Executed, Refusal> {
+    let pin = plan
+        .take_pin()
+        .map(|(fd, meta)| geode_os::PinnedExe { fd, meta });
+    let plan = &*plan;
     let spec = geode_os::SpawnSpec {
         program: PathBuf::from(&plan.exe),
         args: plan.args.iter().map(OsString::from).collect(),
@@ -483,14 +488,15 @@ pub(crate) fn execute_plan(
         timeout: opts.timeout,
     };
     let mut collector = Collector::new(plan);
-    let spawned = geode_os::spawn_with(spec, &opts.identity, &opts.allow_hosts, |s, chunk| {
-        let ch = match s {
-            geode_os::Stream::Stdout => Channel::Stdout,
-            geode_os::Stream::Stderr => Channel::Stderr,
-        };
-        let bytes = collector.push(ch, chunk);
-        emit(ch, bytes);
-    });
+    let spawned =
+        geode_os::spawn_with_pin(spec, pin, &opts.identity, &opts.allow_hosts, |s, chunk| {
+            let ch = match s {
+                geode_os::Stream::Stdout => Channel::Stdout,
+                geode_os::Stream::Stderr => Channel::Stderr,
+            };
+            let bytes = collector.push(ch, chunk);
+            emit(ch, bytes);
+        });
     let outcome = match spawned {
         Ok(o) => o,
         Err(e) => {
@@ -551,7 +557,7 @@ pub(crate) fn execute_plan(
 fn execute(
     args: &RunArgs,
     out: OutMode,
-    plan: &inject::Plan,
+    plan: &mut inject::Plan,
     chain: &mut Chain,
     row: &RowBase,
 ) -> Result<i32, Refusal> {
