@@ -177,6 +177,9 @@ pub mod vfs;
 pub mod wrap;
 pub mod zero;
 
+#[cfg(test)]
+mod test_env;
+
 /// Crate-wide error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

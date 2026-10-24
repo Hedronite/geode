@@ -525,6 +525,8 @@ mod tests {
 
     #[test]
     fn default_keyring_path_swaps_filename() {
+        // Same process as the keyfile tests that rewrite HOME / XDG_CONFIG_HOME.
+        let _env = crate::test_env::EnvGuard::lock();
         // default_key_path() => .../geode/default.gkey
         // default_keyring_path() => .../geode/keyring.json
         if let Some(kp) = crate::keyfile::default_key_path() {
