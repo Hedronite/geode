@@ -23,6 +23,7 @@
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
   <a href="#what-you-get">What you get</a> ·
+  <a href="#agent-use">Agent use</a> ·
   <a href="#agents">Agents</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#limits">Limits</a> ·
@@ -39,7 +40,7 @@
 
 Geode seals files and directory trees so people and agents can share a disk without sharing plaintext. Ciphertext lives on the disk. The identity key stays with you. An agent gets a scoped token, never the key.
 
-The on-disk format is **GDE1**, cipher suite **`0x01`**: AEGIS-256-X2, BLAKE3, Argon2id, and HCTR2-256. You work with a vault through the `geode` CLI, the terminal UI, or MCP tools. A build with the `fuse` feature can also mount a vault on Linux.
+The on-disk format is **GDE1**, cipher suite **`0x01`**: AEGIS-256-X2, BLAKE3, Argon2id, and HCTR2-256. You work with a vault through the `geode` CLI, the terminal UI, or MCP tools. Coding agents should start with the skill in [`skills/geode/`](skills/geode/) and the CLI. A build with the `fuse` feature can also mount a vault on Linux.
 
 | | |
 |---|---|
@@ -92,7 +93,7 @@ Run `geode --help`, or `geode <command> --help`, for the full command list.
 | Bytes on disk | Plaintext files | GDE1 objects: chunked AEAD under a merklized content root |
 | Filenames | Visible | Plaintext by default; `seal --seal-names` stores ciphertext names |
 | People | Any editor | The `geode` CLI and the terminal UI (`geode tui`) |
-| Agents | The same key, or raw files | Scoped `GTOK` tokens and MCP tools; see [Agents](#agents) |
+| Agents | The same key, or raw files | Metadata skill plus the CLI, scoped `GTOK` tokens, and MCP tools; see [Agent use](#agent-use) |
 | Integrity | Hope | `geode verify`: full, `--cheap`, or `--sample P`. Exit 2 means an authentication or integrity failure |
 | History | Copies | Named snapshots (`geode snapshot create` / `ls`) and `geode gc` |
 | Identity | Ad hoc | `geode keygen` and `geode keyring`: OS keyring with a `0600` file fallback |
@@ -113,9 +114,43 @@ Commands at a glance:
 
 `geode sign pub` prints the vault identity's Ed25519 public key as SPKI PEM. `geode sign blob PATH` signs a file's raw bytes. The signing key never leaves Geode, and cosign `verify-blob` can check the signature.
 
+<a id="agent-use"></a>
+
+## Agent use: skills + CLI first, MCP still shipped
+
+The default way for an agent to use Geode is the bundled skill in
+[`skills/geode/`](skills/geode/): a short `SKILL.md` the harness reads to decide when to use
+it, plus a Nushell body that calls the CLI with JSON output. The MCP server
+(`geode agent serve`) is still built and shipped, and works the same as before.
+
+The skill is metadata only. It can list entry names, check integrity, show
+recipients, list snapshots, show or dry-run policy, verify the audit chain,
+and report custody or keyring status. It does not read secret values or
+change custody. Entry names can themselves be sensitive.
+
+Why the skill is the default:
+
+- **Context.** An MCP server adds every tool's name, description and input
+  schema to the model's context, often on every request, whether or not the
+  tools are used. Many harnesses can only turn a whole server on or off. A
+  skill costs a few dozen tokens of description until it is used.
+- **Determinism.** The skill body is fixed code over a versioned JSON
+  contract, so results are the same each time.
+- **Small models.** Local models with short context windows feel the schema
+  cost most.
+
+Use the MCP server when your harness defers or filters MCP tool schemas
+(loading them only on demand, or letting you enable single tools), or when
+the client has no shell.
+
+Install the skill by copying or linking `skills/geode/` into your harness's
+skills directory (for example `~/.agents/skills/` or `~/.claude/skills/`).
+
 ## Agents
 
 You issue each agent a token. A token can only narrow what the key can do.
+Coding agents should start with the [skill](#agent-use) above. The token and
+MCP surface on this page is unchanged.
 
 ```sh
 geode --key ./demo.gkey agent token issue \
@@ -180,6 +215,7 @@ crates/geode-cli/     # the geode binary
 crates/geode-tui/     # terminal UI (default feature tui)
 crates/geode-redact/  # redaction of secret values and known key prefixes
 crates/geode-os/      # core-dump refusal and the geode run child spawn
+skills/geode/         # agent skill: SKILL.md and a metadata-only Nushell body
 vectors/v1/           # golden vectors: kdf, chunk, wrap, name
 ```
 

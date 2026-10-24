@@ -1,6 +1,7 @@
 [advisories]
 yanked = "deny"
 ignore = [
+    { id = "RUSTSEC-2026-0385", reason = "pre-existing: ctutils 0.4.2 via argon2/polyval, not this diff" },
     { id = "RUSTSEC-2024-0449", reason = "pre-existing: unsafe-libyaml via geode-cli serde_yaml dev-dep, not this diff" },
     { id = "RUSTSEC-2026-0370", reason = "pre-existing: unmaintained zvariant via keyring -> zbus 5, not this diff" },
     { id = "RUSTSEC-2026-0371", reason = "pre-existing: unmaintained zbus_names via keyring -> zbus 5, not this diff" },

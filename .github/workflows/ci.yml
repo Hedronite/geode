@@ -40,7 +40,11 @@ jobs:
           echo "${sum}  cosign" | sha256sum -c -
           install -m 0755 cosign /usr/local/bin/cosign
           cosign version | grep -q "${COSIGN_VERSION}"
+      - name: Install nushell 0.116.1 (checksum-pinned)
+        run: .github/scripts/install-nushell.sh
       - name: cargo test
+        env:
+          GEODE_REQUIRE_NU: "1"
         run: cargo test --workspace --locked
       # SPEC-v033 G1 proof: `geode sign pub` / `geode sign blob` output is
       # exactly what cosign verify-blob consumes. Exit 0 under the signing
