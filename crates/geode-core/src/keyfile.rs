@@ -76,6 +76,7 @@ pub fn load_key_file_bytes(path: &Path) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::EnvGuard;
     use tempfile::tempdir;
 
     #[test]
@@ -83,18 +84,19 @@ mod tests {
         let d = tempdir().unwrap();
         let dir = d.path().join("xdgcfg");
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
-        std::env::remove_var("HOME");
+        let env = EnvGuard::lock();
+        env.set("XDG_CONFIG_HOME", &dir);
+        env.remove("HOME");
         let p = default_key_path().unwrap();
         assert_eq!(p, dir.join("hedronite").join("geode").join("default.gkey"));
-        std::env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[test]
     fn default_path_falls_back_to_home() {
-        std::env::remove_var("XDG_CONFIG_HOME");
         let d = tempdir().unwrap();
-        std::env::set_var("HOME", d.path());
+        let env = EnvGuard::lock();
+        env.remove("XDG_CONFIG_HOME");
+        env.set("HOME", d.path());
         let p = default_key_path().unwrap();
         assert_eq!(
             p,
@@ -104,21 +106,22 @@ mod tests {
                 .join("geode")
                 .join("default.gkey")
         );
-        std::env::remove_var("HOME");
     }
 
     #[test]
     fn default_path_none_without_home_or_xdg() {
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::remove_var("HOME");
+        let env = EnvGuard::lock();
+        env.remove("XDG_CONFIG_HOME");
+        env.remove("HOME");
         assert!(default_key_path().is_none());
     }
 
     #[test]
     fn default_path_ignores_relative_xdg() {
-        std::env::set_var("XDG_CONFIG_HOME", "relative/path");
         let d = tempdir().unwrap();
-        std::env::set_var("HOME", d.path());
+        let env = EnvGuard::lock();
+        env.set("XDG_CONFIG_HOME", "relative/path");
+        env.set("HOME", d.path());
         let p = default_key_path().unwrap();
         assert_eq!(
             p,
@@ -128,8 +131,6 @@ mod tests {
                 .join("geode")
                 .join("default.gkey")
         );
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::remove_var("HOME");
     }
 
     #[cfg(unix)]
