@@ -610,14 +610,18 @@ fn is_ipv4_compatible(ip: Ipv6Addr) -> bool {
     ip.octets()[..12].iter().all(|byte| *byte == 0)
 }
 
-/// 64:ff9b::/96, the well-known NAT64 prefix.
+/// `64:ff9b::/96`, the well-known NAT64 prefix, and `64:ff9b:1::/48`,
+/// the local-use NAT64 prefix.
 fn is_nat64(ip: Ipv6Addr) -> bool {
     let octets = ip.octets();
-    octets[0] == 0x00
-        && octets[1] == 0x64
-        && octets[2] == 0xff
-        && octets[3] == 0x9b
-        && octets[4..12].iter().all(|byte| *byte == 0)
+    if octets[0] != 0x00 || octets[1] != 0x64 || octets[2] != 0xff || octets[3] != 0x9b {
+        return false;
+    }
+    // 64:ff9b::/96: bits 32..96 are zero. The embedded IPv4 is the last 32.
+    let well_known = octets[4..12].iter().all(|byte| *byte == 0);
+    // 64:ff9b:1::/48: bits 32..48 are 0x0001. The rest may be anything.
+    let local_use = octets[4] == 0x00 && octets[5] == 0x01;
+    well_known || local_use
 }
 
 fn is_cgnat(ip: Ipv4Addr) -> bool {
@@ -903,6 +907,8 @@ mod tests {
             "fec0::1",
             "::8.8.8.8",
             "64:ff9b::8.8.8.8",
+            "64:ff9b:1::1",
+            "64:ff9b:1:ffff:ffff:ffff:ffff:ffff",
         ];
         for host in restricted {
             let ip = host.parse().unwrap();
@@ -915,7 +921,7 @@ mod tests {
             "198.17.0.1",
             "198.20.0.1",
             "2001:4860:4860::8888",
-            "64:ff9b:1::1",
+            "64:ff9b:2::1",
             "::ffff:8.8.8.8",
         ] {
             let ip = host.parse().unwrap();
