@@ -356,14 +356,8 @@ pub fn child_identity(
     }
 }
 
-/// Seatbelt profile that allows everything except reading or writing the
-/// denied paths (and an audit DB's `-wal`/`-shm` siblings) and connecting
-/// to a denied socket.
-///
-/// # Errors
-///
-/// When a path cannot be quoted safely.
-pub fn seatbelt_profile(deny: &[std::path::PathBuf]) -> Result<String, String> {
+/// Quote deny paths for a seatbelt profile. Empty input quotes nothing.
+fn quoted_denies(deny: &[std::path::PathBuf]) -> Result<(String, String), String> {
     let mut lits = String::new();
     for p in deny {
         let s = p.to_str().ok_or("seatbelt path is not UTF-8")?;
@@ -379,6 +373,21 @@ pub fn seatbelt_profile(deny: &[std::path::PathBuf]) -> Result<String, String> {
         let s = p.to_str().unwrap_or_default();
         sock.push_str(&format!(" (remote unix-socket (path-literal \"{s}\"))"));
     }
+    Ok((lits, sock))
+}
+
+/// Seatbelt profile that allows everything except reading or writing the
+/// denied paths (and an audit DB's `-wal`/`-shm` siblings) and connecting
+/// to a denied socket.
+///
+/// This is the custody profile with no egress proxy. A confined run uses
+/// [`seatbelt_profile_confined`], which does not start from `(allow default)`.
+///
+/// # Errors
+///
+/// When a path cannot be quoted safely.
+pub fn seatbelt_profile(deny: &[std::path::PathBuf]) -> Result<String, String> {
+    let (lits, sock) = quoted_denies(deny)?;
     Ok(format!(
         "(version 1)\n(allow default)\n(deny file-read* file-write*{lits})\n(deny network-outbound{sock})\n"
     ))
@@ -389,8 +398,9 @@ pub fn seatbelt_profile(deny: &[std::path::PathBuf]) -> Result<String, String> {
 /// child to that proxy so it cannot dial around the check.
 ///
 /// `sandbox-exec` accepts `localhost` or `*` as the host in a network
-/// address, and rejects an IP literal. `localhost` is the loopback the
-/// proxy listens on.
+/// address, and rejects an IP literal. `localhost` matches both loopback
+/// stacks, so the proxy binds both and refuses to start if either bind fails.
+/// These rules are last: a later allow wins only for that destination.
 #[must_use]
 pub fn proxy_network_rules(port: u16) -> String {
     format!(
@@ -398,9 +408,69 @@ pub fn proxy_network_rules(port: u16) -> String {
     )
 }
 
-/// [`seatbelt_profile`] plus a network deny that allows only `proxy`.
-/// An empty `deny` list does not deny files: the profile is network-only,
-/// for a local `geode run` that inherits the caller's identity.
+/// Mach services a stock shell needs in order to start. Not a prefix, and
+/// not a network service: `networkd` and `nsurlsessiond` are absent.
+const MACH_LOOKUP_NAMES: &[&str] = &[
+    "com.apple.system.logger",
+    "com.apple.logd",
+    "com.apple.distributed_notifications@Uv3",
+    "com.apple.system.notification_center",
+    "com.apple.CoreServices.coreservicesd",
+    "com.apple.coreservices.launchservicesd",
+    "com.apple.lsd.mapdb",
+    "com.apple.bsd.dirhelper",
+    "com.apple.cfprefsd.agent",
+    "com.apple.cfprefsd.daemon",
+    "com.apple.SecurityServer",
+    "com.apple.system.DirectoryService.libinfo_v1",
+    "com.apple.system.DirectoryService.membership_v1",
+];
+
+/// Programs that can open a network connection or an Apple event on their
+/// own. `process-exec` of anything else stays allowed; the network rules
+/// still pin TCP to the proxy.
+const NETWORK_HELPERS: &[&str] = &[
+    "/usr/bin/curl",
+    "/usr/bin/nc",
+    "/usr/bin/ssh",
+    "/usr/bin/scp",
+    "/usr/bin/sftp",
+    "/usr/bin/osascript",
+    "/usr/bin/open",
+    "/usr/bin/telnet",
+    "/usr/bin/ftp",
+    "/usr/bin/nscurl",
+];
+
+fn mach_lookup_allows() -> String {
+    let mut out = String::new();
+    for name in MACH_LOOKUP_NAMES {
+        out.push_str("(allow mach-lookup (global-name \"");
+        out.push_str(name);
+        out.push_str("\"))\n");
+    }
+    out
+}
+
+fn helper_exec_deny() -> String {
+    let mut out = String::from("(deny process-exec");
+    for path in NETWORK_HELPERS {
+        out.push_str(" (literal \"");
+        out.push_str(path);
+        out.push_str("\")");
+    }
+    out.push_str(")\n");
+    out
+}
+
+/// Deny-by-default seatbelt for a child that may dial only the egress proxy.
+///
+/// `(deny default)` is the base. The allows are what a local command needs
+/// to run: file read and write (then the custody paths are denied again),
+/// fork, exec, signal, process-info, sysctl-read, and a named mach-lookup
+/// list. Apple events are denied. Network helpers cannot be exec'd. Outbound
+/// network is denied, then allowed only to the proxy. An empty `deny` list
+/// does not add file denies; it is still not `(allow default)`.
 ///
 /// # Errors
 ///
@@ -409,12 +479,27 @@ pub fn seatbelt_profile_confined(
     deny: &[std::path::PathBuf],
     proxy: u16,
 ) -> Result<String, String> {
-    let net = proxy_network_rules(proxy);
-    if deny.is_empty() {
-        return Ok(format!("(version 1)\n(allow default)\n{net}"));
+    let (lits, sock) = quoted_denies(deny)?;
+    let mut profile = String::from(
+        "(version 1)\n(deny default)\n\
+         (allow file-read*)\n(allow file-write*)\n(allow file-ioctl)\n\
+         (allow file-map-executable)\n(allow ipc-posix-shm)\n(allow system-socket)\n",
+    );
+    if !lits.is_empty() {
+        profile.push_str(&format!("(deny file-read* file-write*{lits})\n"));
+        profile.push_str(&format!("(deny network-outbound{sock})\n"));
     }
-    let base = seatbelt_profile(deny)?;
-    Ok(format!("{base}{net}"))
+    profile.push_str(
+        "(allow process-fork)\n(allow process-exec)\n\
+         (allow signal (target self))\n(allow signal (target children))\n\
+         (allow process-info (target self))\n(allow process-info (target children))\n\
+         (allow sysctl-read)\n",
+    );
+    profile.push_str(&mach_lookup_allows());
+    profile.push_str("(deny appleevent-send)\n");
+    profile.push_str(&helper_exec_deny());
+    profile.push_str(&proxy_network_rules(proxy));
+    Ok(profile)
 }
 
 #[cfg(test)]
@@ -509,12 +594,27 @@ mod tests {
     }
 
     #[test]
-    fn confined_profile_limits_network_to_the_proxy() {
+    fn macos_egress_confined_profile_is_deny_default() {
         let open = seatbelt_profile_confined(&[], 9).unwrap();
+        assert!(open.contains("(deny default)\n"), "{open}");
+        assert!(!open.contains("(allow default)"), "{open}");
         assert!(open.contains("(deny network-outbound)\n"), "{open}");
         assert!(open.contains("localhost:9"), "{open}");
-        assert!(!open.contains("file-read"), "{open}");
+        assert!(open.contains("(allow file-read*)\n"), "{open}");
+        assert!(open.contains("(deny appleevent-send)\n"), "{open}");
+        assert!(open.contains("(literal \"/usr/bin/curl\")"), "{open}");
+        assert!(open.contains("(literal \"/usr/bin/osascript\")"), "{open}");
+        assert!(
+            open.contains("(global-name \"com.apple.system.logger\")"),
+            "{open}"
+        );
+        assert!(!open.contains("(allow mach-lookup)\n"), "{open}");
+        assert!(!open.contains("com.apple.networkd"), "{open}");
+        assert!(!open.contains("nsurlsessiond"), "{open}");
+        assert!(!open.contains("(literal \"/a/k.gkey\")"), "{open}");
         let closed = seatbelt_profile_confined(&["/a/k.gkey".into()], 9).unwrap();
+        assert!(closed.contains("(deny default)\n"), "{closed}");
+        assert!(!closed.contains("(allow default)"), "{closed}");
         assert!(closed.contains("(literal \"/a/k.gkey\")"), "{closed}");
         assert!(closed.contains("localhost:9"), "{closed}");
         assert!(seatbelt_profile_confined(&["rel".into()], 9).is_err());

@@ -100,6 +100,7 @@ jobs:
         run: |
           cargo test -p geode-grotto --lib trusted_path --locked
           cargo test -p geode-os --lib pinned_non_platform_helper_runs --locked
+          cargo test -p geode-os --lib macos_egress --locked
           cargo test -p geode-cli --test run_cli --locked --features test-trusted-root
       - name: sudo trusted-path (fails if sudo -n is missing)
         run: |

@@ -1413,23 +1413,53 @@ mod tests {
         assert!(!r.to_string().contains(DUMMY));
     }
 
+    /// Linux can confine only with `CAP_SYS_ADMIN` (bit 21 of `CapEff`).
+    #[cfg(target_os = "linux")]
+    fn cap_sys_admin() -> bool {
+        let text = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let Some(raw) = text.lines().find_map(|line| line.strip_prefix("CapEff:")) else {
+            return false;
+        };
+        let hex = raw.trim().trim_start_matches("0x");
+        let tail = hex.get(hex.len().saturating_sub(16)..).unwrap_or(hex);
+        let bits = u64::from_str_radix(tail, 16).unwrap_or(0);
+        bits & (1 << 21) != 0
+    }
+
     #[test]
-    fn geode_run_allow_hosts_per_os() {
+    fn geode_run_allow_hosts_outcome_is_per_os() {
         let fx = start_confined(Agents::Uids(Vec::new()));
         let mut a = bound(&fx, &inject_token(&fx, vec!["api.example.com".into()]));
         let marker = fx.dir.join("ran.marker");
         let script = format!("echo x > '{}'", marker.display());
         let r = run_call(&mut a, &fx, &["sh", "-c", &script]);
-        // Same rule on Linux and macOS: confine, or refuse when the OS
-        // cannot. Never an unconfined child.
-        if r["result"]["isError"] == true {
+        // macOS must confine. Linux confines when it holds CAP_SYS_ADMIN and
+        // otherwise refuses. Neither path is an unconfined child.
+        #[cfg(target_os = "macos")]
+        {
+            let doc = tool_doc(&r);
+            assert_eq!(doc["exit_code"], 0, "{r}");
+            assert!(marker.exists(), "confined child did not run");
+            assert_eq!(rows(&fx).last().unwrap().2, "api.example.com");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if cap_sys_admin() {
+                let doc = tool_doc(&r);
+                assert_eq!(doc["exit_code"], 0, "{r}");
+                assert!(marker.exists(), "confined child did not run");
+                assert_eq!(rows(&fx).last().unwrap().2, "api.example.com");
+            } else {
+                assert_eq!(tool_err(&r), "policy_deny");
+                assert!(r.to_string().contains("allow_hosts"), "{r}");
+                assert!(!marker.exists(), "ran without isolation");
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
             assert_eq!(tool_err(&r), "policy_deny");
             assert!(r.to_string().contains("allow_hosts"), "{r}");
             assert!(!marker.exists(), "ran without isolation");
-        } else {
-            assert_eq!(tool_doc(&r)["exit_code"], 0);
-            assert!(marker.exists(), "confined child did not run");
-            assert_eq!(rows(&fx).last().unwrap().2, "api.example.com");
         }
     }
 

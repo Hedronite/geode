@@ -37,6 +37,10 @@ use crate::{cmd, GlobalArgs, OutMode};
 const LOCAL_PRINCIPAL: &str = "human:local";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
+// The compile refusal is `not(debug_assertions)` only (`cargo build --release`,
+// `cargo install`). A dev or test build can still enable `test-trusted-root`;
+// the integration tests do. That is not a release guarantee.
+// `--test-unconfined-hosts` is behind the same feature.
 #[cfg(all(feature = "test-trusted-root", not(debug_assertions)))]
 compile_error!(
     "feature `test-trusted-root` is test-only and insecure (it moves the pin trust root); \
@@ -535,6 +539,7 @@ fn now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append(
     chain: &mut Chain,
     row: &RowBase,
@@ -542,6 +547,7 @@ fn append(
     argv: ArgvCommit,
     exit_code: Option<i32>,
     hits: BTreeMap<String, u64>,
+    hosts: &str,
 ) -> Result<(), Refusal> {
     let input = AuditInput {
         ts: now(),
@@ -556,7 +562,7 @@ fn append(
         redaction_hits: hits,
         outcome: outcome.into(),
         custody: row.custody,
-        hosts: row.hosts.clone(),
+        hosts: hosts.into(),
         argv,
     };
     // Fail closed (Fix 3): the SQLite chain is the source of truth, so a
@@ -605,6 +611,7 @@ pub(crate) fn plan_refusal(chain: &mut Chain, row: &RowBase, e: PlanError) -> Re
                 not_spawned(),
                 None,
                 BTreeMap::new(),
+                &row.hosts,
             ) {
                 return r;
             }
@@ -619,6 +626,7 @@ pub(crate) fn plan_refusal(chain: &mut Chain, row: &RowBase, e: PlanError) -> Re
                 ArgvCommit::Rejected { exe },
                 None,
                 BTreeMap::new(),
+                &row.hosts,
             ) {
                 return r;
             }
@@ -709,7 +717,16 @@ pub(crate) fn execute_plan(
     let isolate = !hosts_for_child.is_empty();
     // Intent row before any value leaves the plan (Fix 3). If it cannot be
     // written, no child env is built and nothing spawns.
-    append(chain, row, "started", argv(), None, BTreeMap::new())?;
+    append(
+        chain,
+        row,
+        "started",
+        argv(),
+        None,
+        BTreeMap::new(),
+        &row.hosts,
+    )?;
+    let denials = geode_os::HostDenials::default();
     let spec = geode_os::SpawnSpec {
         program: PathBuf::from(&plan.exe),
         args: plan.args.iter().map(OsString::from).collect(),
@@ -717,6 +734,7 @@ pub(crate) fn execute_plan(
         cwd: opts.cwd,
         inherit_stdin: opts.inherit_stdin,
         timeout: opts.timeout,
+        host_denials: denials.clone(),
     };
     let mut collector = Collector::new(plan);
     let spawned =
@@ -738,6 +756,7 @@ pub(crate) fn execute_plan(
                 not_spawned(),
                 None,
                 BTreeMap::new(),
+                &row.hosts,
             )?;
             // A list that cannot be enforced is a refusal, never an
             // unconfined run.
@@ -761,6 +780,7 @@ pub(crate) fn execute_plan(
         emit(ch, tail);
     }
     let hits = collector.hits();
+    record_host_denials(chain, row, &argv, &denials)?;
     let label = if outcome.timed_out {
         "timed_out"
     } else {
@@ -773,12 +793,36 @@ pub(crate) fn execute_plan(
         argv(),
         Some(outcome.process_exit()),
         hits.clone(),
+        &row.hosts,
     )?;
     Ok(Executed {
         outcome,
         hits,
         truncated: collector.truncated(),
     })
+}
+
+/// One `host_denied` audit row per proxy refusal, after the child and
+/// before the close row. A failed append is `audit_failed`; the child has
+/// already run. The token is not written.
+fn record_host_denials(
+    chain: &mut Chain,
+    row: &RowBase,
+    argv: &impl Fn() -> ArgvCommit,
+    denials: &geode_os::HostDenials,
+) -> Result<(), Refusal> {
+    for host in denials.snapshot() {
+        append(
+            chain,
+            row,
+            "host_denied",
+            argv(),
+            None,
+            BTreeMap::new(),
+            &host,
+        )?;
+    }
+    Ok(())
 }
 
 /// Hosts the child may dial. The test seam returns an empty list and does
@@ -908,5 +952,51 @@ mod host_policy_tests {
                 assert_eq!(err.code(), "host_denied");
             }
         }
+    }
+
+    #[test]
+    fn proxy_denial_is_an_audit_row() {
+        let dir = std::env::temp_dir().join(format!(
+            "geode-deny-audit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("audit.db");
+        let mut chain = geode_grotto::audit::open(&db).unwrap();
+        let row = super::RowBase {
+            principal: "human:local".into(),
+            token_id: String::new(),
+            peer_uid: None,
+            peer_pid: None,
+            vault_id: "00".into(),
+            paths: vec!["cfg/note".into()],
+            custody: false,
+            hosts: "api.example.com".into(),
+        };
+        let denials = geode_os::HostDenials::default();
+        denials.record("blocked.example", 443);
+        let argv = || geode_grotto::audit::ArgvCommit::Clean {
+            argv0: "/bin/sh".into(),
+            args: Vec::new(),
+        };
+        super::record_host_denials(&mut chain, &row, &argv, &denials)
+            .unwrap_or_else(|err| panic!("{}", err.msg));
+        drop(chain);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let (outcome, hosts): (String, String) = conn
+            .query_row(
+                "SELECT outcome, hosts FROM audit ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(outcome, "host_denied");
+        assert_eq!(hosts, "blocked.example:443");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

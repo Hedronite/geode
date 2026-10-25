@@ -15,9 +15,11 @@ path = "src/lib.rs"
 [features]
 default = []
 # Test-only and insecure. Off unless a build asks for it. Exposes
-# `plan_with_test_root`, which moves the pin trust root. A release
-# build refuses to compile this feature. Release builds of `geode` do
-# not enable it.
+# `plan_with_test_root`, which moves the pin trust root. The crate
+# refuses to compile this feature only when debug assertions are off
+# (`cargo build --release`, `cargo install`). A dev or test build can
+# still enable it. That is not a release guarantee. Release builds of
+# `geode` do not enable it.
 test-trusted-root = []
 
 [dependencies]

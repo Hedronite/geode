@@ -227,6 +227,9 @@ pub fn plan(
     plan_anchored(caller, vault, req, Path::new("/"), 0)
 }
 
+// The compile refusal is `not(debug_assertions)` only (`cargo build --release`,
+// `cargo install`). A dev or test build can still enable `test-trusted-root`.
+// That is not a release guarantee.
 #[cfg(all(feature = "test-trusted-root", not(debug_assertions)))]
 compile_error!(
     "feature `test-trusted-root` is test-only and insecure (it moves the pin trust root); \
@@ -237,8 +240,9 @@ compile_error!(
 ///
 /// Test-only and insecure. Compiled for unit tests and for the
 /// `test-trusted-root` feature, which lets a caller move the pin trust
-/// root. A release build refuses to compile that feature, so a release
-/// `geode` does not call this and does not contain it.
+/// root. The feature fails to compile only when debug assertions are off
+/// (`cargo build --release`, `cargo install`). A dev build can still enable
+/// it. A release `geode` does not call this and does not contain it.
 #[cfg(any(test, feature = "test-trusted-root"))]
 pub fn plan_with_test_root(
     caller: &Caller<'_>,
