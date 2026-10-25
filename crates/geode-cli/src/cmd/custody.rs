@@ -1367,6 +1367,63 @@ mod tests {
         }
     }
 
+    /// Fix 3 fault: pre-create the daemon's audit DB with a trigger that
+    /// aborts every insert matching `when` (SQL on `NEW`). Test-only; the
+    /// shipped binary carries no hook.
+    fn fail_audit_when(fx: &Fx, when: &str) {
+        let db = fx.dir.join("state/audit.db");
+        drop(geode_grotto::audit::open(&db).unwrap());
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER fix3_fault BEFORE INSERT ON audit WHEN {when} \
+             BEGIN SELECT RAISE(ABORT, 'fix3 injected fault'); END;"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn geode_run_started_row_fault_is_audit_failed_and_spawns_nothing() {
+        let fx = start(Agents::Uids(Vec::new()));
+        fail_audit_when(&fx, "1");
+        let mut a = bound(&fx, &inject_token(&fx, Vec::new()));
+        let marker = fx.dir.join("ran.marker");
+        let script = format!("env > '{}'", marker.display());
+        let r = run_call(&mut a, &fx, &["sh", "-c", &script]);
+        assert_eq!(tool_err(&r), "audit_failed");
+        assert!(r.to_string().contains("audit append failed"), "{r}");
+        assert!(!r.to_string().contains(DUMMY), "dummy in the MCP result");
+        assert!(!marker.exists(), "child ran without an audit row");
+        assert!(rows(&fx).is_empty(), "no row was written");
+        // The daemon is still up and answers the next call.
+        let again = a.call("tools/list", serde_json::json!({}));
+        assert!(again.get("error").is_none(), "{again}");
+    }
+
+    #[test]
+    fn geode_run_close_row_fault_is_audit_failed_after_the_child_ran() {
+        let fx = start(Agents::Uids(Vec::new()));
+        fail_audit_when(&fx, "NEW.outcome <> 'started'");
+        let mut a = bound(&fx, &inject_token(&fx, Vec::new()));
+        let marker = fx.dir.join("ran.marker");
+        let script = format!("echo $KEY; echo x > '{}'", marker.display());
+        let r = run_call(&mut a, &fx, &["sh", "-c", &script]);
+        // Semantics: the started row committed, so the child ran (the
+        // marker exists). The close row failed, so the daemon answers
+        // audit_failed instead of the buffered result; nothing of the
+        // child's output, redacted or not, is returned.
+        assert_eq!(tool_err(&r), "audit_failed");
+        assert!(!r.to_string().contains(DUMMY), "dummy in the MCP result");
+        assert!(
+            !r.to_string().contains("REDACTED"),
+            "buffered output leaked: {r}"
+        );
+        assert!(marker.exists(), "started row committed, so the child ran");
+        let outcomes: Vec<String> = rows(&fx).into_iter().map(|r| r.0).collect();
+        assert_eq!(outcomes, ["started"], "the intent row stays as evidence");
+        let db = std::fs::read(fx.dir.join("state/audit.db")).unwrap();
+        assert!(!String::from_utf8_lossy(&db).contains(DUMMY));
+    }
+
     #[test]
     fn custody_socket_is_0660_and_parent_is_never_created() {
         let tmp = tempfile::tempdir().unwrap();
