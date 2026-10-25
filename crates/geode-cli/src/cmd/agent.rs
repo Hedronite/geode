@@ -292,10 +292,44 @@ pub(crate) fn canonical_cmd(path: &str) -> Result<String> {
     Ok(path.to_owned())
 }
 
-/// Parse `--allow-cmds-file`: a JSON list of `{path, sha256?, args_prefix?}`.
+/// Parse `--allow-cmds-file` for `token issue`. `sha256` may be omitted.
 /// Unknown keys are refused so a typo cannot silently widen a rule.
 fn read_cmds_file(file: &Path) -> Result<Vec<CmdRule>> {
-    const KEYS: [&str; 3] = ["path", "sha256", "args_prefix"];
+    read_cmd_rules_file(file, false)
+}
+
+/// Parse `--allow-cmds-file` for `geode run`. Every rule must include `sha256`.
+pub(crate) fn read_pinned_cmds_file(file: &Path) -> Result<Vec<CmdRule>> {
+    read_cmd_rules_file(file, true)
+}
+
+/// One `--allow-cmd` value on `geode run`.
+///
+/// A bare absolute path is the existing unpinned rule (`sha256` unset).
+/// A JSON object is a pin and `sha256` is required:
+/// `{"path":"/abs/exe","sha256":"<64 hex>","args_prefix":["…"]}`.
+/// `args_prefix` is the required leading arguments after the program and may
+/// be omitted. A JSON list belongs in `--allow-cmds-file`.
+pub(crate) fn parse_allow_cmd_arg(raw: &str) -> Result<CmdRule> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('[') {
+        return Err(Error::Format(
+            "allow-cmd JSON must be one object; a list belongs in --allow-cmds-file".into(),
+        ));
+    }
+    if trimmed.starts_with('{') {
+        let value: serde_json::Value = serde_json::from_str(trimmed)
+            .map_err(|e| Error::Format(format!("allow-cmd: bad JSON: {e}")))?;
+        return parse_rule_object(&value, "allow-cmd", true);
+    }
+    Ok(CmdRule {
+        path: canonical_cmd(raw)?,
+        sha256: None,
+        args_prefix: Vec::new(),
+    })
+}
+
+fn read_cmd_rules_file(file: &Path, require_sha256: bool) -> Result<Vec<CmdRule>> {
     let bytes = std::fs::read(file)
         .map_err(|e| Error::Format(format!("allow-cmds-file {}: {e}", file.display())))?;
     let value: serde_json::Value = serde_json::from_slice(&bytes)
@@ -308,29 +342,55 @@ fn read_cmds_file(file: &Path) -> Result<Vec<CmdRule>> {
     })?;
     let mut rules = Vec::with_capacity(list.len());
     for (i, item) in list.iter().enumerate() {
-        let obj = item.as_object().ok_or_else(|| {
-            Error::Format(format!("allow-cmds-file rule {i}: expected an object"))
-        })?;
-        if let Some(k) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
-            return Err(Error::Format(format!(
-                "allow-cmds-file rule {i}: unknown key '{k}' (path, sha256, args_prefix)"
-            )));
-        }
-        let mut rule: CmdRule = serde_json::from_value(item.clone())
-            .map_err(|e| Error::Format(format!("allow-cmds-file rule {i}: {e}")))?;
-        rule.path = canonical_cmd(&rule.path)?;
-        if let Some(sum) = &rule.sha256 {
+        rules.push(parse_rule_object(
+            item,
+            &format!("allow-cmds-file rule {i}"),
+            require_sha256,
+        )?);
+    }
+    Ok(rules)
+}
+
+/// One `{path, sha256, args_prefix}` object. Unknown keys are refused.
+fn parse_rule_object(
+    item: &serde_json::Value,
+    label: &str,
+    require_sha256: bool,
+) -> Result<CmdRule> {
+    const KEYS: [&str; 3] = ["path", "sha256", "args_prefix"];
+    let obj = item
+        .as_object()
+        .ok_or_else(|| Error::Format(format!("{label}: expected an object")))?;
+    if let Some(k) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
+        return Err(Error::Format(format!(
+            "{label}: unknown key '{k}' (path, sha256, args_prefix)"
+        )));
+    }
+    let rule: CmdRule =
+        serde_json::from_value(item.clone()).map_err(|e| Error::Format(format!("{label}: {e}")))?;
+    finish_rule(rule, label, require_sha256)
+}
+
+fn finish_rule(mut rule: CmdRule, label: &str, require_sha256: bool) -> Result<CmdRule> {
+    rule.path = canonical_cmd(&rule.path)?;
+    match rule.sha256 {
+        Some(sum) => {
             let ok = sum.len() == 64 && sum.bytes().all(|b| b.is_ascii_hexdigit());
             if !ok {
                 return Err(Error::Format(format!(
-                    "allow-cmds-file rule {i}: sha256 must be 64 hex characters"
+                    "{label}: sha256 must be 64 hex characters"
                 )));
             }
             rule.sha256 = Some(sum.to_ascii_lowercase());
         }
-        rules.push(rule);
+        None if require_sha256 => {
+            return Err(Error::Format(format!(
+                "{label}: sha256 is required (64 hex characters)"
+            )));
+        }
+        None => {}
     }
-    Ok(rules)
+    Ok(rule)
 }
 
 /// Validate a host: non-empty ASCII with no whitespace, scheme, path, or

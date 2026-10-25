@@ -9,6 +9,11 @@
 //!
 //! Executables are canonicalized at runtime. `/bin/sh` is never assumed
 //! canonical (Ubuntu resolves it to `/usr/bin/dash`). Dummy values only.
+//!
+//! Pin tests hash with `sha2` and exec through the existing hashed-fd path.
+//! Linux execs that fd. macOS has no `fexecve`; `geode-os` re-checks the
+//! inode in the child. These tests have no macOS-only branch. A `#!` source
+//! is refused by the pin check on Linux, so the fixture is a copy of `sh`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -641,4 +646,304 @@ fn fix3_deny_path_writes_row_or_fails_closed() {
     assert!(err(&o).contains("audit append failed"), "{}", err(&o));
     assert_no_dummy(&o, "deny + audit_failed");
     assert!(!fx.marker().exists());
+}
+
+fn sha256_hex(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(std::fs::read(path).expect("read pin target"))
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Copy `src` to `dir/bin/name` as a 0755 file. The pin path is this absolute
+/// path. A `#!` file cannot be pinned on Linux.
+fn copy_exec(dir: &Path, name: &str, src: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let dest = bin.join(name);
+    std::fs::copy(src, &dest).unwrap();
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let head = std::fs::read(&dest).unwrap();
+    assert!(
+        head.len() >= 2 && !head.starts_with(b"#!"),
+        "pin fixture must be a binary: {}",
+        dest.display()
+    );
+    dest
+}
+
+fn write_pins(dir: &Path, rules: &serde_json::Value) {
+    std::fs::write(dir.join("pins.json"), serde_json::to_vec(rules).unwrap()).unwrap();
+}
+
+#[test]
+fn run_help_documents_pinning() {
+    let o = Command::new(env!("CARGO_BIN_EXE_geode"))
+        .args(["run", "--help"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", err(&o));
+    let text = out(&o);
+    assert!(text.contains("sha256"), "{text}");
+    assert!(text.contains("args_prefix"), "{text}");
+    assert!(text.contains("allow-cmds-file"), "{text}");
+}
+
+#[test]
+fn pinned_matching_command_runs() {
+    let fx = Fx::new();
+    let tool = copy_exec(&fx.dir, "tool", Path::new(&fx.sh));
+    let tool_s = tool.to_str().unwrap().to_owned();
+    let sum = sha256_hex(&tool);
+    let spec = serde_json::json!({
+        "path": tool_s,
+        "sha256": sum.to_uppercase(),
+        "args_prefix": ["-c", "printf ok"],
+    })
+    .to_string();
+    let inline = fx.run(
+        &["--allow-cmd", &spec, "--secret", "KEY=cfg/dummy.env"],
+        &[&tool_s, "-c", "printf ok"],
+    );
+    assert_eq!(code(&inline), Some(0), "{}", err(&inline));
+    assert_eq!(out(&inline), "ok");
+    assert_no_dummy(&inline, "pinned inline");
+    let (outcome, _, argv0, exit_code, _) = fx.rows().last().unwrap().clone();
+    assert_eq!(outcome, "spawned");
+    assert_eq!(argv0, tool_s);
+    assert_eq!(exit_code, Some(0));
+
+    write_pins(
+        &fx.dir,
+        &serde_json::json!([{
+            "path": tool_s,
+            "sha256": sum,
+            "args_prefix": ["-c", "printf ok"],
+        }]),
+    );
+    let from_file = fx.run(
+        &[
+            "--allow-cmds-file",
+            "pins.json",
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
+        &[&tool_s, "-c", "printf ok"],
+    );
+    assert_eq!(code(&from_file), Some(0), "{}", err(&from_file));
+    assert_eq!(out(&from_file), "ok");
+    assert_no_dummy(&from_file, "pinned file");
+}
+
+#[test]
+fn pinned_wrong_digest_refused() {
+    let fx = Fx::new();
+    let tool = copy_exec(&fx.dir, "tool", Path::new(&fx.sh));
+    let tool_s = tool.to_str().unwrap().to_owned();
+    let touch = fx.touch_script();
+    write_pins(
+        &fx.dir,
+        &serde_json::json!([{
+            "path": tool_s,
+            "sha256": "00".repeat(32),
+            "args_prefix": ["-c", touch],
+        }]),
+    );
+    let o = fx.run(
+        &[
+            "--allow-cmds-file",
+            "pins.json",
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
+        &[&tool_s, "-c", &touch],
+    );
+    assert_eq!(code(&o), Some(3), "{}", err(&o));
+    assert!(err(&o).contains("sha256"), "{}", err(&o));
+    assert_no_dummy(&o, "wrong digest");
+    assert!(out(&o).is_empty(), "{}", out(&o));
+    assert!(!fx.marker().exists(), "wrong digest spawned");
+    assert_eq!(fx.rows().last().unwrap().0, "policy_deny");
+}
+
+#[test]
+fn unpinned_path_refused() {
+    let fx = Fx::new();
+    let tool = copy_exec(&fx.dir, "tool", Path::new(&fx.sh));
+    let tool_s = tool.to_str().unwrap().to_owned();
+    write_pins(
+        &fx.dir,
+        &serde_json::json!([{
+            "path": tool_s,
+            "sha256": sha256_hex(&tool),
+        }]),
+    );
+    let touch = fx.touch_script();
+    let o = fx.run(
+        &[
+            "--allow-cmds-file",
+            "pins.json",
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
+        &["sh", "-c", &touch],
+    );
+    assert_eq!(code(&o), Some(3), "{}", err(&o));
+    assert!(err(&o).contains("is not pinned"), "{}", err(&o));
+    assert_no_dummy(&o, "unpinned path");
+    assert!(out(&o).is_empty(), "{}", out(&o));
+    assert!(!fx.marker().exists(), "unpinned path spawned");
+    assert_eq!(fx.rows().last().unwrap().0, "policy_deny");
+}
+
+#[test]
+fn args_prefix_mismatch_refused() {
+    let fx = Fx::new();
+    let tool = copy_exec(&fx.dir, "tool", Path::new(&fx.sh));
+    let tool_s = tool.to_str().unwrap().to_owned();
+    let touch = fx.touch_script();
+    write_pins(
+        &fx.dir,
+        &serde_json::json!([{
+            "path": tool_s,
+            "sha256": sha256_hex(&tool),
+            "args_prefix": ["-c", "true"],
+        }]),
+    );
+    let o = fx.run(
+        &[
+            "--allow-cmds-file",
+            "pins.json",
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
+        &[&tool_s, "-c", &touch],
+    );
+    assert_eq!(code(&o), Some(3), "{}", err(&o));
+    assert!(err(&o).contains("args_prefix"), "{}", err(&o));
+    assert!(!err(&o).contains("spawned.marker"), "{}", err(&o));
+    assert_no_dummy(&o, "args_prefix");
+    assert!(out(&o).is_empty(), "{}", out(&o));
+    assert!(!fx.marker().exists(), "args_prefix mismatch spawned");
+}
+
+#[test]
+fn relative_pin_refused() {
+    let fx = Fx::new();
+    let tool = copy_exec(&fx.dir, "tool", Path::new(&fx.sh));
+    let tool_s = tool.to_str().unwrap().to_owned();
+    let sum = sha256_hex(&tool);
+    write_pins(
+        &fx.dir,
+        &serde_json::json!([{"path": "bin/tool", "sha256": sum}]),
+    );
+    let o = fx.run(
+        &[
+            "--allow-cmds-file",
+            "pins.json",
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
+        &[&tool_s, "-c", "true"],
+    );
+    assert_eq!(code(&o), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("not an absolute path"), "{}", err(&o));
+    assert_no_dummy(&o, "relative pin");
+
+    let inline = serde_json::json!({"path": "bin/tool", "sha256": sum}).to_string();
+    let o = fx.run(
+        &["--allow-cmd", &inline, "--secret", "KEY=cfg/dummy.env"],
+        &[&tool_s, "-c", "true"],
+    );
+    assert_eq!(code(&o), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("not an absolute path"), "{}", err(&o));
+
+    write_pins(&fx.dir, &serde_json::json!([{"path": tool_s}]));
+    let o = fx.run(
+        &[
+            "--allow-cmds-file",
+            "pins.json",
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
+        &[&tool_s, "-c", "true"],
+    );
+    assert_eq!(code(&o), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("sha256 is required"), "{}", err(&o));
+    assert_no_dummy(&o, "missing sha256");
+
+    write_pins(
+        &fx.dir,
+        &serde_json::json!([{"path": tool_s, "sha256": sum}]),
+    );
+    let o = fx.run(
+        &[
+            "--allow-cmds-file",
+            "pins.json",
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
+        &["./bin/tool", "-c", "true"],
+    );
+    assert_eq!(code(&o), Some(3), "{}", err(&o));
+    assert!(err(&o).contains("not an absolute path"), "{}", err(&o));
+    assert!(!fx.marker().exists());
+}
+
+#[test]
+fn symlink_swap_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fx::new();
+    let tool = copy_exec(&fx.dir, "tool", Path::new(&fx.sh));
+    let tool_s = tool.to_str().unwrap().to_owned();
+    let sum = sha256_hex(&tool);
+    let marker = fx.marker();
+
+    let link = fx.dir.join("bin/via-link");
+    let evil = fx.dir.join("bin/evil.sh");
+    std::fs::write(&evil, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+    std::fs::set_permissions(&evil, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&evil, &link).unwrap();
+
+    // A symlink that resolves to a different file is not the pinned binary.
+    write_pins(
+        &fx.dir,
+        &serde_json::json!([{"path": tool_s, "sha256": sum}]),
+    );
+    let via = link.to_str().unwrap();
+    let o = fx.run(
+        &[
+            "--allow-cmds-file",
+            "pins.json",
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
+        &[via],
+    );
+    assert_eq!(code(&o), Some(3), "{}", err(&o));
+    assert!(err(&o).contains("symlink"), "{}", err(&o));
+    assert!(err(&o).contains("not pinned"), "{}", err(&o));
+    assert!(!err(&o).contains("touch"), "{}", err(&o));
+    assert_no_dummy(&o, "symlink argv");
+    assert!(!marker.exists(), "symlink argv spawned");
+
+    // The pinned path itself is replaced with a symlink before the run.
+    std::fs::remove_file(&tool).unwrap();
+    std::os::unix::fs::symlink(&evil, &tool).unwrap();
+    let o = fx.run(
+        &[
+            "--allow-cmds-file",
+            "pins.json",
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
+        &[&tool_s],
+    );
+    assert_eq!(code(&o), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("not canonical"), "{}", err(&o));
+    assert!(!err(&o).contains("touch"), "{}", err(&o));
+    assert_no_dummy(&o, "symlink swap");
+    assert!(!marker.exists(), "symlink swap spawned");
 }

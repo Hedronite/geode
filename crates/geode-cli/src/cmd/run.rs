@@ -42,9 +42,11 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// Local use needs a key. A token is refused (exit 4). `--` is required
 /// before the command. `argv[0]` is resolved
 /// against `PATH`, canonicalized, and must match an `--allow-cmd`.
-/// Every binding must pass policy, or nothing runs. The child gets a fresh
-/// env: `PATH`, `HOME`, `LANG`, `TERM`, then the bindings. It never gets
-/// `GEODE_TOKEN`.
+/// A bare path does not pin. A JSON object, or a rule in `--allow-cmds-file`,
+/// pins `{path, sha256, args_prefix}` and is checked against the fd that
+/// exec runs. Every binding must pass policy, or nothing runs. The child
+/// gets a fresh env: `PATH`, `HOME`, `LANG`, `TERM`, then the bindings. It
+/// never gets `GEODE_TOKEN`.
 ///
 /// Stdout carries only the child's redacted stdout. Stderr carries
 /// `geode:` lines (warnings, `injected: NAMES (values withheld)`) and the
@@ -58,8 +60,8 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// accidents; it does not stop a hostile command.
 ///
 /// Exit: before spawn, 1 usage, 2 auth, 3 policy deny or `argv[0]` not
-/// allowed, 4 token, 5 locked. After spawn, the child's code, or 128+N
-/// for signal N.
+/// allowed (including a pin miss), 4 token, 5 locked. After spawn, the
+/// child's code, or 128+N for signal N.
 #[derive(Args, Debug)]
 pub struct RunArgs {
     /// Vault directory the bindings come from.
@@ -84,8 +86,24 @@ pub struct RunArgs {
     pub file: Vec<String>,
     /// Absolute canonical executable this local run may start (repeatable).
     /// With none, nothing runs.
-    #[arg(long = "allow-cmd", value_name = "PATH")]
-    pub allow_cmd: Vec<PathBuf>,
+    ///
+    /// A path allows that program with no digest check. A JSON object pins
+    /// it: `{"path":"/abs/exe","sha256":"<64 hex>","args_prefix":["…"]}`.
+    /// `sha256` is required in the object (lowercase hex of the binary;
+    /// uppercase is accepted and stored lowercase). `args_prefix` is the
+    /// required leading arguments after the program and may be omitted or
+    /// empty. A relative path, or a path that is not canonical, is refused.
+    /// The digest is read from the fd that exec runs.
+    #[arg(long = "allow-cmd", value_name = "PATH|JSON")]
+    pub allow_cmd: Vec<String>,
+    /// JSON list of pinned commands. Each object is
+    /// `{"path":"/abs/exe","sha256":"<64 hex>","args_prefix":["…"]}`.
+    /// `path` must be absolute and canonical. `sha256` is required.
+    /// `args_prefix` may be omitted. Combined with `--allow-cmd`.
+    /// On macOS the hashed fd cannot be exec'd; the child re-checks the
+    /// path against that fd immediately before exec.
+    #[arg(long, value_name = "FILE")]
+    pub allow_cmds_file: Option<PathBuf>,
     /// Seconds before SIGTERM; SIGKILL follows 2 seconds later.
     #[arg(long, value_name = "SECS", default_value_t = DEFAULT_TIMEOUT_SECS)]
     pub timeout: u64,
@@ -219,19 +237,20 @@ fn preflight(args: &RunArgs) -> Result<(Vec<BindingSpec>, Vec<CmdRule>), Refusal
     }
     let bindings = parse_bindings(&args.secret)?;
     let mut cmds: Vec<CmdRule> = Vec::new();
-    for p in &args.allow_cmd {
-        let path = p
-            .to_str()
-            .ok_or_else(|| refuse(exit::USAGE, "usage", "--allow-cmd path is not UTF-8"))?;
-        let path = cmd::agent::canonical_cmd(path)
+    for raw in &args.allow_cmd {
+        let rule = cmd::agent::parse_allow_cmd_arg(raw)
             .map_err(|e| refuse(exit::USAGE, "usage", error_text(&e)))?;
-        let rule = CmdRule {
-            path,
-            sha256: None,
-            args_prefix: Vec::new(),
-        };
         if !cmds.contains(&rule) {
             cmds.push(rule);
+        }
+    }
+    if let Some(file) = &args.allow_cmds_file {
+        for rule in cmd::agent::read_pinned_cmds_file(file)
+            .map_err(|e| refuse(exit::USAGE, "usage", error_text(&e)))?
+        {
+            if !cmds.contains(&rule) {
+                cmds.push(rule);
+            }
         }
     }
     Ok((bindings, cmds))
