@@ -37,10 +37,13 @@ use crate::{cmd, GlobalArgs, OutMode};
 const LOCAL_PRINCIPAL: &str = "human:local";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
-// The compile refusal is `not(debug_assertions)` only (`cargo build --release`,
-// `cargo install`). A dev or test build can still enable `test-trusted-root`;
-// the integration tests do. That is not a release guarantee.
-// `--test-unconfined-hosts` is behind the same feature.
+// Two compile refusals keep `test-trusted-root` out of an optimized binary:
+// this one (`not(debug_assertions)`: `cargo build --release`, `cargo
+// install`), and `build.rs`, which also refuses any `opt-level` other than
+// 0. The second catches a custom profile that turns debug assertions back
+// on. A plain dev or test build can still enable the feature; the
+// integration tests do. `--test-unconfined-hosts` is behind the same
+// feature.
 #[cfg(all(feature = "test-trusted-root", not(debug_assertions)))]
 compile_error!(
     "feature `test-trusted-root` is test-only and insecure (it moves the pin trust root); \

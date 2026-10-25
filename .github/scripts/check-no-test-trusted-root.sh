@@ -40,3 +40,16 @@ if ! grep -q 'unexpected argument' "$err"; then
   cat "$err" >&2
   exit 1
 fi
+
+# An optimized build with debug assertions turned back on must still refuse
+# the feature (build.rs opt-level guard).
+if CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+  cargo build -p geode-cli --release --locked --features test-trusted-root >"$err" 2>&1; then
+  echo "optimized build with debug assertions accepted test-trusted-root" >&2
+  exit 1
+fi
+if ! grep -q 'refusing an optimized build' "$err"; then
+  echo "expected build.rs to refuse an optimized test-trusted-root build" >&2
+  tail -n 20 "$err" >&2
+  exit 1
+fi
