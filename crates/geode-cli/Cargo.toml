@@ -12,8 +12,20 @@ publish = true
 name = "geode"
 path = "src/main.rs"
 
+# Pin-test fixture only. `cargo install` builds it too; it is not a
+# documented command. A copy of `/bin/sh` cannot be the fixture: macOS
+# launch constraints SIGKILL relocated platform binaries.
+[[bin]]
+name = "geode-pin-helper"
+path = "src/bin/geode-pin-helper.rs"
+test = false
+doc = false
+
 [features]
 default = ["tui"]
+# Test-only pin trust root. Off by default, so `cargo build --release`
+# does not include it. Not part of the supported `geode` surface.
+test-trusted-root = ["geode-grotto/test-trusted-root"]
 # 14-tui 2.2: default-on for release builds; a core-profile build
 # (--no-default-features) compiles with no ratatui and answers
 # `geode tui` with exit 1.

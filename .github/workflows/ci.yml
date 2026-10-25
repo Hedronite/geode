@@ -42,10 +42,22 @@ jobs:
           cosign version | grep -q "${COSIGN_VERSION}"
       - name: Install nushell 0.116.1 (checksum-pinned)
         run: .github/scripts/install-nushell.sh
+      # `test-trusted-root` is off by default. geode-cli tests that pin a
+      # user-owned helper need it; every other package stays on the default
+      # feature set. A release build is checked separately and must not
+      # contain the switch.
       - name: cargo test
         env:
           GEODE_REQUIRE_NU: "1"
-        run: cargo test --workspace --locked
+        run: |
+          # geode-tui's operator tests spawn target/debug/geode. Excluding
+          # geode-cli from the workspace run skips that binary, so build
+          # the default one first. The feature build is a later step.
+          cargo build -p geode-cli --locked --bin geode
+          cargo test --workspace --locked --exclude geode-cli
+          cargo test -p geode-cli --locked --features test-trusted-root
+      - name: release build has no test trust root
+        run: .github/scripts/check-no-test-trusted-root.sh
       # SPEC-v033 G1 proof: `geode sign pub` / `geode sign blob` output is
       # exactly what cosign verify-blob consumes. Exit 0 under the signing
       # identity; non-zero under a second identity.
@@ -70,3 +82,31 @@ jobs:
           fi
       - name: clippy -D warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # One job, not the full matrix. Proves a pinned run of geode-pin-helper
+  # under an injected trust root. A copied /bin/sh is SIGKILL'd:
+  # CODESIGNING Launch Constraint Violation, platform id 26.
+  # The ignored sudo test is the only root-owned install, and it fails
+  # closed when `sudo -n` is missing.
+  pin-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: trusted-path and run-path tests
+        run: |
+          cargo test -p geode-grotto --lib trusted_path --locked
+          cargo test -p geode-os --lib pinned_non_platform_helper_runs --locked
+          cargo test -p geode-cli --test run_cli --locked --features test-trusted-root
+      - name: sudo trusted-path (fails if sudo -n is missing)
+        run: |
+          set -eu
+          cargo test -p geode-cli --test run_cli --locked --features test-trusted-root -- --ignored pinned_sudo_trusted_path_runs --exact --nocapture | tee /tmp/pin-sudo.out
+          grep -q '1 passed' /tmp/pin-sudo.out
+      # Not a gate. Castle saw exit 2 here; record whether macos-latest does too.
+      - name: observe recipients_cli add_recipient_fail_closed
+        continue-on-error: true
+        run: cargo test -p geode-cli --test recipients_cli add_recipient_fail_closed --locked -- --nocapture

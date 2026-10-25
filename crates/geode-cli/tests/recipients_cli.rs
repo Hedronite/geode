@@ -20,13 +20,38 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-fn geode(dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_geode"))
-        .args(args)
-        .current_dir(dir)
+/// Identity and XDG lookups stay inside `dir`. No product setting is involved.
+fn isolate_test_env(cmd: &mut Command, dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let home = dir.join("home");
+    let xdg = dir.join("xdg");
+    for sub in [
+        home.clone(),
+        xdg.join("config"),
+        xdg.join("data"),
+        xdg.join("cache"),
+        xdg.join("runtime"),
+        xdg.join("state"),
+    ] {
+        std::fs::create_dir_all(&sub).unwrap_or_else(|e| panic!("{}: {e}", sub.display()));
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    cmd.env("HOME", &home)
+        .env("XDG_CONFIG_HOME", xdg.join("config"))
+        .env("XDG_DATA_HOME", xdg.join("data"))
+        .env("XDG_CACHE_HOME", xdg.join("cache"))
+        .env("XDG_STATE_HOME", xdg.join("state"))
+        .env("XDG_RUNTIME_DIR", xdg.join("runtime"))
+        .env("GEODE_KEY_FILE", home.join("identity.gkey"))
         .env_remove("GEODE_TOKEN")
-        .output()
-        .expect("spawn geode")
+        .env_remove("GEODE_PASSPHRASE");
+}
+
+fn geode(dir: &Path, args: &[&str]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_geode"));
+    cmd.args(args).current_dir(dir);
+    isolate_test_env(&mut cmd, dir);
+    cmd.output().expect("spawn geode")
 }
 
 fn assert_ok(out: &Output, what: &str) {
@@ -155,9 +180,12 @@ fn add_recipient_fail_closed() {
 
     // No --key: usage error, exit 1 — even with GEODE_TOKEN set (a token
     // never mints recipients).
-    let no_key = Command::new(env!("CARGO_BIN_EXE_geode"))
+    let mut no_key_cmd = Command::new(env!("CARGO_BIN_EXE_geode"));
+    no_key_cmd
         .args(["vault", "add-recipient", "v.geode", "--gpub", "bob.gpub"])
-        .current_dir(dir)
+        .current_dir(dir);
+    isolate_test_env(&mut no_key_cmd, dir);
+    let no_key = no_key_cmd
         .env("GEODE_TOKEN", "deadbeef")
         .output()
         .expect("spawn geode");

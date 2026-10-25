@@ -12,8 +12,12 @@
 //!
 //! Pin tests hash with `sha2` and exec through the existing hashed-fd path.
 //! Linux execs that fd. macOS has no `fexecve`; `geode-os` re-checks the
-//! inode in the child. These tests have no macOS-only branch. A `#!` source
-//! is refused by the pin check on Linux, so the fixture is a copy of `sh`.
+//! inode in the child. These tests have no macOS-only branch. A successful
+//! pin runs `geode-pin-helper`, a Cargo bin, not a copy of `/bin/sh`:
+//! macOS launch constraints SIGKILL a relocated platform binary. The
+//! success test injects a trust root under that bin (feature
+//! `test-trusted-root`). A root-owned install is `#[ignore]` and is not
+//! part of the default run.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -51,13 +55,10 @@ impl Fx {
 
     fn cmd(&self, args: &[&str]) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_geode"));
-        c.args(args)
-            .current_dir(&self.dir)
-            .env_remove("GEODE_TOKEN")
-            .env_remove("GEODE_KEY_FILE")
-            .env_remove("GEODE_PASSPHRASE")
+        c.args(args).current_dir(&self.dir);
+        isolate_test_env(&mut c, &self.dir);
+        c.env_remove("GEODE_PASSPHRASE")
             .env_remove("GEODE_FACET_EVENTS")
-            .env("XDG_STATE_HOME", self.dir.join("state"))
             .env("G6_PARENT_MARK", "parent-only");
         c
     }
@@ -110,6 +111,33 @@ impl Fx {
     fn touch_script(&self) -> String {
         format!("echo x > '{}'", self.marker().display())
     }
+}
+
+/// Point identity and XDG lookups at `dir`, never the caller's home.
+/// `XDG_STATE_HOME` stays `dir/state` so the audit DB path does not move.
+fn isolate_test_env(cmd: &mut Command, dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let home = dir.join("home");
+    let xdg = dir.join("xdg");
+    for sub in [
+        home.clone(),
+        xdg.join("config"),
+        xdg.join("data"),
+        xdg.join("cache"),
+        xdg.join("runtime"),
+        dir.join("state"),
+    ] {
+        std::fs::create_dir_all(&sub).unwrap_or_else(|e| panic!("{}: {e}", sub.display()));
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    cmd.env("HOME", &home)
+        .env("XDG_CONFIG_HOME", xdg.join("config"))
+        .env("XDG_DATA_HOME", xdg.join("data"))
+        .env("XDG_CACHE_HOME", xdg.join("cache"))
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("XDG_RUNTIME_DIR", xdg.join("runtime"))
+        .env("GEODE_KEY_FILE", home.join("identity.gkey"))
+        .env_remove("GEODE_TOKEN");
 }
 
 /// Resolve `name` on PATH and canonicalize it, as the plan does.
@@ -689,12 +717,248 @@ fn run_help_documents_pinning() {
     assert!(text.contains("sha256"), "{text}");
     assert!(text.contains("args_prefix"), "{text}");
     assert!(text.contains("allow-cmds-file"), "{text}");
+    assert!(text.contains("require-pin"), "{text}");
+    assert!(text.contains("require_pin"), "{text}");
+    assert!(text.contains("owned by root"), "{text}");
+}
+
+/// Cargo fixture. Not a copy of a platform shell.
+///
+/// Stable Cargo exports `CARGO_BIN_EXE_<bin>` with the hyphen kept.
+/// Older Cargo rewrote hyphens to underscores. Accept either.
+fn pin_helper() -> PathBuf {
+    let raw = option_env!("CARGO_BIN_EXE_geode-pin-helper")
+        .or(option_env!("CARGO_BIN_EXE_geode_pin_helper"))
+        .expect("CARGO_BIN_EXE for geode-pin-helper");
+    std::fs::canonicalize(raw).unwrap()
+}
+
+/// Root-owned copy of `geode-pin-helper` for the ignored sudo test only.
+/// Default tests do not call this. A missing anchor fails the test.
+struct InstalledPin {
+    dir: PathBuf,
+    bin: PathBuf,
+}
+
+impl InstalledPin {
+    fn place() -> Self {
+        let src = pin_helper();
+        let mut errors = Vec::new();
+        for anchor in [Path::new("/usr/local"), Path::new("/opt")] {
+            if !component_is_trusted(anchor) {
+                errors.push(format!("{} is not a trusted anchor", anchor.display()));
+                continue;
+            }
+            let dir = anchor.join(format!("geode-pin-fixture-{}", std::process::id()));
+            let bin = dir.join("geode-pin-helper");
+            match install_pin(&src, &dir, &bin) {
+                Ok(()) => return Self { dir, bin },
+                Err(e) => {
+                    remove_pin(&dir, &bin);
+                    errors.push(e);
+                }
+            }
+        }
+        panic!(
+            "could not install geode-pin-helper on a trusted path (need passwordless sudo):\n{}",
+            errors.join("\n")
+        );
+    }
+}
+
+impl Drop for InstalledPin {
+    fn drop(&mut self) {
+        remove_pin(&self.dir, &self.bin);
+    }
+}
+
+fn component_is_trusted(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    !meta.file_type().is_symlink() && meta.uid() == 0 && meta.mode() & 0o022 == 0
+}
+
+fn tree_is_trusted(bin: &Path) -> Result<(), String> {
+    let canon = std::fs::canonicalize(bin).map_err(|e| e.to_string())?;
+    let mut cur = PathBuf::new();
+    for c in canon.components() {
+        match c {
+            std::path::Component::RootDir => cur.push("/"),
+            std::path::Component::Normal(seg) => cur.push(seg),
+            _ => return Err(format!("{} is not absolute", canon.display())),
+        }
+        if !component_is_trusted(&cur) {
+            return Err(format!("{} is not trusted", cur.display()));
+        }
+    }
+    Ok(())
+}
+
+fn euid_is_root() -> bool {
+    let out = Command::new("id")
+        .arg("-u")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn id -u");
+    assert!(
+        out.status.success(),
+        "id -u failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let uid = String::from_utf8(out.stdout).expect("uid");
+    match uid.trim() {
+        "0" => true,
+        other if other.chars().all(|c| c.is_ascii_digit()) && !other.is_empty() => false,
+        other => panic!("bad uid {other}"),
+    }
+}
+
+fn run_as_root(args: &[&str]) -> Result<(), String> {
+    let (program, rest) = args.split_first().expect("argv");
+    let mut cmd = if euid_is_root() {
+        Command::new(program)
+    } else {
+        let mut c = Command::new("sudo");
+        c.arg("-n").arg(program);
+        c
+    };
+    let out = cmd
+        .args(rest)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("{program}: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr).trim()
+    ))
+}
+
+fn install_pin(src: &Path, dir: &Path, bin: &Path) -> Result<(), String> {
+    let src_s = src.to_str().expect("utf8 pin helper");
+    let dir_s = dir.to_str().expect("utf8 fixture dir");
+    let bin_s = bin.to_str().expect("utf8 fixture bin");
+    run_as_root(&["install", "-d", "-m", "755", dir_s])?;
+    run_as_root(&["install", "-m", "755", src_s, bin_s])?;
+    // A copy keeps an ad-hoc signature. Re-sign on macOS so AMFI accepts
+    // the installed image. This is not a platform signature, so launch
+    // constraints do not apply. The pin hashes the bytes after this.
+    if cfg!(target_os = "macos") {
+        run_as_root(&["codesign", "--force", "--sign", "-", bin_s])?;
+    }
+    tree_is_trusted(bin)
+}
+
+fn pin_paths_ok(dir: &Path, bin: &Path) -> bool {
+    let Some(name) = dir.file_name().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    if !name.starts_with("geode-pin-fixture-") {
+        return false;
+    }
+    let Some(parent) = dir.parent() else {
+        return false;
+    };
+    if parent != Path::new("/usr/local") && parent != Path::new("/opt") {
+        return false;
+    }
+    bin.parent() == Some(dir) && bin.file_name().is_some_and(|n| n == "geode-pin-helper")
+}
+
+fn remove_pin(dir: &Path, bin: &Path) {
+    if !pin_paths_ok(dir, bin) {
+        return;
+    }
+    let bin_s = bin.to_str().unwrap();
+    let dir_s = dir.to_str().unwrap();
+    let _ = run_as_root(&["rm", "-f", bin_s]);
+    let _ = run_as_root(&["rmdir", dir_s]);
+}
+
+/// Canonical `/tmp`. macOS resolves the symlink to `/private/tmp`.
+/// Fails if `/tmp` cannot be resolved, is some other directory, or
+/// cannot be written.
+fn canonical_sticky_tmp() -> PathBuf {
+    let canon =
+        std::fs::canonicalize("/tmp").unwrap_or_else(|e| panic!("cannot canonicalize /tmp: {e}"));
+    assert!(
+        canon == Path::new("/tmp") || canon == Path::new("/private/tmp"),
+        "/tmp canonicalized to {}, not /tmp or /private/tmp",
+        canon.display()
+    );
+    let probe = canon.join(format!(".geode-tmp-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"x").unwrap_or_else(|e| panic!("cannot write /tmp: {e}"));
+    std::fs::remove_file(&probe).unwrap_or_else(|e| panic!("cannot remove /tmp probe: {e}"));
+    canon
+}
+
+fn assert_pinned_ok(fx: &Fx, output: &Output, tool: &str, what: &str) {
+    assert_eq!(code(output), Some(0), "{}", err(output));
+    assert_eq!(out(output), "ok");
+    assert_no_dummy(output, what);
+    let (outcome, _, argv0, exit_code, _) = fx.rows().last().unwrap().clone();
+    assert_eq!(outcome, "spawned");
+    assert_eq!(argv0, tool);
+    assert_eq!(exit_code, Some(0));
+}
+
+/// Copy the Cargo helper into a 0755 directory owned by this uid.
+fn stage_helper(dir: &Path) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = dir.join("pin-root");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let dest = root.join("geode-pin-helper");
+    std::fs::copy(pin_helper(), &dest).expect("copy pin helper");
+    std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if cfg!(target_os = "macos") {
+        let status = Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&dest)
+            .status()
+            .expect("codesign");
+        assert!(status.success(), "ad-hoc sign of the staged helper failed");
+    }
+    (
+        std::fs::canonicalize(&root).unwrap(),
+        std::fs::canonicalize(&dest).unwrap(),
+    )
+}
+
+fn current_uid() -> String {
+    let out = Command::new("id").arg("-u").output().expect("spawn id -u");
+    assert!(
+        out.status.success(),
+        "id -u failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let uid = String::from_utf8(out.stdout)
+        .expect("uid")
+        .trim()
+        .to_owned();
+    assert!(
+        !uid.is_empty() && uid.chars().all(|c| c.is_ascii_digit()),
+        "bad uid {uid}"
+    );
+    uid
 }
 
 #[test]
 fn pinned_matching_command_runs() {
     let fx = Fx::new();
-    let tool = copy_exec(&fx.dir, "tool", Path::new(&fx.sh));
+    // geode-pin-helper, not a relocated /bin/sh. Apple's launch constraints
+    // SIGKILL a copied platform binary (CODESIGNING, com.apple.sh,
+    // platform identifier 26). The Cargo target path is not root-owned, so
+    // the same bytes are staged under a directory this test names as the
+    // trust root, with this process's uid. No sudo.
+    let (root, tool) = stage_helper(&fx.dir);
+    let uid = current_uid();
+    let root_s = root.to_str().unwrap().to_owned();
     let tool_s = tool.to_str().unwrap().to_owned();
     let sum = sha256_hex(&tool);
     let spec = serde_json::json!({
@@ -704,16 +968,19 @@ fn pinned_matching_command_runs() {
     })
     .to_string();
     let inline = fx.run(
-        &["--allow-cmd", &spec, "--secret", "KEY=cfg/dummy.env"],
+        &[
+            "--test-trusted-root",
+            &root_s,
+            "--test-trusted-uid",
+            &uid,
+            "--allow-cmd",
+            &spec,
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
         &[&tool_s, "-c", "printf ok"],
     );
-    assert_eq!(code(&inline), Some(0), "{}", err(&inline));
-    assert_eq!(out(&inline), "ok");
-    assert_no_dummy(&inline, "pinned inline");
-    let (outcome, _, argv0, exit_code, _) = fx.rows().last().unwrap().clone();
-    assert_eq!(outcome, "spawned");
-    assert_eq!(argv0, tool_s);
-    assert_eq!(exit_code, Some(0));
+    assert_pinned_ok(&fx, &inline, &tool_s, "pinned inline");
 
     write_pins(
         &fx.dir,
@@ -725,6 +992,10 @@ fn pinned_matching_command_runs() {
     );
     let from_file = fx.run(
         &[
+            "--test-trusted-root",
+            &root_s,
+            "--test-trusted-uid",
+            &uid,
             "--allow-cmds-file",
             "pins.json",
             "--secret",
@@ -732,16 +1003,134 @@ fn pinned_matching_command_runs() {
         ],
         &[&tool_s, "-c", "printf ok"],
     );
-    assert_eq!(code(&from_file), Some(0), "{}", err(&from_file));
-    assert_eq!(out(&from_file), "ok");
-    assert_no_dummy(&from_file, "pinned file");
+    assert_pinned_ok(&fx, &from_file, &tool_s, "pinned file");
+}
+
+/// Real root-owned install. Not part of `cargo test` or nextest.
+/// `pin-macos` runs it with `--ignored` and this name. Missing `sudo -n`
+/// fails the test.
+#[test]
+#[ignore = "passwordless sudo; pin-macos runs it with --ignored"]
+fn pinned_sudo_trusted_path_runs() {
+    let sudo = Command::new("sudo").args(["-n", "true"]).status();
+    assert!(
+        sudo.as_ref().ok().is_some_and(|s| s.success()),
+        "sudo -n is unavailable: {sudo:?}"
+    );
+    let fx = Fx::new();
+    let installed = InstalledPin::place();
+    let tool = std::fs::canonicalize(&installed.bin).unwrap();
+    let tool_s = tool.to_str().unwrap().to_owned();
+    let sum = sha256_hex(&tool);
+    let spec = serde_json::json!({
+        "path": tool_s,
+        "sha256": sum,
+        "args_prefix": ["-c", "printf ok"],
+    })
+    .to_string();
+    let o = fx.run(
+        &["--allow-cmd", &spec, "--secret", "KEY=cfg/dummy.env"],
+        &[&tool_s, "-c", "printf ok"],
+    );
+    assert_pinned_ok(&fx, &o, &tool_s, "sudo pin");
+}
+
+#[test]
+fn pinned_cargo_target_is_refused() {
+    let fx = Fx::new();
+    let tool = pin_helper();
+    let tool_s = tool.to_str().unwrap().to_owned();
+    let spec = serde_json::json!({
+        "path": tool_s,
+        "sha256": sha256_hex(&tool),
+        "args_prefix": ["-c", "printf ok"],
+    })
+    .to_string();
+    let o = fx.run(
+        &["--allow-cmd", &spec, "--secret", "KEY=cfg/dummy.env"],
+        &[&tool_s, "-c", "printf ok"],
+    );
+    assert_eq!(code(&o), Some(3), "{}", err(&o));
+    assert!(err(&o).contains("trusted path"), "{}", err(&o));
+    assert!(out(&o).is_empty(), "{}", out(&o));
+    assert_eq!(fx.rows().last().unwrap().0, "policy_deny");
+}
+
+fn assert_real_pin_refused(tool: &Path) {
+    let fx = Fx::new();
+    let tool_s = tool.to_str().expect("utf8").to_owned();
+    let spec = serde_json::json!({
+        "path": tool_s,
+        "sha256": sha256_hex(tool),
+        "args_prefix": ["-c", "printf ok"],
+    })
+    .to_string();
+    let o = fx.run(
+        &["--allow-cmd", &spec, "--secret", "KEY=cfg/dummy.env"],
+        &[&tool_s, "-c", "printf ok"],
+    );
+    assert_ne!(code(&o), Some(0), "untrusted pin ran: {}", err(&o));
+    assert_ne!(out(&o), "ok");
+    assert!(
+        err(&o).contains("trusted path")
+            || err(&o).contains("symlink")
+            || err(&o).contains("canonical"),
+        "{}",
+        err(&o)
+    );
+    assert!(!fx.marker().exists(), "untrusted pin spawned");
+}
+
+#[test]
+fn pinned_user_tmp_writable_and_symlink_are_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    // `$TMPDIR` on a macOS runner is `/var/folders/.../T`, not `/tmp`.
+    let canon_tmp = canonical_sticky_tmp();
+    let base = canon_tmp.join(format!("geode-pin-neg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+
+    let user = base.join("user");
+    std::fs::create_dir(&user).unwrap();
+    std::fs::set_permissions(&user, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let user_bin = user.join("geode-pin-helper");
+    std::fs::copy(pin_helper(), &user_bin).unwrap();
+    std::fs::set_permissions(&user_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_real_pin_refused(&std::fs::canonicalize(&user_bin).unwrap());
+
+    let in_tmp = canon_tmp.join(format!("geode-pin-tmp-{}", std::process::id()));
+    std::fs::copy(pin_helper(), &in_tmp).unwrap();
+    std::fs::set_permissions(&in_tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_real_pin_refused(&std::fs::canonicalize(&in_tmp).unwrap());
+    std::fs::remove_file(&in_tmp).unwrap();
+
+    for mode in [0o775_u32, 0o777] {
+        let anc = base.join(format!("m{mode:o}"));
+        std::fs::create_dir(&anc).unwrap();
+        std::fs::set_permissions(&anc, std::fs::Permissions::from_mode(mode)).unwrap();
+        let bin = anc.join("geode-pin-helper");
+        std::fs::copy(pin_helper(), &bin).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_real_pin_refused(&std::fs::canonicalize(&bin).unwrap());
+    }
+
+    let real = base.join("real");
+    std::fs::create_dir(&real).unwrap();
+    let real_bin = real.join("geode-pin-helper");
+    std::fs::copy(pin_helper(), &real_bin).unwrap();
+    std::fs::set_permissions(&real_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let link = base.join("via");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert_real_pin_refused(&link.join("geode-pin-helper"));
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[test]
 fn pinned_wrong_digest_refused() {
     let fx = Fx::new();
-    let tool = copy_exec(&fx.dir, "tool", Path::new(&fx.sh));
-    let tool_s = tool.to_str().unwrap().to_owned();
+    // The real shell, not a copy: the path is trusted, so the refusal is
+    // the digest and the child never starts.
+    let tool_s = fx.sh.clone();
     let touch = fx.touch_script();
     write_pins(
         &fx.dir,
@@ -946,4 +1335,136 @@ fn symlink_swap_refused() {
     assert!(!err(&o).contains("touch"), "{}", err(&o));
     assert_no_dummy(&o, "symlink swap");
     assert!(!marker.exists(), "symlink swap spawned");
+}
+
+#[test]
+fn require_pin_refuses_unpinned_rules_and_off_allows_them() {
+    let fx = Fx::new();
+    let allow = fx.allow_sh();
+    let touch = fx.touch_script();
+
+    let denied = fx.run(
+        &[
+            "--require-pin",
+            allow[0],
+            allow[1],
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
+        &["sh", "-c", &touch],
+    );
+    assert_eq!(code(&denied), Some(1), "{}", err(&denied));
+    assert!(err(&denied).contains("require-pin"), "{}", err(&denied));
+    assert!(err(&denied).contains("sha256"), "{}", err(&denied));
+    assert!(err(&denied).contains(&fx.sh), "{}", err(&denied));
+    assert_no_dummy(&denied, "require-pin flag");
+    assert!(!fx.marker().exists(), "require-pin spawned");
+    assert!(!fx.db().exists(), "require-pin reached the audit db");
+
+    // The file setting turns the same check on without the flag.
+    std::fs::write(
+        fx.dir.join("pins.json"),
+        br#"{"require_pin":true,"cmds":[]}"#,
+    )
+    .unwrap();
+    let from_file = fx.run(
+        &[
+            "--allow-cmds-file",
+            "pins.json",
+            allow[0],
+            allow[1],
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
+        &["sh", "-c", &touch],
+    );
+    assert_eq!(code(&from_file), Some(1), "{}", err(&from_file));
+    assert!(
+        err(&from_file).contains("require-pin"),
+        "{}",
+        err(&from_file)
+    );
+    assert!(!fx.marker().exists(), "require_pin in the file spawned");
+
+    // Off: a bare path still runs.
+    let allowed = fx.run(
+        &[allow[0], allow[1], "--secret", "KEY=cfg/dummy.env"],
+        &["sh", "-c", "true"],
+    );
+    assert_eq!(code(&allowed), Some(0), "{}", err(&allowed));
+
+    std::fs::write(
+        fx.dir.join("pins.json"),
+        br#"{"require_pin":false,"cmds":[]}"#,
+    )
+    .unwrap();
+    let file_off = fx.run(
+        &[
+            "--allow-cmds-file",
+            "pins.json",
+            allow[0],
+            allow[1],
+            "--secret",
+            "KEY=cfg/dummy.env",
+        ],
+        &["sh", "-c", "true"],
+    );
+    assert_eq!(code(&file_off), Some(0), "{}", err(&file_off));
+}
+
+#[test]
+fn missing_or_unreadable_allow_cmds_file_does_not_spawn() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fx::new();
+    let touch = fx.touch_script();
+    let secret = ["--secret", "KEY=cfg/dummy.env"];
+
+    let missing = fx.run(
+        &[
+            "--allow-cmds-file",
+            "no-such-pins.json",
+            secret[0],
+            secret[1],
+        ],
+        &["sh", "-c", &touch],
+    );
+    assert_eq!(code(&missing), Some(1), "{}", err(&missing));
+    let missing_err = err(&missing);
+    assert!(missing_err.contains("allow-cmds-file"), "{missing_err}");
+    assert!(missing_err.contains("no-such-pins.json"), "{missing_err}");
+    assert_no_dummy(&missing, "missing allow-cmds-file");
+    assert!(!fx.marker().exists(), "missing allow-cmds-file spawned");
+    assert!(!fx.db().exists(), "missing file opened the audit db");
+
+    // A directory cannot be read as the file. Fails closed for every uid.
+    std::fs::create_dir(fx.dir.join("pins-dir")).unwrap();
+    let dir = fx.run(
+        &["--allow-cmds-file", "pins-dir", secret[0], secret[1]],
+        &["sh", "-c", &touch],
+    );
+    assert_eq!(code(&dir), Some(1), "{}", err(&dir));
+    assert!(err(&dir).contains("allow-cmds-file"), "{}", err(&dir));
+    assert_no_dummy(&dir, "directory allow-cmds-file");
+    assert!(!fx.marker().exists(), "unreadable allow-cmds-file spawned");
+
+    let mode000 = fx.dir.join("pins-000.json");
+    std::fs::write(&mode000, b"[]").unwrap();
+    std::fs::set_permissions(&mode000, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unreadable = fx.run(
+        &["--allow-cmds-file", "pins-000.json", secret[0], secret[1]],
+        &["sh", "-c", &touch],
+    );
+    std::fs::set_permissions(&mode000, std::fs::Permissions::from_mode(0o644)).unwrap();
+    if std::fs::read(&mode000).is_ok() && unreadable.status.success() {
+        // Root ignores mode 000. The directory case above already failed closed.
+        return;
+    }
+    assert_eq!(code(&unreadable), Some(1), "{}", err(&unreadable));
+    assert!(
+        err(&unreadable).contains("allow-cmds-file"),
+        "{}",
+        err(&unreadable)
+    );
+    assert_no_dummy(&unreadable, "mode 000 allow-cmds-file");
+    assert!(!fx.marker().exists(), "mode 000 allow-cmds-file spawned");
 }

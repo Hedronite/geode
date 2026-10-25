@@ -44,7 +44,10 @@ const DEFAULT_TIMEOUT_SECS: u64 = 120;
 /// against `PATH`, canonicalized, and must match an `--allow-cmd`.
 /// A bare path does not pin. A JSON object, or a rule in `--allow-cmds-file`,
 /// pins `{path, sha256, args_prefix}` and is checked against the fd that
-/// exec runs. Every binding must pass policy, or nothing runs. The child
+/// exec runs. `--require-pin`, or `"require_pin": true` in that file,
+/// rejects a rule with no sha256. A pin is refused unless the binary and
+/// every ancestor up to `/` is owned by root, not group- or other-writable,
+/// and not a symlink. Every binding must pass policy, or nothing runs. The child
 /// gets a fresh env: `PATH`, `HOME`, `LANG`, `TERM`, then the bindings. It
 /// never gets `GEODE_TOKEN`.
 ///
@@ -93,17 +96,36 @@ pub struct RunArgs {
     /// uppercase is accepted and stored lowercase). `args_prefix` is the
     /// required leading arguments after the program and may be omitted or
     /// empty. A relative path, or a path that is not canonical, is refused.
-    /// The digest is read from the fd that exec runs.
+    /// The digest is read from the fd that exec runs. A pin is refused
+    /// unless that file and every ancestor up to `/` is owned by root, not
+    /// group- or other-writable, and not a symlink. The error names the
+    /// component that failed.
     #[arg(long = "allow-cmd", value_name = "PATH|JSON")]
     pub allow_cmd: Vec<String>,
     /// JSON list of pinned commands. Each object is
     /// `{"path":"/abs/exe","sha256":"<64 hex>","args_prefix":["…"]}`.
     /// `path` must be absolute and canonical. `sha256` is required.
     /// `args_prefix` may be omitted. Combined with `--allow-cmd`.
-    /// On macOS the hashed fd cannot be exec'd; the child re-checks the
-    /// path against that fd immediately before exec.
+    /// An object `{"require_pin":true,"cmds":[…]}` is that list plus the
+    /// require-pin setting (`require_pin` defaults to false). A list leaves
+    /// require-pin off. On macOS the hashed fd cannot be exec'd; the child
+    /// re-checks the path against that fd immediately before exec.
     #[arg(long, value_name = "FILE")]
     pub allow_cmds_file: Option<PathBuf>,
+    /// Refuse an allow rule that has no sha256 pin, including a bare
+    /// `--allow-cmd PATH`. `"require_pin": true` in `--allow-cmds-file`
+    /// does the same. Off by default, so a bare path still runs.
+    #[arg(long)]
+    pub require_pin: bool,
+    /// Test-only. Compiled out of release builds. Both this and
+    /// `test_trusted_uid` are required together; production runs pass neither.
+    #[cfg(feature = "test-trusted-root")]
+    #[arg(long, hide = true, value_name = "DIR")]
+    pub test_trusted_root: Option<PathBuf>,
+    /// Uid that must own `test_trusted_root` and every component under it.
+    #[cfg(feature = "test-trusted-root")]
+    #[arg(long, hide = true, value_name = "UID")]
+    pub test_trusted_uid: Option<u32>,
     /// Seconds before SIGTERM; SIGKILL follows 2 seconds later.
     #[arg(long, value_name = "SECS", default_value_t = DEFAULT_TIMEOUT_SECS)]
     pub timeout: u64,
@@ -236,6 +258,14 @@ fn preflight(args: &RunArgs) -> Result<(Vec<BindingSpec>, Vec<CmdRule>), Refusal
         ));
     }
     let bindings = parse_bindings(&args.secret)?;
+    let cmds = load_run_cmds(args)?;
+    Ok((bindings, cmds))
+}
+
+/// Allow rules from `--allow-cmd` and `--allow-cmds-file`. When require-pin
+/// is on (flag or file), a rule with no sha256 is a usage error here, before
+/// any key is read and before a child can start.
+fn load_run_cmds(args: &RunArgs) -> Result<Vec<CmdRule>, Refusal> {
     let mut cmds: Vec<CmdRule> = Vec::new();
     for raw in &args.allow_cmd {
         let rule = cmd::agent::parse_allow_cmd_arg(raw)
@@ -244,16 +274,27 @@ fn preflight(args: &RunArgs) -> Result<(Vec<BindingSpec>, Vec<CmdRule>), Refusal
             cmds.push(rule);
         }
     }
+    let mut require_pin = args.require_pin;
     if let Some(file) = &args.allow_cmds_file {
-        for rule in cmd::agent::read_pinned_cmds_file(file)
-            .map_err(|e| refuse(exit::USAGE, "usage", error_text(&e)))?
-        {
+        let parsed = cmd::agent::read_pinned_cmds_file(file)
+            .map_err(|e| refuse(exit::USAGE, "usage", error_text(&e)))?;
+        require_pin |= parsed.require_pin;
+        for rule in parsed.rules {
             if !cmds.contains(&rule) {
                 cmds.push(rule);
             }
         }
     }
-    Ok((bindings, cmds))
+    if require_pin {
+        if let Some(rule) = cmds.iter().find(|r| r.sha256.is_none()) {
+            return Err(refuse(
+                exit::USAGE,
+                "usage",
+                format!("require-pin: allow-cmd '{}' has no sha256 pin", rule.path),
+            ));
+        }
+    }
+    Ok(cmds)
 }
 
 fn error_text(e: &Error) -> String {
@@ -333,20 +374,43 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         custody: false,
         hosts: inject::hosts_label(&[]),
     };
-    let mut plan = match inject::plan(
-        &caller,
-        &view,
-        &PlanRequest {
-            bindings: &bindings,
-            argv: &args.command,
-            base_path: base_path.as_deref(),
-            no_redact: args.no_redact,
-        },
-    ) {
+    let request = PlanRequest {
+        bindings: &bindings,
+        argv: &args.command,
+        base_path: base_path.as_deref(),
+        no_redact: args.no_redact,
+    };
+    let mut plan = match plan_run(args, &caller, &view, &request) {
         Ok(p) => p,
         Err(e) => return Err(plan_refusal(&mut chain, &row, e)),
     };
     execute(args, out, &mut plan, &mut chain, &row)
+}
+
+/// Production `plan`, or the test root when that feature is compiled in.
+fn plan_run<'a>(
+    args: &RunArgs,
+    caller: &Caller<'a>,
+    view: &VaultView<'a>,
+    request: &PlanRequest<'a>,
+) -> Result<inject::Plan, PlanError> {
+    #[cfg(feature = "test-trusted-root")]
+    {
+        match (args.test_trusted_root.as_deref(), args.test_trusted_uid) {
+            (None, None) => inject::plan(caller, view, request),
+            (Some(root), Some(uid)) => {
+                inject::plan_with_test_root(caller, view, request, root, uid)
+            }
+            _ => Err(PlanError::Usage(
+                "test-trusted-root and test-trusted-uid must be set together".into(),
+            )),
+        }
+    }
+    #[cfg(not(feature = "test-trusted-root"))]
+    {
+        let _ = args;
+        inject::plan(caller, view, request)
+    }
 }
 
 /// Fields every audit row of one run shares. Local runs are
