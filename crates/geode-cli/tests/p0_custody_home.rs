@@ -105,7 +105,7 @@ fn broken_rules(text: &str) -> BTreeSet<&'static str> {
         }
     }
 
-    let hosts = values(&args, "--allow-hosts");
+    let hosts = values(&args, "--allow-host");
     if hosts.is_empty()
         || hosts.iter().any(|host| {
             host.is_empty()
@@ -116,7 +116,7 @@ fn broken_rules(text: &str) -> BTreeSet<&'static str> {
                     .any(|c| c.is_ascii_whitespace() || c == '/' || c == '@')
         })
     {
-        bad.insert("allow-hosts");
+        bad.insert("allow-host");
     }
 
     let cmds = values(&args, "--allow-cmd");
@@ -124,7 +124,10 @@ fn broken_rules(text: &str) -> BTreeSet<&'static str> {
         [raw] => match serde_json::from_str::<serde_json::Value>(raw) {
             Ok(serde_json::Value::Object(obj)) => {
                 let path = obj.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if !Path::new(path).is_absolute() || path.contains("..") {
+                if !Path::new(path).is_absolute()
+                    || path.contains("..")
+                    || !path.starts_with("/usr/local/libexec/hedronite/")
+                {
                     bad.insert("allow-cmd-path");
                 }
                 let sha = obj.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
@@ -184,11 +187,11 @@ fn each_broken_rule_fails() {
         ("home-absolute", "/var/empty/geode-facet-home", "rel/home"),
         ("home-is-caller", "/var/empty/geode-facet-home", caller.as_str()),
         ("dollar-home", "/var/empty/geode-facet-home", "$HOME"),
-        ("allow-hosts", "--allow-hosts\napi.example.test\n", ""),
+        ("allow-host", "--allow-host\napi.example.test\n", ""),
         (
             "allow-cmd-json",
-            "{\"path\":\"/usr/local/bin/facet\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"args_prefix\":[\"request\",\"run\",\"--no-record\"]}",
-            "/usr/local/bin/facet",
+            "{\"path\":\"/usr/local/libexec/hedronite/facet\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"args_prefix\":[\"request\",\"run\",\"--no-record\"]}",
+            "/usr/local/libexec/hedronite/facet",
         ),
         (
             "allow-cmd-sha256",
@@ -202,8 +205,13 @@ fn each_broken_rule_fails() {
         ),
         (
             "allow-cmd-path",
-            "\"path\":\"/usr/local/bin/facet\"",
+            "\"path\":\"/usr/local/libexec/hedronite/facet\"",
             "\"path\":\"rel/facet\"",
+        ),
+        (
+            "allow-cmd-path",
+            "\"path\":\"/usr/local/libexec/hedronite/facet\"",
+            "\"path\":\"/usr/local/bin/facet\"",
         ),
         (
             "facet-secret-key",
