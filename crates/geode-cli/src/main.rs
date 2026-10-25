@@ -161,6 +161,9 @@ enum Commands {
     ///
     /// Needs your key, and refuses a token. Put the command after `--`.
     /// Output is redacted. Redaction does not stop a hostile command.
+    /// Pin the program with `--allow-cmd` JSON or `--allow-cmds-file`
+    /// (`path`, `sha256`, `args_prefix`). A bare `--allow-cmd PATH` does
+    /// not pin. A pin is hashed from the fd that exec runs.
     Run(cmd::run::RunArgs),
     /// Audit log: verify the append-only hash chain.
     Audit(cmd::audit::AuditArgs),

@@ -1027,6 +1027,7 @@ dependencies = [
  "secrecy",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "tempfile",
  "walkdir",
  "x25519-dalek",

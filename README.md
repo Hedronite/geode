@@ -186,9 +186,27 @@ geode --key ./demo.gkey run --vault ./vault.geode \
   -- deploy --env prod
 ```
 
+The same command, pinned:
+
+```sh
+geode --key ./demo.gkey run --vault ./vault.geode \
+  --secret API_KEY=keys/api \
+  --allow-cmd '{"path":"/usr/local/bin/deploy","sha256":"<64 hex>","args_prefix":["--env","prod"]}' \
+  -- deploy --env prod
+```
+
 The program reads `API_KEY` from its own environment. Do not write `$API_KEY` on the command line: your shell expands it before Geode runs, and Geode refuses any argument that contains a bound value.
 
 - The command must be listed with `--allow-cmd`. With none listed, nothing runs. The child gets a fresh environment: `PATH`, `HOME`, `LANG`, `TERM`, and the bindings. It never gets `GEODE_TOKEN`.
+- A bare `--allow-cmd /absolute/canonical/path` allows that program with no digest check. To pin the bytes that run, pass one JSON object to `--allow-cmd`, or a JSON list to `--allow-cmds-file`:
+
+  ```json
+  {"path":"/usr/local/bin/deploy","sha256":"<64 hex>","args_prefix":["--env","prod"]}
+  ```
+
+  `path` is an absolute canonical executable. A relative path, or a symlink that resolves to a different file, is refused. `sha256` is the SHA-256 of that file and is required on this form (lowercase hex; uppercase is accepted). `args_prefix` is the required leading arguments after the program. It may be empty or omitted, and then any arguments are allowed. The first matching pin is the one that runs, and an empty prefix matches every argument list.
+- Geode opens the pinned file once, hashes that file descriptor, and execs the same descriptor. A file swapped in after the check is not what runs. On macOS there is no `fexecve`; the child re-checks the path against the hashed file immediately before exec, which is the same residual window as a pinned custody command.
+- A pinned run is refused when the resolved program is not pinned, the opened file's digest does not match, the arguments do not start with `args_prefix`, or the path is relative or resolves through a symlink to a different file. The error names the path. It does not print a secret, the digest of a secret, or the argument list.
 - Stdout carries only the child's redacted output. Stderr names which bindings were injected and never prints their values. A copy of a bound value in the output becomes `[REDACTED:NAME]`.
 - Redaction catches the raw value and its base64, hex, percent-encoded, and JSON-string forms. It does not catch shell quoting or any other transform. **Redaction stops accidents. It does not stop a hostile command.**
 - Local `geode run` needs your key and refuses a token.

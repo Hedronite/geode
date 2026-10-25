@@ -3,7 +3,7 @@ title: Geode changelog
 type: repo-changelog
 status: current
 created: "2026-09-15"
-updated: "2026-10-22"
+updated: "2026-10-25"
 related:
   - "[[foundry/geode/geode-spec-0.0.0/SPEC]]"
   - "[[foundry/geode/geode-spec-0.0.0/12-roadmap]]"
@@ -38,6 +38,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 - `--hook` exits 2 on any finding, 0 when clean, and 1 on any error. An unreadable file, a file larger than `--max-bytes` (default 16 MiB), a symlink that resolves outside its scan root, and a special file are errors, not skips.
 - The allowlist (`--allow FILE`, default `.geode/scan-allow`) holds fingerprints only, one per line. Output reports how many findings it suppressed. `scan.key`, the default identity key, the `--key` in use, and any `default.gkey` inside a scan root are always findings (rule `geode-key-file`) and cannot be allowlisted.
 - `geode agent token issue --run-only` sets `kind: run`. The token may list, inject, and hash-read. The issuer rejects `read` on it. Text or hex is `plaintext_denied` before the object is opened. A token with no `kind` stays a full token. Suite `0x01` is unchanged.
+- `geode run` accepts a sha256 pin on `--allow-cmd` and `--allow-cmds-file`. A pin is `{"path","sha256","args_prefix"}`. `path` is an absolute canonical executable. `sha256` is the lowercase hex digest of that file (uppercase hex is accepted and stored lowercase) and is required on the pin form. `args_prefix` is the required leading arguments after the program and may be empty or omitted. A bare `--allow-cmd PATH` is unchanged and does not pin. `token issue --allow-cmds-file` still treats `sha256` as optional.
 
 ### Changed
 
@@ -54,6 +55,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 - Pinned `#!` scripts on Linux now fail with `is a #! script; a sha256 pin needs a binary`. `fexecve` cannot start a script from an `O_CLOEXEC` fd, and Geode will not hand the child an inheritable fd. Pin the interpreter and put the script in `args_prefix`.
 - macOS has no `fexecve`. The child checks, just before it execs the path, that the path and the hashed fd still match the device, inode, size, and mtime recorded before the hash. A pinned program writable by group or other is refused. Residual risk: a swap that lands between that check and the kernel's open at exec still wins. Under `ChildIdentity::Seatbelt`, `sandbox-exec` opens the path later still.
 - The published API is unchanged. `inject::Plan.exe` is still `pub exe: String`, and `geode_os::SpawnSpec` keeps its six fields. Two additions carry the pin. `Plan::take_pin()` hands over the hashed fd and its `fstat`. `geode_os::spawn_with_pin(spec, pin, identity, allow_hosts, on_chunk)` takes it as a `PinnedExe`. `spawn`, `spawn_as`, and `spawn_with` keep their signatures and exec by path.
+- A pinned `geode run` refuses to start when the resolved command is not pinned, the opened file's sha256 does not match, the arguments do not start with `args_prefix`, or the path is relative or resolves through a symlink to a different file. The digest is the hash of the same fd Linux execs. macOS still has no `fexecve`; a pinned run there uses the existing last-moment device, inode, size, and mtime check, and a group- or world-writable pin is refused. An unpinned rule for a path cannot bypass a pin for that path. Errors name the path only and do not print a secret value or the argument list.
 
 ## [1.2.1] — 2026-10-15
 
