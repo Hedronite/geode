@@ -408,7 +408,7 @@ fn append(
     argv: ArgvCommit,
     exit_code: Option<i32>,
     hits: BTreeMap<String, u64>,
-) {
+) -> Result<(), Refusal> {
     let input = AuditInput {
         ts: now(),
         token_id: row.token_id.clone(),
@@ -425,9 +425,24 @@ fn append(
         hosts: row.hosts.clone(),
         argv,
     };
-    if let Err(e) = chain.append(input, crate::cmd::audit::mirror) {
-        eprintln!("geode: warning: audit append failed: {e}");
-    }
+    // Fail closed (Fix 3): the SQLite chain is the source of truth, so a
+    // row that cannot be written stops the run. A Facet mirror error is
+    // not fatal; `Chain::append` already keeps the row in that case.
+    chain
+        .append(input, crate::cmd::audit::mirror)
+        .map(|_| ())
+        .map_err(|e| audit_failed(&e))
+}
+
+/// The refusal for a failed audit append. Exit 1, inside the frozen 0-5
+/// set, as for an audit db that cannot be opened. The message names the
+/// error only; no row field and no value is echoed.
+fn audit_failed(e: &dyn std::fmt::Display) -> Refusal {
+    refuse(
+        exit::USAGE,
+        "audit_failed",
+        format!("audit append failed: {e}; refusing to run"),
+    )
 }
 
 /// The argv commit for a run that did not spawn: empty argv0, no args.
@@ -449,26 +464,30 @@ pub(crate) fn plan_refusal(chain: &mut Chain, row: &RowBase, e: PlanError) -> Re
         ),
         PlanError::Deny { reason, .. } => {
             // Nothing spawned: argv0 is empty and no argument is hashed.
-            append(
+            if let Err(r) = append(
                 chain,
                 row,
                 "policy_deny",
                 not_spawned(),
                 None,
                 BTreeMap::new(),
-            );
+            ) {
+                return r;
+            }
             refuse(exit::POLICY, "policy_deny", reason)
         }
         PlanError::ArgvRejected { exe } => {
             let msg = PlanError::ArgvRejected { exe: exe.clone() }.to_string();
-            append(
+            if let Err(r) = append(
                 chain,
                 row,
                 "argv_rejected",
                 ArgvCommit::Rejected { exe },
                 None,
                 BTreeMap::new(),
-            );
+            ) {
+                return r;
+            }
             refuse(exit::POLICY, "argv_rejected", msg)
         }
     }
@@ -530,6 +549,13 @@ pub(crate) fn execute_plan(
         .take_pin()
         .map(|(fd, meta)| geode_os::PinnedExe { fd, meta });
     let plan = &*plan;
+    let argv = || ArgvCommit::Clean {
+        argv0: plan.exe.clone(),
+        args: plan.args.clone(),
+    };
+    // Intent row before any value leaves the plan (Fix 3). If it cannot be
+    // written, no child env is built and nothing spawns.
+    append(chain, row, "started", argv(), None, BTreeMap::new())?;
     let spec = geode_os::SpawnSpec {
         program: PathBuf::from(&plan.exe),
         args: plan.args.iter().map(OsString::from).collect(),
@@ -558,7 +584,7 @@ pub(crate) fn execute_plan(
                 not_spawned(),
                 None,
                 BTreeMap::new(),
-            );
+            )?;
             // A list that cannot be enforced is a refusal, never an
             // unconfined run.
             return Err(if opts.allow_hosts.is_empty() {
@@ -581,10 +607,6 @@ pub(crate) fn execute_plan(
         emit(ch, tail);
     }
     let hits = collector.hits();
-    let argv = ArgvCommit::Clean {
-        argv0: plan.exe.clone(),
-        args: plan.args.clone(),
-    };
     let label = if outcome.timed_out {
         "timed_out"
     } else {
@@ -594,10 +616,10 @@ pub(crate) fn execute_plan(
         chain,
         row,
         label,
-        argv,
+        argv(),
         Some(outcome.process_exit()),
         hits.clone(),
-    );
+    )?;
     Ok(Executed {
         outcome,
         hits,

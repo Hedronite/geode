@@ -197,11 +197,16 @@ fn echo_base64_xxd_redact_and_row_is_local() {
 
     let rows = fx.rows();
     assert!(!rows.is_empty());
-    for (outcome, custody, argv0, exit_code, _) in &rows {
-        assert_eq!(outcome, "spawned");
-        assert_eq!(*custody, 0, "local rows are custody: false");
-        assert_eq!(argv0, &fx.sh);
-        assert_eq!(*exit_code, Some(0));
+    assert_eq!(rows.len() % 2, 0, "each run is a started + spawned pair");
+    for pair in rows.chunks(2) {
+        assert_eq!(pair[0].0, "started");
+        assert_eq!(pair[0].3, None, "intent row has no exit code");
+        assert_eq!(pair[1].0, "spawned");
+        assert_eq!(pair[1].3, Some(0));
+        for (_, custody, argv0, _, _) in pair {
+            assert_eq!(*custody, 0, "local rows are custody: false");
+            assert_eq!(argv0, &fx.sh);
+        }
     }
     let db = std::fs::read(fx.db()).unwrap();
     assert!(
@@ -512,7 +517,7 @@ fn audit_verify_good_then_tampered() {
             &["sh", "-c", script],
         );
     }
-    assert_eq!(fx.rows().len(), 3);
+    assert_eq!(fx.rows().len(), 6, "started + close row per run");
     let db = fx.db();
     let db = db.to_str().unwrap();
 
@@ -522,19 +527,128 @@ fn audit_verify_good_then_tampered() {
     let default = fx.geode(&["audit", "verify"]);
     assert_eq!(code(&default), Some(0), "{}", err(&default));
 
-    // Tamper with seq 2: an attacker can drop the trigger; verify cannot be fooled.
+    // Tamper with seq 4 (the exit-3 close row): an attacker can drop the trigger; verify cannot be fooled.
     let conn = rusqlite::Connection::open(db).unwrap();
     conn.execute_batch(
-        "DROP TRIGGER audit_no_update; UPDATE audit SET exit_code = 0 WHERE seq = 2;",
+        "DROP TRIGGER audit_no_update; UPDATE audit SET exit_code = 0 WHERE seq = 4;",
     )
     .unwrap();
     drop(conn);
     let bad = fx.geode(&["audit", "verify", "--db", db]);
     assert_eq!(code(&bad), Some(2), "{}", err(&bad));
-    assert!(err(&bad).contains("seq 2"), "{}", err(&bad));
+    assert!(err(&bad).contains("seq 4"), "{}", err(&bad));
 
     let missing = fx.geode(&["audit", "verify", "--db", "nope.db"]);
     assert_eq!(code(&missing), Some(1), "{}", err(&missing));
+}
+
+// Fix 3: a failed audit append stops the run (fail closed). Faults are
+// injected with a SQLite trigger in the test's own audit DB, so the binary
+// carries no test hook. `audit::open` only runs `CREATE ... IF NOT EXISTS`,
+// so the trigger survives the open and fires on the insert.
+
+impl Fx {
+    /// Make every audit insert matching `when` (SQL on `NEW`) fail.
+    fn fail_audit_when(&self, when: &str) {
+        let _ = self.run(&["--allow-cmd", self.sh.as_str()], &["sh", "-c", "true"]);
+        let conn = rusqlite::Connection::open(self.db()).expect("open db");
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER fix3_fault BEFORE INSERT ON audit WHEN {when} \
+             BEGIN SELECT RAISE(ABORT, 'fix3 injected fault'); END;"
+        ))
+        .unwrap();
+    }
+}
+
+#[test]
+fn fix3_audit_failure_before_spawn_releases_nothing() {
+    let fx = Fx::new();
+    fx.fail_audit_when("1");
+    let before = fx.rows().len();
+    let allow = fx.allow_sh();
+    // The child would write its env (with the value) to the marker.
+    let script = format!("env > '{}'", fx.marker().display());
+    for json in [false, true] {
+        let mut args = vec!["--key", "k.gkey"];
+        if json {
+            args.extend_from_slice(&["--output", "json"]);
+        }
+        args.extend_from_slice(&["run", "--vault", "v.geode", allow[0], allow[1]]);
+        args.extend_from_slice(&["--secret", "KEY=cfg/dummy.env", "--", "sh", "-c", &script]);
+        let o = fx.geode(&args);
+        assert_eq!(code(&o), Some(1), "{}", err(&o));
+        let text = format!("{}{}", out(&o), err(&o));
+        assert!(text.contains("audit append failed"), "{text}");
+        assert!(text.contains("refusing to run"), "{text}");
+        if json {
+            assert!(text.contains("audit_failed"), "{text}");
+        }
+        assert_no_dummy(&o, "audit_failed");
+        assert!(!fx.marker().exists(), "child spawned without an audit row");
+    }
+    assert_eq!(fx.rows().len(), before, "no row was written");
+}
+
+#[test]
+fn fix3_success_writes_one_intent_row_without_the_value() {
+    let fx = Fx::new();
+    let allow = fx.allow_sh();
+    let o = fx.run(
+        &[allow[0], allow[1], "--secret", "KEY=cfg/dummy.env"],
+        &["sh", "-c", "echo $KEY"],
+    );
+    assert_eq!(code(&o), Some(0), "{}", err(&o));
+    let rows = fx.rows();
+    let started = rows.iter().filter(|r| r.0 == "started").count();
+    assert_eq!(started, 1, "exactly one pre-release row: {rows:?}");
+    assert_eq!(rows.len(), 2, "started + spawned: {rows:?}");
+    assert_eq!(rows[0].0, "started");
+    assert_eq!(rows[1].0, "spawned");
+    let db = std::fs::read(fx.db()).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&db).contains(DUMMY),
+        "value in audit db"
+    );
+    let v = fx.geode(&["audit", "verify"]);
+    assert_eq!(code(&v), Some(0), "{}", err(&v));
+}
+
+#[test]
+fn fix3_close_row_failure_is_non_zero_but_output_still_redacted() {
+    let fx = Fx::new();
+    fx.fail_audit_when("NEW.outcome <> 'started'");
+    let allow = fx.allow_sh();
+    let o = fx.run(
+        &[allow[0], allow[1], "--secret", "KEY=cfg/dummy.env"],
+        &["sh", "-c", "echo $KEY"],
+    );
+    assert_eq!(code(&o), Some(1), "child exited 0 but the close row failed");
+    assert!(err(&o).contains("audit append failed"), "{}", err(&o));
+    assert_eq!(out(&o), "[REDACTED:KEY]\n");
+    assert_no_dummy(&o, "close row");
+    assert_eq!(fx.rows().last().unwrap().0, "started", "intent row stays");
+}
+
+#[test]
+fn fix3_deny_path_writes_row_or_fails_closed() {
+    let fx = Fx::new();
+    let allow = fx.allow_sh();
+    let touch = fx.touch_script();
+    let script = format!("{touch}; echo {DUMMY}");
+    let pre = [allow[0], allow[1], "--secret", "KEY=cfg/dummy.env"];
+
+    // Writable chain: the refusal leaves an argv_rejected row.
+    let o = fx.run(&pre, &["sh", "-c", &script]);
+    assert_eq!(code(&o), Some(3), "{}", err(&o));
+    assert_eq!(fx.rows().last().unwrap().0, "argv_rejected");
+
+    // Broken chain: the refusal becomes audit_failed and still spawns nothing.
+    fx.fail_audit_when("1");
+    let o = fx.run(&pre, &["sh", "-c", &script]);
+    assert_eq!(code(&o), Some(1), "{}", err(&o));
+    assert!(err(&o).contains("audit append failed"), "{}", err(&o));
+    assert_no_dummy(&o, "deny + audit_failed");
+    assert!(!fx.marker().exists());
 }
 
 fn sha256_hex(path: &Path) -> String {
