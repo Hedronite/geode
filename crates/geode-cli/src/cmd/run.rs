@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::Write as _;
 use std::os::unix::ffi::OsStrExt as _;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use clap::Args;
@@ -54,8 +54,9 @@ compile_error!(
 /// rejects a rule with no sha256. A pin is refused unless the binary and
 /// every ancestor up to `/` is owned by root, not group- or other-writable,
 /// and not a symlink. Every binding must pass policy, or nothing runs. The child
-/// gets a fresh env: `PATH`, `HOME`, `LANG`, `TERM`, then the bindings. It
-/// never gets `GEODE_TOKEN`.
+/// gets a fresh env: `PATH`, `HOME` (or `--home`), `LANG`, `TERM`, then the
+/// bindings. It never gets `GEODE_TOKEN`. With no `--allow-hosts` the child
+/// is not network-isolated.
 ///
 /// Stdout carries only the child's redacted stdout. Stderr carries
 /// `geode:` lines (warnings, `injected: NAMES (values withheld)`) and the
@@ -141,6 +142,18 @@ pub struct RunArgs {
     /// Working directory for the child.
     #[arg(long, value_name = "DIR")]
     pub cwd: Option<PathBuf>,
+    /// `HOME` for the child in place of the caller's. Must be absolute,
+    /// must not contain `..`, and must not be the caller's `HOME`. Omitted,
+    /// the child gets the caller's `HOME`.
+    #[arg(long, value_name = "DIR")]
+    pub home: Option<PathBuf>,
+    /// Host the child may reach (repeatable). A bare host: no scheme, path,
+    /// userinfo, or whitespace. Omitted, the list is empty and the child is
+    /// not isolated. A non-empty list runs the child in its own network
+    /// namespace behind the egress proxy: Linux only, refused elsewhere
+    /// (exit 3).
+    #[arg(long = "allow-hosts", value_name = "HOST")]
+    pub allow_hosts: Vec<String>,
     /// Do not redact child output. Only a `human:*` principal with `admin`.
     #[arg(long)]
     pub no_redact: bool,
@@ -268,6 +281,61 @@ fn preflight(args: &RunArgs) -> Result<(Vec<BindingSpec>, Vec<CmdRule>), Refusal
     Ok((bindings, cmds))
 }
 
+/// `--home`: absolute, no `..`, and not the caller's `HOME`, compared by
+/// components and again canonically when both resolve.
+fn check_home(dir: &Path, caller: Option<&OsStr>) -> Result<OsString, Refusal> {
+    let bad = |why: &str| {
+        refuse(
+            exit::USAGE,
+            "usage",
+            format!("--home {}: {why}", dir.display()),
+        )
+    };
+    if !dir.is_absolute() {
+        return Err(bad("must be an absolute path"));
+    }
+    if dir.components().any(|c| c == Component::ParentDir) {
+        return Err(bad("must not contain .."));
+    }
+    if let Some(caller) = caller.filter(|h| !h.is_empty()).map(Path::new) {
+        let same = dir == caller
+            || matches!(
+                (dir.canonicalize(), caller.canonicalize()),
+                (Ok(a), Ok(b)) if a == b
+            );
+        if same {
+            return Err(bad("is the caller's HOME"));
+        }
+    }
+    Ok(dir.as_os_str().to_os_string())
+}
+
+/// `--allow-hosts`, checked as `agent token issue --allow-host` checks
+/// it: non-empty ASCII, no whitespace, scheme, path, or userinfo.
+/// Lowercased, in order, without repeats.
+fn parse_hosts(raw: &[String]) -> Result<Vec<String>, Refusal> {
+    let mut hosts: Vec<String> = Vec::new();
+    for h in raw {
+        let bad = h.is_empty()
+            || !h.is_ascii()
+            || h.contains("://")
+            || h.chars()
+                .any(|c| c.is_ascii_whitespace() || c == '/' || c == '@');
+        if bad {
+            return Err(refuse(
+                exit::USAGE,
+                "usage",
+                format!("bad --allow-hosts '{h}'"),
+            ));
+        }
+        let h = h.to_ascii_lowercase();
+        if !hosts.contains(&h) {
+            hosts.push(h);
+        }
+    }
+    Ok(hosts)
+}
+
 /// Allow rules from `--allow-cmd` and `--allow-cmds-file`. When require-pin
 /// is on (flag or file), a rule with no sha256 is a usage error here, before
 /// any key is read and before a child can start.
@@ -327,6 +395,12 @@ fn load_refusal(e: &Error) -> Refusal {
 
 fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refusal> {
     let (bindings, cmds) = preflight(args)?;
+    let home = args
+        .home
+        .as_deref()
+        .map(|d| check_home(d, std::env::var_os("HOME").as_deref()))
+        .transpose()?;
+    let hosts = parse_hosts(&args.allow_hosts)?;
     if geode_os::deny_core_dumps().is_err() {
         eprintln!("geode: warning: could not refuse core dumps for this process");
     }
@@ -359,9 +433,9 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         policy: &policy,
         token: None,
         allow_cmds: &cmds,
-        allow_hosts: &[],
+        allow_hosts: &hosts,
         redact: RedactLevel::Strict,
-        enforce_hosts: false,
+        enforce_hosts: cfg!(target_os = "linux"),
     };
     let view = VaultView {
         root: &args.vault,
@@ -378,7 +452,7 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         vault_id: cmd::hex(&ctx.vault_id.0),
         paths: bindings.iter().map(|b| b.path.clone()).collect(),
         custody: false,
-        hosts: inject::hosts_label(&[]),
+        hosts: inject::hosts_label(&hosts),
     };
     let request = PlanRequest {
         bindings: &bindings,
@@ -390,7 +464,14 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         Ok(p) => p,
         Err(e) => return Err(plan_refusal(&mut chain, &row, e)),
     };
-    execute(args, out, &mut plan, &mut chain, &row)
+    let exec = LocalExec { home, hosts };
+    execute(args, out, exec, &mut plan, &mut chain, &row)
+}
+
+/// The validated `--home` and `--allow-hosts` of one local run.
+struct LocalExec {
+    home: Option<OsString>,
+    hosts: Vec<String>,
 }
 
 /// Production `plan`, or the test root when that feature is compiled in.
@@ -668,6 +749,7 @@ pub(crate) fn execute_plan(
 fn execute(
     args: &RunArgs,
     out: OutMode,
+    exec: LocalExec,
     plan: &mut inject::Plan,
     chain: &mut Chain,
     row: &RowBase,
@@ -682,8 +764,8 @@ fn execute(
         inherit_stdin: args.stdin,
         timeout: Duration::from_secs(args.timeout),
         identity: geode_os::ChildIdentity::Inherit,
-        allow_hosts: Vec::new(),
-        home: None,
+        allow_hosts: exec.hosts,
+        home: exec.home,
     };
     let (mut buf_out, mut buf_err) = (Vec::new(), Vec::new());
     let emit = |ch: Channel, bytes: Vec<u8>| match (out, ch) {
@@ -730,4 +812,110 @@ fn execute(
         }
     }
     Ok(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        run: RunArgs,
+    }
+
+    fn parse(flags: &[&str]) -> RunArgs {
+        let mut argv = vec!["geode", "--vault", "/v"];
+        argv.extend_from_slice(flags);
+        argv.extend(["--", "/bin/true"]);
+        Cli::parse_from(argv).run
+    }
+
+    fn refused<T>(r: Result<T, Refusal>) -> Refusal {
+        match r {
+            Ok(_) => panic!("accepted"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn omitting_both_flags_keeps_caller_home_and_no_hosts() {
+        let a = parse(&[]);
+        assert!(a.home.is_none());
+        assert!(a.allow_hosts.is_empty());
+        assert!(parse_hosts(&a.allow_hosts).ok().unwrap().is_empty());
+        assert_eq!(inject::hosts_label(&[]), "unrestricted");
+    }
+
+    #[test]
+    fn allow_hosts_repeats_and_appends_in_order() {
+        let a = parse(&[
+            "--allow-hosts",
+            "api.example.com",
+            "--allow-hosts",
+            "Cdn.Example.com:443",
+            "--allow-hosts",
+            "api.example.com",
+        ]);
+        assert_eq!(a.allow_hosts.len(), 3);
+        assert_eq!(
+            parse_hosts(&a.allow_hosts).ok().unwrap(),
+            ["api.example.com", "cdn.example.com:443"]
+        );
+    }
+
+    #[test]
+    fn bad_allow_hosts_are_usage_errors() {
+        for h in ["", "https://x.example", "x.example/p", "u@x.example", "a b"] {
+            let r = refused(parse_hosts(&[h.to_owned()]));
+            assert_eq!(r.code, exit::USAGE, "{h}");
+            assert!(r.msg.contains("--allow-hosts"), "{}", r.msg);
+        }
+    }
+
+    #[test]
+    fn home_flag_parses_to_the_dir() {
+        let a = parse(&["--home", "/srv/geode-home"]);
+        assert_eq!(a.home.as_deref(), Some(Path::new("/srv/geode-home")));
+        let got = check_home(a.home.as_deref().unwrap(), Some(OsStr::new("/Users/me")));
+        assert_eq!(got.ok().unwrap(), OsString::from("/srv/geode-home"));
+    }
+
+    #[test]
+    fn home_must_be_absolute_without_dotdot() {
+        for d in ["rel/home", "./home", "/srv/../Users/me"] {
+            let r = refused(check_home(Path::new(d), Some(OsStr::new("/Users/me"))));
+            assert_eq!(r.code, exit::USAGE, "{d}");
+            assert!(r.msg.starts_with("--home "), "{}", r.msg);
+        }
+    }
+
+    #[test]
+    fn home_equal_to_caller_home_is_refused() {
+        for d in ["/Users/me", "/Users/me/", "/Users//me", "/Users/./me"] {
+            let r = refused(check_home(Path::new(d), Some(OsStr::new("/Users/me"))));
+            assert!(r.msg.contains("caller's HOME"), "{d}: {}", r.msg);
+        }
+    }
+
+    #[test]
+    fn home_resolving_to_caller_home_is_refused() {
+        let base = std::env::temp_dir().join(format!("geode-p0-home-{}", std::process::id()));
+        let real = base.join("real");
+        let link = base.join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let r = refused(check_home(&link, Some(real.as_os_str())));
+        assert!(r.msg.contains("caller's HOME"), "{}", r.msg);
+        assert!(check_home(&base, Some(real.as_os_str())).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn home_with_no_caller_home_is_accepted() {
+        assert!(check_home(Path::new("/srv/geode-home"), None).is_ok());
+        assert!(check_home(Path::new("/srv/geode-home"), Some(OsStr::new(""))).is_ok());
+    }
 }
