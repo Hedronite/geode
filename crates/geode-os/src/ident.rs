@@ -384,6 +384,35 @@ pub fn seatbelt_profile(deny: &[std::path::PathBuf]) -> Result<String, String> {
     ))
 }
 
+/// Seatbelt lines that deny outbound network except the local egress proxy.
+/// The host check stays in [`crate::egress::AllowList`]; this only pins the
+/// child to that proxy so it cannot dial around the check.
+#[must_use]
+pub fn proxy_network_rules(port: u16) -> String {
+    format!(
+        "(deny network-outbound)\n(allow network-outbound (remote tcp \"127.0.0.1:{port}\"))\n(allow network-outbound (remote ip \"127.0.0.1:{port}\"))\n"
+    )
+}
+
+/// [`seatbelt_profile`] plus a network deny that allows only `proxy`.
+/// An empty `deny` list does not deny files: the profile is network-only,
+/// for a local `geode run` that inherits the caller's identity.
+///
+/// # Errors
+///
+/// When a path cannot be quoted safely.
+pub fn seatbelt_profile_confined(
+    deny: &[std::path::PathBuf],
+    proxy: u16,
+) -> Result<String, String> {
+    let net = proxy_network_rules(proxy);
+    if deny.is_empty() {
+        return Ok(format!("(version 1)\n(allow default)\n{net}"));
+    }
+    let base = seatbelt_profile(deny)?;
+    Ok(format!("{base}{net}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +502,18 @@ mod tests {
         }
         assert!(seatbelt_profile(&["rel".into()]).is_err());
         assert!(seatbelt_profile(&["/a\"b".into()]).is_err());
+    }
+
+    #[test]
+    fn confined_profile_limits_network_to_the_proxy() {
+        let open = seatbelt_profile_confined(&[], 9).unwrap();
+        assert!(open.contains("(deny network-outbound)\n"), "{open}");
+        assert!(open.contains("127.0.0.1:9"), "{open}");
+        assert!(!open.contains("file-read"), "{open}");
+        let closed = seatbelt_profile_confined(&["/a/k.gkey".into()], 9).unwrap();
+        assert!(closed.contains("(literal \"/a/k.gkey\")"), "{closed}");
+        assert!(closed.contains("127.0.0.1:9"), "{closed}");
+        assert!(seatbelt_profile_confined(&["rel".into()], 9).is_err());
     }
 
     #[test]

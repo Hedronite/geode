@@ -91,9 +91,12 @@ pub struct Caller<'a> {
     pub allow_cmds: &'a [CmdRule],
     pub allow_hosts: &'a [String],
     pub redact: RedactLevel,
-    /// The transport can enforce a non-empty `allow_hosts` (Linux custody,
-    /// per-child netns and egress proxy). When false, a non-empty list is
-    /// refused before spawn. An empty list is unrestricted either way.
+    /// The transport can enforce a non-empty `allow_hosts` (the custody
+    /// proxy on Linux, and the same proxy behind a seatbelt on macOS).
+    /// When false, a non-empty list is refused before spawn. An empty list
+    /// is not allow-all for a secret binding: `geode run` and custody refuse
+    /// it before they call [`plan`]. Spawn still treats an empty list as no
+    /// confinement, which those transports do not use for a secret.
     pub enforce_hosts: bool,
 }
 

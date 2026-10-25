@@ -115,7 +115,7 @@ pub fn spawn_as(
 }
 
 /// Env names the child gets pointing at the egress proxy.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const PROXY_VARS: [&str; 6] = [
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -128,8 +128,11 @@ const PROXY_VARS: [&str; 6] = [
 /// [`spawn_as`] with `allow_hosts` (SPEC-v034 G8). Empty: unrestricted, no
 /// namespace. Non-empty, Linux: the child runs in its own network namespace
 /// with only loopback, where a userspace proxy admits listed hosts; the
-/// proxy env vars point at it. Non-empty elsewhere: `Unsupported`, nothing
-/// runs. If the namespace cannot be made, nothing runs.
+/// proxy env vars point at it. Non-empty, macOS: the same proxy and the
+/// same [`crate::egress::AllowList`] check, and a seatbelt that can dial
+/// only the proxy. Non-empty on any other OS: `Unsupported`, nothing runs.
+/// If confinement cannot be made, nothing runs. A secret binding must not
+/// reach this function with an empty list; `geode run` refuses that first.
 ///
 /// # Errors
 ///
@@ -159,14 +162,51 @@ pub fn spawn_with_pin(
     allow_hosts: &[String],
     on_chunk: impl FnMut(Stream, &[u8]),
 ) -> io::Result<ChildOutcome> {
+    if allow_hosts.is_empty() {
+        return spawn_open(spec, pin, identity, on_chunk);
+    }
+    spawn_confined(spec, pin, identity, allow_hosts, on_chunk)
+}
+
+/// No host list: the child is not confined. A secret binding does not use
+/// this path; the run layer refuses an empty list first.
+fn spawn_open(
+    spec: SpawnSpec,
+    pin: Option<PinnedExe>,
+    identity: &ChildIdentity,
+    on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
     let cmd = prepared(&spec, identity)?;
     let pin = pin.map(|p| (p, spec.program.clone()));
     #[cfg(test)]
     tests::before_exec();
-    if allow_hosts.is_empty() {
-        let child = launch(cmd, pin)?;
-        return supervise(child, spec.timeout, on_chunk);
-    }
+    let child = launch(cmd, pin)?;
+    supervise(child, spec.timeout, on_chunk)
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_confined(
+    spec: SpawnSpec,
+    pin: Option<PinnedExe>,
+    identity: &ChildIdentity,
+    allow_hosts: &[String],
+    on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
+    macos_confined(spec, pin, identity, allow_hosts, on_chunk)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn spawn_confined(
+    spec: SpawnSpec,
+    pin: Option<PinnedExe>,
+    identity: &ChildIdentity,
+    allow_hosts: &[String],
+    on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
+    let cmd = prepared(&spec, identity)?;
+    let pin = pin.map(|p| (p, spec.program.clone()));
+    #[cfg(test)]
+    tests::before_exec();
     isolated(cmd, pin, allow_hosts, spec.timeout, on_chunk)
 }
 
@@ -340,6 +380,12 @@ fn arm_pin(cmd: &mut Command, pin: PinnedExe, program: &Path) -> io::Result<()> 
 /// output, stdin, cwd, and its own process group.
 fn prepared(spec: &SpawnSpec, identity: &ChildIdentity) -> io::Result<Command> {
     let mut cmd = build_command(spec, identity)?;
+    configure_std(&mut cmd, spec);
+    Ok(cmd)
+}
+
+/// Cleared env, piped output, stdin, cwd, and a new process group.
+fn configure_std(cmd: &mut Command, spec: &SpawnSpec) {
     cmd.env_clear()
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .stdin(if spec.inherit_stdin {
@@ -353,7 +399,6 @@ fn prepared(spec: &SpawnSpec, identity: &ChildIdentity) -> io::Result<Command> {
     if let Some(dir) = &spec.cwd {
         cmd.current_dir(dir);
     }
-    Ok(cmd)
 }
 
 #[cfg(target_os = "linux")]
@@ -434,7 +479,7 @@ fn isolated(
     outcome
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn isolated(
     _cmd: Command,
     _pin: Option<(PinnedExe, PathBuf)>,
@@ -529,7 +574,7 @@ fn build_command(spec: &SpawnSpec, identity: &ChildIdentity) -> io::Result<Comma
             Ok(cmd)
         }
         ChildIdentity::User { uid, gid } => user_command(spec, *uid, *gid),
-        ChildIdentity::Seatbelt { deny } => seatbelt_command(spec, deny),
+        ChildIdentity::Seatbelt { deny } => seatbelt_command(spec, deny, None),
     }
 }
 
@@ -573,9 +618,12 @@ fn user_command(_spec: &SpawnSpec, _uid: u32, _gid: u32) -> io::Result<Command> 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 #[cfg(target_os = "macos")]
-fn seatbelt_command(spec: &SpawnSpec, deny: &[PathBuf]) -> io::Result<Command> {
-    let profile = crate::ident::seatbelt_profile(deny)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+fn seatbelt_command(spec: &SpawnSpec, deny: &[PathBuf], proxy: Option<u16>) -> io::Result<Command> {
+    let profile = match proxy {
+        Some(port) => crate::ident::seatbelt_profile_confined(deny, port),
+        None => crate::ident::seatbelt_profile(deny),
+    }
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let mut cmd = Command::new(SANDBOX_EXEC);
     cmd.arg("-p")
         .arg(profile)
@@ -585,11 +633,128 @@ fn seatbelt_command(spec: &SpawnSpec, deny: &[PathBuf]) -> io::Result<Command> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn seatbelt_command(_spec: &SpawnSpec, _deny: &[PathBuf]) -> io::Result<Command> {
+fn seatbelt_command(
+    _spec: &SpawnSpec,
+    _deny: &[PathBuf],
+    _proxy: Option<u16>,
+) -> io::Result<Command> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "seatbelt is macOS only",
     ))
+}
+
+/// macOS: proxy on 127.0.0.1 and a seatbelt that can dial only that proxy.
+/// The proxy uses [`crate::egress::AllowList`], the same matcher as Linux.
+#[cfg(target_os = "macos")]
+fn macos_confined(
+    spec: SpawnSpec,
+    pin: Option<PinnedExe>,
+    identity: &ChildIdentity,
+    allow_hosts: &[String],
+    on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
+    let proxy = UserProxy::start(allow_hosts)?;
+    let mut cmd = confined_command(&spec, identity, proxy.port)?;
+    configure_std(&mut cmd, &spec);
+    apply_proxy_env(&mut cmd, proxy.port);
+    let pinned = pin.map(|p| (p, spec.program.clone()));
+    #[cfg(test)]
+    tests::before_exec();
+    let spawned = launch(cmd, pinned);
+    let outcome = spawned.and_then(|child| supervise(child, spec.timeout, on_chunk));
+    drop(proxy);
+    outcome
+}
+
+#[cfg(target_os = "macos")]
+fn confined_command(spec: &SpawnSpec, identity: &ChildIdentity, port: u16) -> io::Result<Command> {
+    match identity {
+        ChildIdentity::Inherit => seatbelt_command(spec, &[], Some(port)),
+        ChildIdentity::Seatbelt { deny } => seatbelt_command(spec, deny, Some(port)),
+        ChildIdentity::User { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "allow_hosts: unsupported on this host",
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_proxy_env(cmd: &mut Command, port: u16) {
+    let url = format!("http://127.0.0.1:{port}");
+    for key in PROXY_VARS {
+        cmd.env(key, &url);
+    }
+}
+
+/// Local proxy. Drop stops the accept loop.
+#[cfg(target_os = "macos")]
+struct UserProxy {
+    port: u16,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(target_os = "macos")]
+impl UserProxy {
+    fn start(allow_hosts: &[String]) -> io::Result<Self> {
+        use std::net::TcpListener;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let allow = crate::egress::AllowList::parse(allow_hosts);
+        if allow.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "allow_hosts has no usable entry",
+            ));
+        }
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let port = listener.local_addr()?.port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let join = thread::spawn(move || accept_proxy(listener, flag, allow));
+        Ok(Self {
+            port,
+            stop,
+            join: Some(join),
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for UserProxy {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn accept_proxy(
+    listener: std::net::TcpListener,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    allow: crate::egress::AllowList,
+) {
+    use std::sync::atomic::Ordering;
+    if listener.set_nonblocking(true).is_err() {
+        return;
+    }
+    while !stop.load(Ordering::Relaxed) {
+        match listener.accept() {
+            Ok((sock, _)) => {
+                let allow = allow.clone();
+                thread::spawn(move || {
+                    let _ = crate::egress::handle_client(sock, &allow);
+                });
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => thread::sleep(POLL),
+            Err(_) => break,
+        }
+    }
 }
 
 fn pipe_reader(
@@ -945,6 +1110,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn allow_hosts_seatbelt_runs_a_local_command() {
+        let mut out = Vec::new();
+        let outcome = spawn_with(
+            spec("echo ok", Duration::from_secs(10)),
+            &ChildIdentity::Inherit,
+            &["127.0.0.1".into()],
+            |st, chunk| {
+                if st == Stream::Stdout {
+                    out.extend_from_slice(chunk);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+        assert!(String::from_utf8_lossy(&out).contains("ok"));
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn seatbelt_is_refused_off_macos() {
@@ -1027,7 +1211,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn allow_hosts_refuses_before_spawn_off_linux() {
         let marker = std::env::temp_dir().join(format!("geode-os-hosts-{}", std::process::id()));
@@ -1045,6 +1229,8 @@ mod tests {
         assert!(!marker.exists());
     }
 
+    /// Spawn's empty list is no namespace. A secret binding never gets here
+    /// with an empty list: `geode run` and custody refuse that first.
     #[test]
     fn empty_allow_hosts_is_unrestricted() {
         let (port, seen) = http_upstream();

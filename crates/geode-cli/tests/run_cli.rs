@@ -75,8 +75,14 @@ impl Fx {
     }
 
     /// `geode --key k.gkey run --vault v.geode <pre> -- <cmd>`.
+    ///
+    /// The test-only seam skips host confinement so these cases can spawn
+    /// without a network namespace. Release builds do not have the flag.
+    /// Tests of the allowlist do not use this helper.
     fn run(&self, pre: &[&str], cmd: &[&str]) -> Output {
         let mut args = vec!["--key", "k.gkey", "run", "--vault", "v.geode"];
+        #[cfg(feature = "test-trusted-root")]
+        args.push("--test-unconfined-hosts");
         args.extend_from_slice(pre);
         args.push("--");
         args.extend_from_slice(cmd);
@@ -278,7 +284,10 @@ fn child_exit_3_is_spawned_and_passed_through() {
     let mut args = vec![
         "--key", "k.gkey", "--output", "json", "run", "--vault", "v.geode",
     ];
-    args.extend_from_slice(&[allow[0], allow[1], "--secret", "KEY=cfg/dummy.env", "--"]);
+    args.extend_from_slice(&[allow[0], allow[1], "--secret", "KEY=cfg/dummy.env"]);
+    #[cfg(feature = "test-trusted-root")]
+    args.push("--test-unconfined-hosts");
+    args.push("--");
     args.extend_from_slice(&["sh", "-c", "echo $KEY >&2; exit 3"]);
     let j = fx.geode(&args);
     assert_eq!(code(&j), Some(3), "{}", err(&j));
@@ -309,6 +318,72 @@ fn timeout_terms_the_child() {
     assert_eq!(code(&o), Some(128 + 15), "{}", err(&o));
     assert!(err(&o).contains("timed out"), "{}", err(&o));
     assert_eq!(fx.rows().last().unwrap().0, "timed_out");
+}
+
+#[test]
+fn empty_allow_hosts_on_a_secret_binding_refuses() {
+    let fx = Fx::new();
+    let allow = fx.allow_sh();
+    let touch = fx.touch_script();
+    // Not `fx.run`: that helper sets the test-only seam.
+    let o = fx.geode(&[
+        "--key",
+        "k.gkey",
+        "run",
+        "--vault",
+        "v.geode",
+        allow[0],
+        allow[1],
+        "--secret",
+        "KEY=cfg/dummy.env",
+        "--",
+        "sh",
+        "-c",
+        &touch,
+    ]);
+    assert_eq!(code(&o), Some(3), "{}", err(&o));
+    let text = format!("{}{}", out(&o), err(&o));
+    assert!(text.contains("allow_hosts"), "{text}");
+    assert!(text.contains("refusing"), "{text}");
+    assert!(!text.contains("injected:"), "{text}");
+    assert!(!fx.marker().exists(), "empty allow_hosts spawned");
+    assert_no_dummy(&o, "empty allow_hosts");
+}
+
+/// A non-empty list is confined, or the run is refused. It is never an
+/// unconfined child. Same rule as custody `geode_run_allow_hosts_per_os`.
+#[test]
+fn local_allow_hosts_matches_custody_confine_or_refuse() {
+    let fx = Fx::new();
+    let allow = fx.allow_sh();
+    let touch = fx.touch_script();
+    let o = fx.geode(&[
+        "--key",
+        "k.gkey",
+        "run",
+        "--vault",
+        "v.geode",
+        allow[0],
+        allow[1],
+        "--secret",
+        "KEY=cfg/dummy.env",
+        "--allow-host",
+        "api.example.com",
+        "--",
+        "sh",
+        "-c",
+        &touch,
+    ]);
+    let text = format!("{}{}", out(&o), err(&o));
+    if code(&o) == Some(0) {
+        assert!(fx.marker().exists(), "confined child did not run");
+        assert_no_dummy(&o, "confined");
+    } else {
+        assert_eq!(code(&o), Some(3), "{text}");
+        assert!(text.contains("allow_hosts"), "{text}");
+        assert!(!fx.marker().exists(), "ran without isolation");
+        assert_no_dummy(&o, "refused");
+    }
 }
 
 #[test]
