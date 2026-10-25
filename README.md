@@ -192,7 +192,7 @@ The program reads `API_KEY` from its own environment. Do not write `$API_KEY` on
 - Stdout carries only the child's redacted output. Stderr names which bindings were injected and never prints their values. A copy of a bound value in the output becomes `[REDACTED:NAME]`.
 - Redaction catches the raw value and its base64, hex, percent-encoded, and JSON-string forms. It does not catch shell quoting or any other transform. **Redaction stops accidents. It does not stop a hostile command.**
 - Local `geode run` needs your key and refuses a token.
-- Every run and every refusal is written to an append-only, hash-chained audit log. Rows hold no secret value and no raw command line. `geode audit verify` checks the chain.
+- Every run and every refusal is written to an append-only, hash-chained audit log. Rows hold no secret value and no raw command line. `geode audit verify` checks the chain. A `started` row is written before any secret reaches a child; if any row cannot be written, the run fails closed (`audit_failed`).
 
 ### Custody daemon
 
