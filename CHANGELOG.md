@@ -4,29 +4,11 @@ type: repo-changelog
 status: current
 created: "2026-09-15"
 updated: "2026-10-25"
-related:
-  - "[[foundry/geode/geode-spec-0.0.0/SPEC]]"
-  - "[[foundry/geode/geode-spec-0.0.0/12-roadmap]]"
-  - "[[foundry/geode/SPEC-v010]]"
-  - "[[foundry/geode/SPEC-v020]]"
-  - "[[foundry/geode/SPEC-v021]]"
-  - "[[foundry/geode/SPEC-v022]]"
-  - "[[foundry/geode/SPEC-v023]]"
-  - "[[foundry/geode/SPEC-v024]]"
-  - "[[foundry/geode/SPEC-v025]]"
-  - "[[foundry/geode/SPEC-v026]]"
-  - "[[foundry/geode/SPEC-v027]]"
-  - "[[foundry/geode/SPEC-v028]]"
-  - "[[foundry/geode/SPEC-v029]]"
-  - "[[foundry/geode/specs/SPEC-v030]]"
-  - "[[foundry/geode/specs/SPEC-v031]]"
-  - "[[foundry/geode/specs/SPEC-v032]]"
-  - "[[foundry/geode/specs/SPEC-v033]]"
 ---
 
 # Changelog
 
-Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise). Foundry packs v021/v022 are milestones, not the git tag ([[foundry/SEMVER]]).
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` (compatibility promise). Foundry packs v021/v022 are milestones, not the git tag.
 
 ## [Unreleased]
 
@@ -116,7 +98,7 @@ Compatible 1.x minor. Foundry pack **v033** (cosign Ed25519 verb). No format cha
 
 ## [1.0.1] — 2026-09-25
 
-Compatible 1.x patch on the 1.0 contract (foundry [[foundry/SEMVER]]). CLI verbs, exit codes, MCP tools `geode_list` / `geode_read` / `geode_write`, and GDE1 suite `0x01` are unchanged. `GDE1` objects written by 1.0.0 remain readable.
+Compatible 1.x patch on the 1.0 contract. CLI verbs, exit codes, MCP tools `geode_list` / `geode_read` / `geode_write`, and GDE1 suite `0x01` are unchanged. `GDE1` objects written by 1.0.0 remain readable.
 
 ### Fixed
 
@@ -184,7 +166,7 @@ Compatible 0.x patch. Foundry pack **v028** (git sidecar + hooks). No format cha
 
 ## [0.2.5] — 2026-09-21
 
-Compatible 0.x patch. Foundry packs **v026** (X25519 recipients) and **v027** (epoch rotate + reseal). No format change; `GDE1` objects from 0.2.4 remain readable. Also ships Evan's Jev remainder (shadow; TUI Jev-free).
+Compatible 0.x patch. Foundry packs **v026** (X25519 recipients) and **v027** (epoch rotate + reseal). No format change; `GDE1` objects from 0.2.4 remain readable. Also ships the maintainer's Jev remainder (shadow; TUI Jev-free).
 
 ### Added
 
@@ -247,11 +229,11 @@ Compatible 0.x patch (Cargo: feature/fix on 0.x bumps patch). Covers foundry pac
 
 ## [0.2.0] — 2026-09-15
 
-TUI operator release. **Workspace version is bumped to 0.2.0 with this release.** SemVer note: on 0.x, `geode tui` changing from "exit 1, not available" to a working TUI is treated as a breaking surface change, so 0.2.0 rather than 0.1.2. The v0.2.0 git tag is NOT cut here; PM tags after Evan GO. No format change; `GDE1` objects from 0.1.x remain readable.
+TUI operator release. **Workspace version is bumped to 0.2.0 with this release.** SemVer note: on 0.x, `geode tui` changing from "exit 1, not available" to a working TUI is treated as a breaking surface change, so 0.2.0 rather than 0.1.2. The v0.2.0 git tag is NOT cut here; PM tags after the maintainer approves. No format change; `GDE1` objects from 0.1.x remain readable.
 
 ### Added
 
-- `geode tui [VAULT] [--key PATH]` — Ratatui operator TUI over `geode-grotto` ([[foundry/geode/geode-spec-0.0.0/14-tui]]): vault picker, in-process session unlock (ISK held in `Secret32`, zeroized on drop), tree/preview/evidence panes, family-aligned keybindings. Secrets are never painted (14-tui §4 closed set).
+- `geode tui [VAULT] [--key PATH]` — Ratatui operator TUI over `geode-grotto`: vault picker, in-process session unlock (ISK held in `Secret32`, zeroized on drop), tree/preview/evidence panes, family-aligned keybindings. Secrets are never painted (14-tui §4 closed set).
 - `geode-tui` crate (adapter only; `geode-grotto` has no ratatui/crossterm dependency).
 - `geode-cli` feature `tui`, default-on; a `--no-default-features` build answers `geode tui` with exit 1 and "this build has no TUI" (14-tui §2.3).
 
@@ -261,11 +243,11 @@ TUI operator release. **Workspace version is bumped to 0.2.0 with this release.*
 
 ## [0.1.1] — 2026-09-15
 
-Hygiene + keyring release. **Workspace version is bumped to 0.1.1 with this release** (the alternative — holding 0.1.0 until Evan GO on the tag — was rejected: the shipped binary should report what it is). The v0.1.1 git tag itself is NOT cut here; PM tags after Evan GO. No format change; `GDE1` objects from 0.1.0 remain readable.
+Hygiene + keyring release. **Workspace version is bumped to 0.1.1 with this release** (the alternative — holding 0.1.0 until the maintainer approved the tag — was rejected: the shipped binary should report what it is). The v0.1.1 git tag itself is NOT cut here; PM tags after the maintainer approves. No format change; `GDE1` objects from 0.1.0 remain readable.
 
 ### Added
 
-- `geode keyring list` / `geode keyring add PATH --label NAME` — named identity keys over the `keyring.json` index ([[foundry/geode/geode-spec-0.0.0/schemas/keyring.schema.json]]); labels, paths, and key ids only, never secret material. First added key becomes the keyring default.
+- `geode keyring list` / `geode keyring add PATH --label NAME` — named identity keys over the `keyring.json` index; labels, paths, and key ids only, never secret material. First added key becomes the keyring default.
 - OS keyring storage for ISK / wrap passphrase (Keychain / Credential Manager / Secret Service) with a 0600 file fallback.
 - `geode keygen --password` writes the passphrase-wrapped `GKEY` form (02-cryptography §6.2) via the public wrap API; `--cheap` selects the constrained-host Argon2id parameters.
 - Key resolution order: `--key PATH` → `GEODE_KEY_FILE` → keyring default → `~/.config/hedronite/geode/default.gkey` (XDG-aware, when the file exists).
@@ -277,7 +259,7 @@ Hygiene + keyring release. **Workspace version is bumped to 0.1.1 with this rele
 
 ## [0.1.0] — 2026-09-15
 
-First release. Conformance profile **`core`** ([[foundry/geode/geode-spec-0.0.0/SPEC]] §2): format, crypto, vault init, seal, open, verify, list, cat, key files. No mount, git sidecar, MCP, PQ, or TUI.
+First release. Conformance profile **`core`** (§2): format, crypto, vault init, seal, open, verify, list, cat, key files. No mount, git sidecar, MCP, PQ, or TUI.
 
 ### Added
 
