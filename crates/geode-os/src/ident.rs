@@ -467,10 +467,14 @@ fn helper_exec_deny() -> String {
 ///
 /// `(deny default)` is the base. The allows are what a local command needs
 /// to run: file read and write (then the custody paths are denied again),
-/// fork, exec, signal, process-info, sysctl-read, and a named mach-lookup
-/// list. Apple events are denied. Network helpers cannot be exec'd. Outbound
-/// network is denied, then allowed only to the proxy. An empty `deny` list
-/// does not add file denies; it is still not `(allow default)`.
+/// fork, exec, signal for self and children, sysctl-read, and a named
+/// mach-lookup list. `process-info` is not a sandbox operation: naming it
+/// makes `sandbox-exec` reject the profile before the child starts, so the
+/// deny-default rules would never apply. A shell reaps its own children
+/// with fork and signal. Apple events are denied. Network helpers cannot
+/// be exec'd. Outbound network is denied, then allowed only to the proxy.
+/// An empty `deny` list does not add file denies; it is still not
+/// `(allow default)`.
 ///
 /// # Errors
 ///
@@ -492,7 +496,6 @@ pub fn seatbelt_profile_confined(
     profile.push_str(
         "(allow process-fork)\n(allow process-exec)\n\
          (allow signal (target self))\n(allow signal (target children))\n\
-         (allow process-info (target self))\n(allow process-info (target children))\n\
          (allow sysctl-read)\n",
     );
     profile.push_str(&mach_lookup_allows());
@@ -608,6 +611,7 @@ mod tests {
             open.contains("(global-name \"com.apple.system.logger\")"),
             "{open}"
         );
+        assert!(!open.contains("process-info"), "{open}");
         assert!(!open.contains("(allow mach-lookup)\n"), "{open}");
         assert!(!open.contains("com.apple.networkd"), "{open}");
         assert!(!open.contains("nsurlsessiond"), "{open}");
