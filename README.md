@@ -40,7 +40,7 @@
 
 Geode seals files and directory trees so people and agents can share a disk without sharing plaintext. Ciphertext lives on the disk. The identity key stays with you. An agent gets a scoped token, never the key.
 
-The on-disk format is **GDE1**, cipher suite **`0x01`**: AEGIS-256-X2, BLAKE3, Argon2id, and HCTR2-256. You work with a vault through the `geode` CLI, the terminal UI, or MCP tools. Coding agents should start with the skill in [`skills/geode/`](skills/geode/) and the CLI. A build with the `fuse` feature can also mount a vault on Linux.
+The on-disk format is **GDE1**, cipher suite **`0x01`**: AEGIS-256-X2, BLAKE3, Argon2id, and HCTR2-256. You work with a vault through the `geode` CLI, the terminal UI, or MCP tools. Coding agents should start with the skill in [`.agents/skills/geode/`](.agents/skills/geode/) and the CLI. A build with the `fuse` feature can also mount a vault on Linux.
 
 | | |
 |---|---|
@@ -119,7 +119,7 @@ Commands at a glance:
 ## Agent use: skills + CLI first, MCP still shipped
 
 The default way for an agent to use Geode is the bundled skill in
-[`skills/geode/`](skills/geode/): a short `SKILL.md` the harness reads to decide when to use
+[`.agents/skills/geode/`](.agents/skills/geode/): a short `SKILL.md` the harness reads to decide when to use
 it, plus a Nushell body that calls the CLI with JSON output. The MCP server
 (`geode agent serve`) is still built and shipped, and works the same as before.
 
@@ -143,8 +143,12 @@ Use the MCP server when your harness defers or filters MCP tool schemas
 (loading them only on demand, or letting you enable single tools), or when
 the client has no shell.
 
-Install the skill by copying or linking `skills/geode/` into your harness's
-skills directory (for example `~/.agents/skills/` or `~/.claude/skills/`).
+`.agents/skills/geode/` is the canonical copy. The same files are checked in
+under `.claude/skills/geode/`, `.grok/skills/geode/`, and `.cursor/skills/geode/`
+as regular files, so each harness finds them. `scripts/sync-skills` rewrites
+those copies from `.agents/skills/`. Codex reads `.agents/skills/`. Do not
+replace the copies with symlinks, and do not add `.omp/skills/` (omp would
+shadow the other copies) or `.codex/skills/`.
 
 ## Agents
 
@@ -215,7 +219,7 @@ crates/geode-cli/     # the geode binary
 crates/geode-tui/     # terminal UI (default feature tui)
 crates/geode-redact/  # redaction of secret values and known key prefixes
 crates/geode-os/      # core-dump refusal and the geode run child spawn
-skills/geode/         # agent skill: SKILL.md and a metadata-only Nushell body
+.agents/skills/geode/ # canonical agent skill: SKILL.md and a metadata-only Nushell body
 vectors/v1/           # golden vectors: kdf, chunk, wrap, name
 ```
 

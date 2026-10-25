@@ -1,0 +1,85 @@
+#!/bin/sh
+# Rewrite .claude, .grok, and .cursor skill copies from .agents/skills.
+# Copies are regular files. A symlink is an error. There is no .omp/skills
+# and no .codex/skills: omp would shadow the other copies, and Codex reads
+# .agents/skills.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+if [ "${1:-}" = "--check" ]; then
+    check=1
+elif [ $# -eq 0 ]; then
+    check=0
+else
+    echo "usage: scripts/sync-skills [--check]" >&2
+    exit 2
+fi
+
+src=.agents/skills
+if [ ! -d "$src" ]; then
+    echo "missing $src" >&2
+    exit 1
+fi
+
+if [ -n "$(find "$src" -type l -print)" ]; then
+    echo "symlink in $src" >&2
+    find "$src" -type l -print >&2
+    exit 1
+fi
+
+dests=".claude/skills .grok/skills .cursor/skills"
+
+rel_files() {
+    root_dir=$1
+    find "$root_dir" -type f | sed "s|^$root_dir/||" | sort
+}
+
+if [ "$check" -eq 1 ]; then
+    status=0
+    canon=$(rel_files "$src")
+    for dest in $dests; do
+        if [ ! -d "$dest" ]; then
+            echo "missing $dest" >&2
+            status=1
+            continue
+        fi
+        if [ -n "$(find "$dest" -type l -print)" ]; then
+            echo "symlink in $dest" >&2
+            find "$dest" -type l -print >&2
+            status=1
+            continue
+        fi
+        got=$(rel_files "$dest")
+        if [ "$canon" != "$got" ]; then
+            echo "file list differs: $dest" >&2
+            status=1
+            continue
+        fi
+        old_ifs=$IFS
+        IFS='
+'
+        for rel in $canon; do
+            if ! cmp -s "$src/$rel" "$dest/$rel"; then
+                echo "bytes differ: $dest/$rel" >&2
+                status=1
+            fi
+        done
+        IFS=$old_ifs
+    done
+    exit "$status"
+fi
+
+for dest in $dests; do
+    rm -rf "$dest"
+    mkdir -p "$dest"
+    find "$src" -type d | while IFS= read -r dir; do
+        rel=${dir#"$src"}
+        mkdir -p "$dest$rel"
+    done
+    find "$src" -type f | while IFS= read -r file; do
+        rel=${file#"$src"}
+        cp -p "$file" "$dest$rel"
+    done
+done
