@@ -1372,6 +1372,56 @@ except OSError:
     print("direct-fail")
 "#;
 
+    /// Calls `LSOpenCFURLRef` itself. `/usr/bin/open` stays exec-denied, and
+    /// this binary is not osascript.
+    #[cfg(target_os = "macos")]
+    const LSOPEN_C: &str = r#"
+#include <CoreServices/CoreServices.h>
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {
+    printf("lsopen-start\n");
+    fflush(stdout);
+    if (argc < 2) return 2;
+    CFURLRef url = CFURLCreateWithBytes(
+        NULL, (const UInt8 *)argv[1], (CFIndex)strlen(argv[1]),
+        kCFStringEncodingUTF8, NULL);
+    if (!url) {
+        printf("lsopen-bad-url\n");
+        return 2;
+    }
+    OSStatus st = LSOpenCFURLRef(url, NULL);
+    CFRelease(url);
+    printf("lsopen %d\n", (int)st);
+    fflush(stdout);
+    return st == noErr ? 0 : 1;
+}
+"#;
+
+    #[cfg(target_os = "macos")]
+    fn compile_lsopen(dir: &Path) -> PathBuf {
+        let src = dir.join("lsopen.c");
+        let bin = dir.join("lsopen");
+        std::fs::write(&src, LSOPEN_C).unwrap();
+        let built = std::process::Command::new("clang")
+            .args([
+                "-Wno-deprecated-declarations",
+                "-framework",
+                "CoreServices",
+                "-o",
+            ])
+            .arg(&bin)
+            .arg(&src)
+            .output()
+            .unwrap_or_else(|err| panic!("clang is required for the LaunchServices probe: {err}"));
+        assert!(
+            built.status.success(),
+            "clang failed to build the LaunchServices probe\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        bin
+    }
+
     /// (a) A confined child that asks the proxy for a host that is not listed
     /// gets no upstream connection. A direct socket to that listener is
     /// refused by the seatbelt as well.
@@ -1499,5 +1549,81 @@ except OSError:
         assert!(err.is_err(), "{err:?}");
         assert!(!marker2.exists(), "unusable sandbox-exec still ran");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// LaunchServices must not open an http URL for a confined child. The
+    /// helper links CoreServices and calls `LSOpenCFURLRef`. A handler
+    /// launched outside the seatbelt would hit the listener on its own.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_egress_launch_services_open_sends_nothing() {
+        let dir = tmpdir("macos-egress-lsopen");
+        let helper = compile_lsopen(&dir);
+        let (port, seen) = http_upstream();
+        let url = format!("http://127.0.0.1:{port}/");
+        let sp = lsopen_spec(&helper, &url);
+        let (out, err, outcome) = confined_output(sp);
+        assert_lsopen_blocked(&outcome, &out, &err, seen);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn lsopen_spec(helper: &Path, url: &str) -> SpawnSpec {
+        SpawnSpec {
+            program: helper.to_path_buf(),
+            args: vec![url.into()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            cwd: None,
+            inherit_stdin: false,
+            timeout: Duration::from_secs(20),
+            host_denials: crate::egress::HostDenials::default(),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn confined_output(sp: SpawnSpec) -> (String, String, ChildOutcome) {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let outcome = spawn_with(
+            sp,
+            &ChildIdentity::Inherit,
+            &["blocked.example".into()],
+            |st, c| match st {
+                Stream::Stdout => out.extend_from_slice(c),
+                Stream::Stderr => err.extend_from_slice(c),
+            },
+        )
+        .expect("confined spawn");
+        (
+            String::from_utf8_lossy(&out).into_owned(),
+            String::from_utf8_lossy(&err).into_owned(),
+            outcome,
+        )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_lsopen_blocked(
+        outcome: &ChildOutcome,
+        out: &str,
+        err: &str,
+        seen: mpsc::Receiver<()>,
+    ) {
+        assert!(!err.contains("sandbox-exec:"), "profile rejected: {err}");
+        assert!(
+            out.contains("lsopen-start"),
+            "helper died before main: {outcome:?}\n{out}\n{err}"
+        );
+        assert!(
+            out.contains("lsopen "),
+            "helper did not report a status: {outcome:?}\n{out}\n{err}"
+        );
+        assert!(
+            !out.contains("lsopen 0"),
+            "LaunchServices opened the url: {outcome:?}\n{out}\n{err}"
+        );
+        assert_ne!(outcome.exit_code, Some(0), "{outcome:?}\n{out}\n{err}");
+        assert!(
+            seen.recv_timeout(Duration::from_millis(800)).is_err(),
+            "listener saw a connection"
+        );
     }
 }

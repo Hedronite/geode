@@ -376,21 +376,15 @@ fn quoted_denies(deny: &[std::path::PathBuf]) -> Result<(String, String), String
     Ok((lits, sock))
 }
 
-/// Seatbelt profile that allows everything except reading or writing the
-/// denied paths (and an audit DB's `-wal`/`-shm` siblings) and connecting
-/// to a denied socket.
-///
-/// This is the custody profile with no egress proxy. A confined run uses
-/// [`seatbelt_profile_confined`], which does not start from `(allow default)`.
+/// Deny-by-default seatbelt with no egress proxy. Outbound network is
+/// denied, including the custody socket. A run that has a proxy uses
+/// [`seatbelt_profile_confined`] instead, which allows only that proxy.
 ///
 /// # Errors
 ///
 /// When a path cannot be quoted safely.
 pub fn seatbelt_profile(deny: &[std::path::PathBuf]) -> Result<String, String> {
-    let (lits, sock) = quoted_denies(deny)?;
-    Ok(format!(
-        "(version 1)\n(allow default)\n(deny file-read* file-write*{lits})\n(deny network-outbound{sock})\n"
-    ))
+    deny_default_profile(deny, None)
 }
 
 /// Seatbelt lines that deny outbound network except the local egress proxy.
@@ -408,20 +402,18 @@ pub fn proxy_network_rules(port: u16) -> String {
     )
 }
 
-/// Mach services a stock shell needs in order to start. Not a prefix, and
-/// not a network service: `networkd` and `nsurlsessiond` are absent.
+/// Mach services a stock shell needs in order to start. Not a prefix.
+///
+/// Absent on purpose: LaunchServices (`coreservicesd`, `launchservicesd`,
+/// `lsd.mapdb`) can open a URL by launching a handler outside the sandbox.
+/// `cfprefsd` can write another app's preferences. `SecurityServer` is the
+/// keychain. `networkd` and `nsurlsessiond` are network services.
 const MACH_LOOKUP_NAMES: &[&str] = &[
     "com.apple.system.logger",
     "com.apple.logd",
     "com.apple.distributed_notifications@Uv3",
     "com.apple.system.notification_center",
-    "com.apple.CoreServices.coreservicesd",
-    "com.apple.coreservices.launchservicesd",
-    "com.apple.lsd.mapdb",
     "com.apple.bsd.dirhelper",
-    "com.apple.cfprefsd.agent",
-    "com.apple.cfprefsd.daemon",
-    "com.apple.SecurityServer",
     "com.apple.system.DirectoryService.libinfo_v1",
     "com.apple.system.DirectoryService.membership_v1",
 ];
@@ -483,6 +475,12 @@ pub fn seatbelt_profile_confined(
     deny: &[std::path::PathBuf],
     proxy: u16,
 ) -> Result<String, String> {
+    deny_default_profile(deny, Some(proxy))
+}
+
+/// Shared deny-default body. `proxy: None` denies every outbound network
+/// destination. `Some(port)` then allows only the egress proxy.
+fn deny_default_profile(deny: &[std::path::PathBuf], proxy: Option<u16>) -> Result<String, String> {
     let (lits, sock) = quoted_denies(deny)?;
     let mut profile = String::from(
         "(version 1)\n(deny default)\n\
@@ -501,7 +499,10 @@ pub fn seatbelt_profile_confined(
     profile.push_str(&mach_lookup_allows());
     profile.push_str("(deny appleevent-send)\n");
     profile.push_str(&helper_exec_deny());
-    profile.push_str(&proxy_network_rules(proxy));
+    match proxy {
+        Some(port) => profile.push_str(&proxy_network_rules(port)),
+        None => profile.push_str("(deny network-outbound)\n"),
+    }
     Ok(profile)
 }
 
@@ -592,6 +593,8 @@ mod tests {
         ] {
             assert!(p.contains(want), "{p}");
         }
+        assert!(p.contains("(deny default)\n"), "{p}");
+        assert!(!p.contains("(allow default)"), "{p}");
         assert!(seatbelt_profile(&["rel".into()]).is_err());
         assert!(seatbelt_profile(&["/a\"b".into()]).is_err());
     }
@@ -615,6 +618,15 @@ mod tests {
         assert!(!open.contains("(allow mach-lookup)\n"), "{open}");
         assert!(!open.contains("com.apple.networkd"), "{open}");
         assert!(!open.contains("nsurlsessiond"), "{open}");
+        assert!(!open.contains("coreservicesd"), "{open}");
+        assert!(!open.contains("launchservicesd"), "{open}");
+        assert!(!open.contains("lsd.mapdb"), "{open}");
+        assert!(!open.contains("cfprefsd"), "{open}");
+        assert!(!open.contains("SecurityServer"), "{open}");
+        let plain = seatbelt_profile(&["/a/k.gkey".into()]).unwrap();
+        assert!(plain.contains("(deny default)\n"), "{plain}");
+        assert!(!plain.contains("(allow default)"), "{plain}");
+        assert!(!plain.contains("localhost:"), "{plain}");
         assert!(!open.contains("(literal \"/a/k.gkey\")"), "{open}");
         let closed = seatbelt_profile_confined(&["/a/k.gkey".into()], 9).unwrap();
         assert!(closed.contains("(deny default)\n"), "{closed}");

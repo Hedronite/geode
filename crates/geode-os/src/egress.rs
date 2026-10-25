@@ -563,27 +563,61 @@ fn dial(host: &str, port: u16) -> Result<TcpStream, DialError> {
 fn is_restricted_target(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_restricted_v4(v4),
-        IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_restricted_v4(v4);
-            }
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_unicast_link_local()
-                || is_unique_local(v6)
-                || is_v6_documentation(v6)
-        }
+        IpAddr::V6(v6) => is_restricted_v6(v6),
     }
 }
 
+fn is_restricted_v6(ip: Ipv6Addr) -> bool {
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_restricted_v4(v4);
+    }
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_unicast_link_local() || ip.is_multicast() {
+        return true;
+    }
+    is_unique_local(ip)
+        || is_v6_documentation(ip)
+        || is_site_local(ip)
+        || is_ipv4_compatible(ip)
+        || is_nat64(ip)
+}
+
 fn is_restricted_v4(ip: Ipv4Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        || ip.is_documentation()
-        || is_cgnat(ip)
+    let first = ip.octets()[0];
+    // 0.0.0.0/8 ("this host") and 240.0.0.0/4 (reserved, includes broadcast).
+    if first == 0 || first >= 240 {
+        return true;
+    }
+    if ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_multicast() {
+        return true;
+    }
+    ip.is_documentation() || is_cgnat(ip) || is_benchmarking(ip)
+}
+
+/// 198.18.0.0/15, the benchmarking range.
+fn is_benchmarking(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 198 && (octets[1] == 18 || octets[1] == 19)
+}
+
+/// fec0::/10, the deprecated site-local range.
+fn is_site_local(ip: Ipv6Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 0xfe && (octets[1] & 0xc0) == 0xc0
+}
+
+/// ::/96, the deprecated IPv4-compatible form. Distinct from IPv4-mapped.
+fn is_ipv4_compatible(ip: Ipv6Addr) -> bool {
+    ip.octets()[..12].iter().all(|byte| *byte == 0)
+}
+
+/// 64:ff9b::/96, the well-known NAT64 prefix.
+fn is_nat64(ip: Ipv6Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 0x00
+        && octets[1] == 0x64
+        && octets[2] == 0xff
+        && octets[3] == 0x9b
+        && octets[4..12].iter().all(|byte| *byte == 0)
 }
 
 fn is_cgnat(ip: Ipv4Addr) -> bool {
@@ -856,12 +890,34 @@ mod tests {
             "2001:db8::1",
             "::ffff:10.0.0.1",
             "::ffff:127.0.0.1",
+            "0.1.2.3",
+            "0.255.255.255",
+            "224.0.0.1",
+            "239.255.255.255",
+            "198.18.0.1",
+            "198.19.255.1",
+            "240.0.0.1",
+            "255.254.0.1",
+            "ff00::1",
+            "ff02::1",
+            "fec0::1",
+            "::8.8.8.8",
+            "64:ff9b::8.8.8.8",
         ];
         for host in restricted {
             let ip = host.parse().unwrap();
             assert!(is_restricted_target(ip), "{host}");
         }
-        for host in ["8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"] {
+        for host in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "223.0.0.1",
+            "198.17.0.1",
+            "198.20.0.1",
+            "2001:4860:4860::8888",
+            "64:ff9b:1::1",
+            "::ffff:8.8.8.8",
+        ] {
             let ip = host.parse().unwrap();
             assert!(!is_restricted_target(ip), "{host}");
         }
