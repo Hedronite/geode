@@ -488,6 +488,10 @@ pub(crate) struct Daemon {
     session: Mutex<Option<Unlocked>>,
     audit_db: PathBuf,
     child: ChildRule,
+    /// Unit tests that need a child without a network namespace. Release
+    /// builds do not have the field, so they cannot skip the host check.
+    #[cfg(test)]
+    unconfined_hosts: bool,
 }
 
 /// The files a daemon owns. The seatbelt denies `key`, `audit_db`, and
@@ -557,6 +561,20 @@ impl Daemon {
             session: Mutex::new(None),
             audit_db: paths.audit_db,
             child,
+            #[cfg(test)]
+            unconfined_hosts: false,
+        }
+    }
+
+    /// Test builds can skip host confinement. Release builds never do.
+    fn host_check_skipped(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.unconfined_hosts
+        }
+        #[cfg(not(test))]
+        {
+            false
         }
     }
 
@@ -812,6 +830,29 @@ impl Daemon {
         let row_paths: Vec<String> = req.bindings.iter().map(|b| b.path.clone()).collect();
         let mut chain = geode_grotto::audit::open(&self.audit_db)
             .map_err(|e| refusal("io", format!("audit db: {e}")))?;
+        if !self.host_check_skipped() {
+            if let Err(err) = run::secret_hosts_or_refuse(&claims.allow_hosts) {
+                let row = run::RowBase {
+                    principal: claims.principal_id.0.clone(),
+                    token_id: cmd::hex(&claims.token_id.0),
+                    peer_uid: Some(peer.uid),
+                    peer_pid: peer.pid.and_then(|p| u32::try_from(p).ok()),
+                    vault_id: cmd::hex(&claims.vault_id.0),
+                    paths: row_paths,
+                    custody: true,
+                    hosts: "refused".into(),
+                };
+                let denied = run::plan_refusal(
+                    &mut chain,
+                    &row,
+                    inject::PlanError::Deny {
+                        reason: err.msg,
+                        exe: None,
+                    },
+                );
+                return Err(refusal(denied.kind, denied.msg));
+            }
+        }
         // Plan under the session lock; the child runs after it is released.
         let (mut plan, row) = {
             let mut guard = self
@@ -841,7 +882,8 @@ impl Daemon {
                 allow_cmds: &claims.allow_cmds,
                 allow_hosts: &claims.allow_hosts,
                 redact: claims.redact,
-                enforce_hosts: cfg!(target_os = "linux"),
+                // The same gate as local `geode run`, on every platform.
+                enforce_hosts: !self.host_check_skipped(),
             };
             let view = inject::VaultView {
                 root: &self.vault,
@@ -874,7 +916,13 @@ impl Daemon {
             inherit_stdin: false,
             timeout: req.timeout,
             identity,
-            allow_hosts: claims.allow_hosts.clone(),
+            allow_hosts: if self.host_check_skipped() {
+                Vec::new()
+            } else {
+                claims.allow_hosts.clone()
+            },
+            #[cfg(any(test, feature = "test-trusted-root"))]
+            test_unconfined_hosts: self.host_check_skipped(),
             home: Some(std::ffi::OsString::from("/")),
         };
         let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -1039,8 +1087,18 @@ mod tests {
     }
 
     /// Raw key, vault, one object, and a bound custody socket served by an
-    /// in-process daemon whose `Agents` rule is `agents`.
+    /// in-process daemon whose `Agents` rule is `agents`. Host confinement
+    /// is off so a child can run without a network namespace.
     fn start(agents: Agents) -> Fx {
+        start_with(agents, true)
+    }
+
+    /// Same daemon, with the secret-binding host check turned on.
+    fn start_confined(agents: Agents) -> Fx {
+        start_with(agents, false)
+    }
+
+    fn start_with(agents: Agents, unconfined: bool) -> Fx {
         let tmp = tempfile::tempdir().unwrap();
         let dir = std::fs::canonicalize(tmp.path()).unwrap();
         let p = |s: &str| dir.join(s).to_str().unwrap().to_owned();
@@ -1059,12 +1117,14 @@ mod tests {
             socket: socket.clone(),
             audit_db: dir.join("state/audit.db"),
         };
-        let d = Arc::new(Daemon::new(
+        let mut daemon = Daemon::new(
             paths,
             4242,
             agents,
             ChildRule::Fixed(geode_os::ChildIdentity::Inherit),
-        ));
+        );
+        daemon.unconfined_hosts = unconfined;
+        let d = Arc::new(daemon);
         std::thread::spawn(move || d.listen(&listener));
         Fx {
             _tmp: tmp,
@@ -1340,30 +1400,66 @@ mod tests {
     }
 
     #[test]
-    fn geode_run_allow_hosts_per_os() {
-        let fx = start(Agents::Uids(Vec::new()));
+    fn custody_empty_allow_hosts_refuses_secret_binding() {
+        let fx = start_confined(Agents::Uids(Vec::new()));
+        let mut a = bound(&fx, &inject_token(&fx, Vec::new()));
+        let marker = fx.dir.join("ran.marker");
+        let script = format!("echo x > '{}'", marker.display());
+        let r = run_call(&mut a, &fx, &["sh", "-c", &script]);
+        assert_eq!(tool_err(&r), "policy_deny");
+        assert!(r.to_string().contains("allow_hosts"), "{r}");
+        assert!(r.to_string().contains("refusing"), "{r}");
+        assert!(!marker.exists(), "empty allow_hosts spawned");
+        assert!(!r.to_string().contains(DUMMY));
+    }
+
+    /// Linux can confine only with `CAP_SYS_ADMIN` (bit 21 of `CapEff`).
+    #[cfg(target_os = "linux")]
+    fn cap_sys_admin() -> bool {
+        let text = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        let Some(raw) = text.lines().find_map(|line| line.strip_prefix("CapEff:")) else {
+            return false;
+        };
+        let hex = raw.trim().trim_start_matches("0x");
+        let tail = hex.get(hex.len().saturating_sub(16)..).unwrap_or(hex);
+        let bits = u64::from_str_radix(tail, 16).unwrap_or(0);
+        bits & (1 << 21) != 0
+    }
+
+    #[test]
+    fn geode_run_allow_hosts_outcome_is_per_os() {
+        let fx = start_confined(Agents::Uids(Vec::new()));
         let mut a = bound(&fx, &inject_token(&fx, vec!["api.example.com".into()]));
         let marker = fx.dir.join("ran.marker");
         let script = format!("echo x > '{}'", marker.display());
         let r = run_call(&mut a, &fx, &["sh", "-c", &script]);
-        if cfg!(target_os = "linux") {
-            // Enforced in a netns, or refused when the host cannot make one.
-            if r["result"]["isError"] == true {
+        // macOS must confine. Linux confines when it holds CAP_SYS_ADMIN and
+        // otherwise refuses. Neither path is an unconfined child.
+        #[cfg(target_os = "macos")]
+        {
+            let doc = tool_doc(&r);
+            assert_eq!(doc["exit_code"], 0, "{r}");
+            assert!(marker.exists(), "confined child did not run");
+            assert_eq!(rows(&fx).last().unwrap().2, "api.example.com");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if cap_sys_admin() {
+                let doc = tool_doc(&r);
+                assert_eq!(doc["exit_code"], 0, "{r}");
+                assert!(marker.exists(), "confined child did not run");
+                assert_eq!(rows(&fx).last().unwrap().2, "api.example.com");
+            } else {
                 assert_eq!(tool_err(&r), "policy_deny");
                 assert!(r.to_string().contains("allow_hosts"), "{r}");
                 assert!(!marker.exists(), "ran without isolation");
-            } else {
-                assert_eq!(tool_doc(&r)["exit_code"], 0);
-                assert_eq!(rows(&fx).last().unwrap().2, "api.example.com");
             }
-        } else {
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
             assert_eq!(tool_err(&r), "policy_deny");
-            assert!(
-                r.to_string()
-                    .contains("allow_hosts: unsupported on this host"),
-                "{r}"
-            );
-            assert!(!marker.exists(), "macOS must refuse before spawn");
+            assert!(r.to_string().contains("allow_hosts"), "{r}");
+            assert!(!marker.exists(), "ran without isolation");
         }
     }
 

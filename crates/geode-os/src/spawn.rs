@@ -44,6 +44,10 @@ pub struct SpawnSpec {
     pub cwd: Option<PathBuf>,
     pub inherit_stdin: bool,
     pub timeout: Duration,
+    /// Proxy refusals recorded while this child runs. The caller keeps a
+    /// clone and reads it after [`spawn_with_pin`] returns. Empty when the
+    /// child is not confined.
+    pub host_denials: crate::egress::HostDenials,
 }
 
 /// The `O_CLOEXEC` fd of [`SpawnSpec::program`] whose bytes matched the
@@ -115,7 +119,7 @@ pub fn spawn_as(
 }
 
 /// Env names the child gets pointing at the egress proxy.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const PROXY_VARS: [&str; 6] = [
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -128,8 +132,12 @@ const PROXY_VARS: [&str; 6] = [
 /// [`spawn_as`] with `allow_hosts` (SPEC-v034 G8). Empty: unrestricted, no
 /// namespace. Non-empty, Linux: the child runs in its own network namespace
 /// with only loopback, where a userspace proxy admits listed hosts; the
-/// proxy env vars point at it. Non-empty elsewhere: `Unsupported`, nothing
-/// runs. If the namespace cannot be made, nothing runs.
+/// proxy env vars point at it. Non-empty, macOS: the same proxy and the
+/// same [`crate::egress::AllowList`] check, and a deny-by-default seatbelt
+/// that can dial only the proxy. Non-empty on any other OS: `Unsupported`,
+/// nothing runs.
+/// If confinement cannot be made, nothing runs. A secret binding must not
+/// reach this function with an empty list; `geode run` refuses that first.
 ///
 /// # Errors
 ///
@@ -159,15 +167,53 @@ pub fn spawn_with_pin(
     allow_hosts: &[String],
     on_chunk: impl FnMut(Stream, &[u8]),
 ) -> io::Result<ChildOutcome> {
+    if allow_hosts.is_empty() {
+        return spawn_open(spec, pin, identity, on_chunk);
+    }
+    spawn_confined(spec, pin, identity, allow_hosts, on_chunk)
+}
+
+/// No host list: the child is not confined. A secret binding does not use
+/// this path; the run layer refuses an empty list first.
+fn spawn_open(
+    spec: SpawnSpec,
+    pin: Option<PinnedExe>,
+    identity: &ChildIdentity,
+    on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
     let cmd = prepared(&spec, identity)?;
     let pin = pin.map(|p| (p, spec.program.clone()));
     #[cfg(test)]
     tests::before_exec();
-    if allow_hosts.is_empty() {
-        let child = launch(cmd, pin)?;
-        return supervise(child, spec.timeout, on_chunk);
-    }
-    isolated(cmd, pin, allow_hosts, spec.timeout, on_chunk)
+    let child = launch(cmd, pin)?;
+    supervise(child, spec.timeout, on_chunk)
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_confined(
+    spec: SpawnSpec,
+    pin: Option<PinnedExe>,
+    identity: &ChildIdentity,
+    allow_hosts: &[String],
+    on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
+    macos_confined(spec, pin, identity, allow_hosts, on_chunk)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn spawn_confined(
+    spec: SpawnSpec,
+    pin: Option<PinnedExe>,
+    identity: &ChildIdentity,
+    allow_hosts: &[String],
+    on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
+    let denials = spec.host_denials.clone();
+    let cmd = prepared(&spec, identity)?;
+    let pin = pin.map(|p| (p, spec.program.clone()));
+    #[cfg(test)]
+    tests::before_exec();
+    isolated(cmd, pin, allow_hosts, spec.timeout, denials, on_chunk)
 }
 
 /// Spawn `cmd`. With a pin, the last pre-exec hook checks the pin and, on
@@ -340,6 +386,12 @@ fn arm_pin(cmd: &mut Command, pin: PinnedExe, program: &Path) -> io::Result<()> 
 /// output, stdin, cwd, and its own process group.
 fn prepared(spec: &SpawnSpec, identity: &ChildIdentity) -> io::Result<Command> {
     let mut cmd = build_command(spec, identity)?;
+    configure_std(&mut cmd, spec);
+    Ok(cmd)
+}
+
+/// Cleared env, piped output, stdin, cwd, and a new process group.
+fn configure_std(cmd: &mut Command, spec: &SpawnSpec) {
     cmd.env_clear()
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .stdin(if spec.inherit_stdin {
@@ -353,7 +405,6 @@ fn prepared(spec: &SpawnSpec, identity: &ChildIdentity) -> io::Result<Command> {
     if let Some(dir) = &spec.cwd {
         cmd.current_dir(dir);
     }
-    Ok(cmd)
 }
 
 #[cfg(target_os = "linux")]
@@ -362,6 +413,7 @@ fn isolated(
     pin: Option<(PinnedExe, PathBuf)>,
     allow_hosts: &[String],
     timeout: Duration,
+    denials: crate::egress::HostDenials,
     on_chunk: impl FnMut(Stream, &[u8]),
 ) -> io::Result<ChildOutcome> {
     use std::net::{TcpListener, TcpStream};
@@ -375,14 +427,21 @@ fn isolated(
             "allow_hosts has no usable entry",
         ));
     }
+    let token = crate::egress::random_proxy_token()?;
+    let session = crate::egress::ProxySession {
+        allow,
+        token: Some(token.clone()),
+        denials,
+    };
     // Workers are spawned from this host-namespace thread, so they dial out
-    // from the daemon's namespace.
+    // from the daemon's namespace. The namespace itself stays v4: the
+    // seatbelt loopback mismatch is macOS-only.
     let (conn_tx, conn_rx) = mpsc::channel::<TcpStream>();
     let dispatcher = thread::spawn(move || {
         for s in conn_rx {
-            let a = allow.clone();
+            let session = session.clone();
             thread::spawn(move || {
-                let _ = crate::egress::handle_client(s, &a);
+                let _ = crate::egress::handle_client(s, &session);
             });
         }
     });
@@ -401,7 +460,7 @@ fn isolated(
                 }
             };
         let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
-        let url = format!("http://127.0.0.1:{port}");
+        let url = crate::egress::proxy_url(port, &token);
         let mut cmd = cmd;
         for k in PROXY_VARS {
             cmd.env(k, &url);
@@ -434,12 +493,13 @@ fn isolated(
     outcome
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn isolated(
     _cmd: Command,
     _pin: Option<(PinnedExe, PathBuf)>,
     _allow_hosts: &[String],
     _timeout: Duration,
+    _denials: crate::egress::HostDenials,
     _on_chunk: impl FnMut(Stream, &[u8]),
 ) -> io::Result<ChildOutcome> {
     Err(io::Error::new(
@@ -529,7 +589,7 @@ fn build_command(spec: &SpawnSpec, identity: &ChildIdentity) -> io::Result<Comma
             Ok(cmd)
         }
         ChildIdentity::User { uid, gid } => user_command(spec, *uid, *gid),
-        ChildIdentity::Seatbelt { deny } => seatbelt_command(spec, deny),
+        ChildIdentity::Seatbelt { deny } => seatbelt_command(spec, deny, None),
     }
 }
 
@@ -572,11 +632,56 @@ fn user_command(_spec: &SpawnSpec, _uid: u32, _gid: u32) -> io::Result<Command> 
 #[cfg(target_os = "macos")]
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+// Test-only path override. Production reads `SANDBOX_EXEC`. A missing or
+// non-executable path makes the confined run refuse before the child starts.
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    static SANDBOX_EXEC_OVERRIDE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[cfg(target_os = "macos")]
-fn seatbelt_command(spec: &SpawnSpec, deny: &[PathBuf]) -> io::Result<Command> {
-    let profile = crate::ident::seatbelt_profile(deny)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let mut cmd = Command::new(SANDBOX_EXEC);
+fn sandbox_exec_program() -> PathBuf {
+    #[cfg(test)]
+    {
+        let over = SANDBOX_EXEC_OVERRIDE.with(|cell| cell.borrow().clone());
+        if let Some(path) = over {
+            return PathBuf::from(path);
+        }
+    }
+    PathBuf::from(SANDBOX_EXEC)
+}
+
+/// Fail closed when `sandbox-exec` is missing or not executable. The child
+/// is not started.
+#[cfg(target_os = "macos")]
+fn require_sandbox_exec() -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = sandbox_exec_program();
+    let meta = std::fs::metadata(&path).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "sandbox-exec is missing or unusable",
+        )
+    })?;
+    if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "sandbox-exec is missing or unusable",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn seatbelt_command(spec: &SpawnSpec, deny: &[PathBuf], proxy: Option<u16>) -> io::Result<Command> {
+    require_sandbox_exec()?;
+    let profile = match proxy {
+        Some(port) => crate::ident::seatbelt_profile_confined(deny, port),
+        None => crate::ident::seatbelt_profile(deny),
+    }
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let mut cmd = Command::new(sandbox_exec_program());
     cmd.arg("-p")
         .arg(profile)
         .arg(&spec.program)
@@ -585,11 +690,151 @@ fn seatbelt_command(spec: &SpawnSpec, deny: &[PathBuf]) -> io::Result<Command> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn seatbelt_command(_spec: &SpawnSpec, _deny: &[PathBuf]) -> io::Result<Command> {
+fn seatbelt_command(
+    _spec: &SpawnSpec,
+    _deny: &[PathBuf],
+    _proxy: Option<u16>,
+) -> io::Result<Command> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "seatbelt is macOS only",
     ))
+}
+
+/// macOS: proxy on both loopback stacks and a deny-by-default seatbelt that
+/// can dial only that proxy. The proxy uses [`crate::egress::AllowList`],
+/// the same matcher as Linux. A per-run token is in the proxy URL. Any
+/// process that can read the child env can present that token; this is not
+/// a TCP peer-uid check.
+#[cfg(target_os = "macos")]
+fn macos_confined(
+    spec: SpawnSpec,
+    pin: Option<PinnedExe>,
+    identity: &ChildIdentity,
+    allow_hosts: &[String],
+    on_chunk: impl FnMut(Stream, &[u8]),
+) -> io::Result<ChildOutcome> {
+    require_sandbox_exec()?;
+    let proxy = UserProxy::start(allow_hosts, spec.host_denials.clone())?;
+    let mut cmd = confined_command(&spec, identity, proxy.port)?;
+    configure_std(&mut cmd, &spec);
+    apply_proxy_env(&mut cmd, proxy.port, &proxy.token);
+    let pinned = pin.map(|p| (p, spec.program.clone()));
+    #[cfg(test)]
+    tests::before_exec();
+    let spawned = launch(cmd, pinned);
+    let outcome = spawned.and_then(|child| supervise(child, spec.timeout, on_chunk));
+    drop(proxy);
+    outcome
+}
+
+#[cfg(target_os = "macos")]
+fn confined_command(spec: &SpawnSpec, identity: &ChildIdentity, port: u16) -> io::Result<Command> {
+    match identity {
+        ChildIdentity::Inherit => seatbelt_command(spec, &[], Some(port)),
+        ChildIdentity::Seatbelt { deny } => seatbelt_command(spec, deny, Some(port)),
+        ChildIdentity::User { .. } => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "allow_hosts: unsupported on this host",
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_proxy_env(cmd: &mut Command, port: u16, token: &str) {
+    let url = crate::egress::proxy_url(port, token);
+    for key in PROXY_VARS {
+        cmd.env(key, &url);
+    }
+}
+
+/// Local proxy. Drop stops the accept loop.
+///
+/// The token is a per-run secret in the child env. A process that can read
+/// that env can present it. There is no TCP peer-uid check on the loopback
+/// socket.
+#[cfg(target_os = "macos")]
+struct UserProxy {
+    port: u16,
+    token: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+#[cfg(target_os = "macos")]
+impl UserProxy {
+    fn start(allow_hosts: &[String], denials: crate::egress::HostDenials) -> io::Result<Self> {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let allow = crate::egress::AllowList::parse(allow_hosts);
+        if allow.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "allow_hosts has no usable entry",
+            ));
+        }
+        let (v4, v6, port) = crate::egress::bind_proxy_loopback()?;
+        let token = crate::egress::random_proxy_token()?;
+        let session = crate::egress::ProxySession {
+            allow,
+            token: Some(token.clone()),
+            denials,
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let join = thread::spawn(move || accept_proxy(vec![v4, v6], flag, session));
+        Ok(Self {
+            port,
+            token,
+            stop,
+            join: Some(join),
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for UserProxy {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn accept_proxy(
+    listeners: Vec<std::net::TcpListener>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    session: crate::egress::ProxySession,
+) {
+    use std::sync::atomic::Ordering;
+    for listener in &listeners {
+        if listener.set_nonblocking(true).is_err() {
+            return;
+        }
+    }
+    while !stop.load(Ordering::Relaxed) {
+        let mut accepted = false;
+        for listener in &listeners {
+            match listener.accept() {
+                Ok((sock, _)) => {
+                    accepted = true;
+                    let session = session.clone();
+                    thread::spawn(move || {
+                        let _ = crate::egress::handle_client(sock, &session);
+                    });
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => return,
+            }
+        }
+        if !accepted {
+            thread::sleep(POLL);
+        }
+    }
 }
 
 fn pipe_reader(
@@ -656,6 +901,7 @@ mod tests {
             cwd: None,
             inherit_stdin: false,
             timeout,
+            host_denials: crate::egress::HostDenials::default(),
         }
     }
 
@@ -707,6 +953,7 @@ mod tests {
             cwd: None,
             inherit_stdin: false,
             timeout: Duration::from_secs(10),
+            host_denials: crate::egress::HostDenials::default(),
         };
         (spec, pinned)
     }
@@ -945,6 +1192,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn allow_hosts_seatbelt_runs_a_local_command() {
+        let mut out = Vec::new();
+        let outcome = spawn_with(
+            spec("echo ok", Duration::from_secs(10)),
+            &ChildIdentity::Inherit,
+            &["127.0.0.1".into()],
+            |st, chunk| {
+                if st == Stream::Stdout {
+                    out.extend_from_slice(chunk);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome.exit_code, Some(0), "{outcome:?}");
+        assert!(String::from_utf8_lossy(&out).contains("ok"));
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn seatbelt_is_refused_off_macos() {
@@ -1027,7 +1293,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn allow_hosts_refuses_before_spawn_off_linux() {
         let marker = std::env::temp_dir().join(format!("geode-os-hosts-{}", std::process::id()));
@@ -1045,6 +1311,8 @@ mod tests {
         assert!(!marker.exists());
     }
 
+    /// Spawn's empty list is no namespace. A secret binding never gets here
+    /// with an empty list: `geode run` and custody refuse that first.
     #[test]
     fn empty_allow_hosts_is_unrestricted() {
         let (port, seen) = http_upstream();
@@ -1067,5 +1335,330 @@ mod tests {
     fn debug_has_no_values() {
         let d = format!("{:?}", spec("echo secret-arg", Duration::from_secs(1)));
         assert!(!d.contains("secret-arg") && !d.contains("one"), "{d}");
+    }
+
+    #[cfg(target_os = "macos")]
+    struct ResetSandbox;
+
+    #[cfg(target_os = "macos")]
+    impl Drop for ResetSandbox {
+        fn drop(&mut self) {
+            SANDBOX_EXEC_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    const PROBE_PY: &str = r#"
+import os, socket, sys, base64
+from urllib.parse import urlparse
+proxy = os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY") or ""
+u = urlparse(proxy)
+auth = base64.b64encode(("%s:%s" % (u.username or "", u.password or "")).encode()).decode()
+dest_host, dest_port = sys.argv[1], int(sys.argv[2])
+s = socket.create_connection((u.hostname, u.port), 3)
+req = (
+    "CONNECT %s:%s HTTP/1.1\r\nHost: %s:%s\r\nProxy-Authorization: Basic %s\r\n\r\n"
+    % (dest_host, dest_port, dest_host, dest_port, auth)
+)
+s.sendall(req.encode())
+line = s.recv(200).split(b"\r\n", 1)[0].decode("utf-8", "replace")
+print("via", line)
+s.close()
+try:
+    d = socket.create_connection((dest_host, dest_port), 2)
+    d.close()
+    print("direct-ok")
+except OSError:
+    print("direct-fail")
+"#;
+
+    /// Calls `LSOpenCFURLRef` itself. `/usr/bin/open` stays exec-denied, and
+    /// this binary is not osascript.
+    #[cfg(target_os = "macos")]
+    const LSOPEN_C: &str = r#"
+#include <CoreServices/CoreServices.h>
+#include <stdio.h>
+#include <string.h>
+int main(int argc, char **argv) {
+    printf("lsopen-start\n");
+    fflush(stdout);
+    if (argc < 2) return 2;
+    CFURLRef url = CFURLCreateWithBytes(
+        NULL, (const UInt8 *)argv[1], (CFIndex)strlen(argv[1]),
+        kCFStringEncodingUTF8, NULL);
+    if (!url) {
+        printf("lsopen-bad-url\n");
+        return 2;
+    }
+    OSStatus st = LSOpenCFURLRef(url, NULL);
+    CFRelease(url);
+    printf("lsopen %d\n", (int)st);
+    fflush(stdout);
+    return st == noErr ? 0 : 1;
+}
+"#;
+
+    #[cfg(target_os = "macos")]
+    fn compile_lsopen(dir: &Path) -> PathBuf {
+        let src = dir.join("lsopen.c");
+        let bin = dir.join("lsopen");
+        std::fs::write(&src, LSOPEN_C).unwrap();
+        let built = std::process::Command::new("clang")
+            .args([
+                "-Wno-deprecated-declarations",
+                "-framework",
+                "CoreServices",
+                "-o",
+            ])
+            .arg(&bin)
+            .arg(&src)
+            .output()
+            .unwrap_or_else(|err| panic!("clang is required for the LaunchServices probe: {err}"));
+        assert!(
+            built.status.success(),
+            "clang failed to build the LaunchServices probe\n{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        bin
+    }
+
+    /// (a) A confined child that asks the proxy for a host that is not listed
+    /// gets no upstream connection. A direct socket to that listener is
+    /// refused by the seatbelt as well.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_egress_denied_host_sends_nothing() {
+        let dir = tmpdir("macos-egress-deny");
+        let probe = dir.join("probe.py");
+        std::fs::write(&probe, PROBE_PY).unwrap();
+        let (port, seen) = http_upstream();
+        let script = format!("/usr/bin/python3 '{}' 127.0.0.1 {port}", probe.display());
+        let mut sp = spec(&script, Duration::from_secs(20));
+        sp.env.push(("PATH".into(), "/usr/bin:/bin".into()));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let outcome = spawn_with(
+            sp,
+            &ChildIdentity::Inherit,
+            &["blocked.example".into()],
+            |st, c| match st {
+                Stream::Stdout => out.extend_from_slice(c),
+                Stream::Stderr => err.extend_from_slice(c),
+            },
+        )
+        .expect("confined spawn");
+        let out = String::from_utf8_lossy(&out);
+        let err = String::from_utf8_lossy(&err);
+        assert!(!err.contains("sandbox-exec:"), "profile rejected: {err}");
+        assert!(
+            out.contains("via HTTP/1.1 403"),
+            "exit {:?}\n{out}\n{err}",
+            outcome.exit_code
+        );
+        assert!(!out.contains("direct-ok"), "{out}\n{err}");
+        assert!(
+            seen.recv_timeout(Duration::from_millis(300)).is_err(),
+            "denied host was dialed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// (b) curl and osascript cannot be exec'd from inside the seatbelt.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_egress_network_helper_is_denied() {
+        let (port, seen) = http_upstream();
+        let script = format!(
+            "/usr/bin/curl -s --max-time 3 http://127.0.0.1:{port}/ ; echo curl:$?; \
+             /usr/bin/osascript -e 'return 1' ; echo osa:$?"
+        );
+        let mut sp = spec(&script, Duration::from_secs(20));
+        sp.env.push(("PATH".into(), "/usr/bin:/bin".into()));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let outcome = spawn_with(
+            sp,
+            &ChildIdentity::Inherit,
+            &["blocked.example".into()],
+            |st, c| match st {
+                Stream::Stdout => out.extend_from_slice(c),
+                Stream::Stderr => err.extend_from_slice(c),
+            },
+        )
+        .expect("confined spawn");
+        let out = String::from_utf8_lossy(&out);
+        let err = String::from_utf8_lossy(&err);
+        let text = format!("{out}\n{err}");
+        assert!(!text.contains("sandbox-exec:"), "{text}");
+        assert!(
+            text.contains("curl:"),
+            "exit {:?}\n{text}",
+            outcome.exit_code
+        );
+        assert!(!text.contains("curl:0"), "{text}");
+        assert!(
+            text.contains("not permitted") || text.contains("curl:126"),
+            "{text}"
+        );
+        assert!(text.contains("osa:"), "{text}");
+        assert!(!text.contains("osa:0"), "{text}");
+        assert!(
+            seen.recv_timeout(Duration::from_millis(300)).is_err(),
+            "helper reached upstream"
+        );
+    }
+
+    /// (c) A missing or non-executable sandbox-exec refuses the run.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_egress_missing_sandbox_exec_refuses() {
+        use std::os::unix::fs::PermissionsExt;
+        let _reset = ResetSandbox;
+        let marker = std::env::temp_dir().join(format!("geode-os-nosb-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        SANDBOX_EXEC_OVERRIDE.with(|cell| {
+            *cell.borrow_mut() = Some("/no/such/geode-sandbox-exec".into());
+        });
+        let sp = spec(
+            &format!("echo x > '{}'", marker.display()),
+            Duration::from_secs(5),
+        );
+        let err = spawn_with(
+            sp,
+            &ChildIdentity::Inherit,
+            &["api.example.com".into()],
+            |_, _| {},
+        );
+        assert!(err.is_err(), "{err:?}");
+        assert!(!marker.exists(), "missing sandbox-exec still ran");
+
+        let dir = tmpdir("nosb-mode");
+        let fake = dir.join("sandbox-exec");
+        std::fs::write(&fake, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o644)).unwrap();
+        SANDBOX_EXEC_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(fake.display().to_string()));
+        let marker2 = dir.join("ran");
+        let sp = spec(
+            &format!("echo x > '{}'", marker2.display()),
+            Duration::from_secs(5),
+        );
+        let err = spawn_with(
+            sp,
+            &ChildIdentity::Inherit,
+            &["api.example.com".into()],
+            |_, _| {},
+        );
+        assert!(err.is_err(), "{err:?}");
+        assert!(!marker2.exists(), "unusable sandbox-exec still ran");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// LaunchServices must not open an http URL for a confined child. The
+    /// helper links CoreServices and calls `LSOpenCFURLRef`. A handler
+    /// launched outside the seatbelt would hit the listener on its own.
+    ///
+    /// The same helper also runs with empty `allow_hosts`, which is
+    /// `spawn_open`: no seatbelt. An unconfined `LSOpenCFURLRef` is not a
+    /// reliable success on CI runners: often there is no GUI session and no
+    /// default http handler, so the status may be an error and the listener
+    /// may see nothing. The control asserts only that the helper reached
+    /// `main` and logged a status. A confined failure then comes from the
+    /// sandbox, not from a helper that never ran. Both statuses are printed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_egress_launch_services_open_sends_nothing() {
+        let dir = tmpdir("macos-egress-lsopen");
+        let helper = compile_lsopen(&dir);
+        let (free_port, _) = http_upstream();
+        let free_url = format!("http://127.0.0.1:{free_port}/");
+        let (free_out, free_err, free_outcome) =
+            capture_lsopen(lsopen_spec(&helper, &free_url), &[]);
+        let (port, seen) = http_upstream();
+        let url = format!("http://127.0.0.1:{port}/");
+        let (out, err, outcome) =
+            capture_lsopen(lsopen_spec(&helper, &url), &["blocked.example".into()]);
+        eprintln!(
+            "LaunchServices status confined={} unconfined={}",
+            lsopen_status(&out),
+            lsopen_status(&free_out),
+        );
+        assert_lsopen_reported(&free_outcome, &free_out, &free_err);
+        assert_lsopen_blocked(&outcome, &out, &err, seen);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn lsopen_spec(helper: &Path, url: &str) -> SpawnSpec {
+        SpawnSpec {
+            program: helper.to_path_buf(),
+            args: vec![url.into()],
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            cwd: None,
+            inherit_stdin: false,
+            timeout: Duration::from_secs(20),
+            host_denials: crate::egress::HostDenials::default(),
+        }
+    }
+
+    /// `allow_hosts` empty is unconfined. A non-empty list applies the seatbelt.
+    #[cfg(target_os = "macos")]
+    fn capture_lsopen(sp: SpawnSpec, allow_hosts: &[String]) -> (String, String, ChildOutcome) {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let outcome = spawn_with(sp, &ChildIdentity::Inherit, allow_hosts, |st, c| match st {
+            Stream::Stdout => out.extend_from_slice(c),
+            Stream::Stderr => err.extend_from_slice(c),
+        })
+        .expect("lsopen spawn");
+        (
+            String::from_utf8_lossy(&out).into_owned(),
+            String::from_utf8_lossy(&err).into_owned(),
+            outcome,
+        )
+    }
+
+    /// The numeric `lsopen <status>` line, or `missing` when the helper
+    /// printed none. Logged for both the confined run and the control.
+    #[cfg(target_os = "macos")]
+    fn lsopen_status(out: &str) -> String {
+        out.lines()
+            .find_map(|line| {
+                let rest = line.strip_prefix("lsopen ")?;
+                let value = rest.trim();
+                value.parse::<i32>().ok()?;
+                Some(value.to_owned())
+            })
+            .unwrap_or_else(|| "missing".into())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_lsopen_reported(outcome: &ChildOutcome, out: &str, err: &str) {
+        assert!(
+            out.contains("lsopen-start"),
+            "helper died before main: {outcome:?}\n{out}\n{err}"
+        );
+        assert_ne!(
+            lsopen_status(out),
+            "missing",
+            "helper did not report a status: {outcome:?}\n{out}\n{err}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_lsopen_blocked(
+        outcome: &ChildOutcome,
+        out: &str,
+        err: &str,
+        seen: mpsc::Receiver<()>,
+    ) {
+        assert!(!err.contains("sandbox-exec:"), "profile rejected: {err}");
+        assert_lsopen_reported(outcome, out, err);
+        assert_ne!(
+            lsopen_status(out),
+            "0",
+            "LaunchServices opened the url: {outcome:?}\n{out}\n{err}"
+        );
+        assert_ne!(outcome.exit_code, Some(0), "{outcome:?}\n{out}\n{err}");
+        assert!(
+            seen.recv_timeout(Duration::from_secs(3)).is_err(),
+            "listener saw a connection"
+        );
     }
 }
