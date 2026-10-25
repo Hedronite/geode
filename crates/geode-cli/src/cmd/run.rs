@@ -37,6 +37,10 @@ use crate::{cmd, GlobalArgs, OutMode};
 const LOCAL_PRINCIPAL: &str = "human:local";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
+// The compile refusal is `not(debug_assertions)` only (`cargo build --release`,
+// `cargo install`). A dev or test build can still enable `test-trusted-root`;
+// the integration tests do. That is not a release guarantee.
+// `--test-unconfined-hosts` is behind the same feature.
 #[cfg(all(feature = "test-trusted-root", not(debug_assertions)))]
 compile_error!(
     "feature `test-trusted-root` is test-only and insecure (it moves the pin trust root); \
@@ -55,8 +59,8 @@ compile_error!(
 /// every ancestor up to `/` is owned by root, not group- or other-writable,
 /// and not a symlink. Every binding must pass policy, or nothing runs. The child
 /// gets a fresh env: `PATH`, `HOME` (or `--home`), `LANG`, `TERM`, then the
-/// bindings. It never gets `GEODE_TOKEN`. With no `--allow-hosts` the child
-/// is not network-isolated.
+/// bindings. It never gets `GEODE_TOKEN`. A run with `--secret` and no
+/// `--allow-host` is refused before spawn on every OS.
 ///
 /// Stdout carries only the child's redacted stdout. Stderr carries
 /// `geode:` lines (warnings, `injected: NAMES (values withheld)`) and the
@@ -124,6 +128,12 @@ pub struct RunArgs {
     /// does the same. Off by default, so a bare path still runs.
     #[arg(long)]
     pub require_pin: bool,
+    /// Host this run may contact with a bound secret (repeatable). Required
+    /// when `--secret` is set. `host` or `host:port`. No scheme, path, or
+    /// userinfo. An empty list is refused before spawn. The check is the
+    /// custody allowlist. There is no switch that turns it off.
+    #[arg(long = "allow-host", value_name = "HOST")]
+    pub allow_host: Vec<String>,
     /// Test-only and insecure. Compiled out of release builds. Both this and
     /// `test_trusted_uid` are required together; production runs pass neither.
     #[cfg(feature = "test-trusted-root")]
@@ -133,6 +143,12 @@ pub struct RunArgs {
     #[cfg(feature = "test-trusted-root")]
     #[arg(long, hide = true, value_name = "UID")]
     pub test_trusted_uid: Option<u32>,
+    /// Test-only and insecure. Compiled out of release builds. Skips host
+    /// confinement so existing spawn tests can run without a network
+    /// namespace. A release `geode` does not accept this flag.
+    #[cfg(feature = "test-trusted-root")]
+    #[arg(long, hide = true)]
+    pub test_unconfined_hosts: bool,
     /// Seconds before SIGTERM; SIGKILL follows 2 seconds later.
     #[arg(long, value_name = "SECS", default_value_t = DEFAULT_TIMEOUT_SECS)]
     pub timeout: u64,
@@ -143,17 +159,12 @@ pub struct RunArgs {
     #[arg(long, value_name = "DIR")]
     pub cwd: Option<PathBuf>,
     /// `HOME` for the child in place of the caller's. Must be absolute,
-    /// must not contain `..`, and must not be the caller's `HOME`. Omitted,
-    /// the child gets the caller's `HOME`.
+    /// must not contain `..`, and must not be the caller's `HOME`. This is
+    /// a usability guard, not a boundary: the child still runs as the
+    /// caller. Custody homes should be pre-created, owned by root or the
+    /// daemon, mode 0700, and not a symlink.
     #[arg(long, value_name = "DIR")]
     pub home: Option<PathBuf>,
-    /// Host the child may reach (repeatable). A bare host: no scheme, path,
-    /// userinfo, or whitespace. Omitted, the list is empty and the child is
-    /// not isolated. A non-empty list runs the child in its own network
-    /// namespace behind the egress proxy: Linux only, refused elsewhere
-    /// (exit 3).
-    #[arg(long = "allow-hosts", value_name = "HOST")]
-    pub allow_hosts: Vec<String>,
     /// Do not redact child output. Only a `human:*` principal with `admin`.
     #[arg(long)]
     pub no_redact: bool,
@@ -236,8 +247,16 @@ fn token_present(args: &RunArgs) -> bool {
         || std::env::var_os("GEODE_TOKEN").is_some_and(|t| !t.is_empty())
 }
 
+/// Parse-level inputs, checked before any key is touched.
+struct Prepared {
+    bindings: Vec<BindingSpec>,
+    cmds: Vec<CmdRule>,
+    hosts: Vec<String>,
+    home: Option<OsString>,
+}
+
 /// Validate the parse-level rules before any key is touched.
-fn preflight(args: &RunArgs) -> Result<(Vec<BindingSpec>, Vec<CmdRule>), Refusal> {
+fn preflight(args: &RunArgs) -> Result<Prepared, Refusal> {
     if args.token.is_some() {
         return Err(refuse(
             exit::USAGE,
@@ -278,7 +297,18 @@ fn preflight(args: &RunArgs) -> Result<(Vec<BindingSpec>, Vec<CmdRule>), Refusal
     }
     let bindings = parse_bindings(&args.secret)?;
     let cmds = load_run_cmds(args)?;
-    Ok((bindings, cmds))
+    let hosts = parse_allow_hosts(&args.allow_host)?;
+    let home = args
+        .home
+        .as_deref()
+        .map(|d| check_home(d, std::env::var_os("HOME").as_deref()))
+        .transpose()?;
+    Ok(Prepared {
+        home,
+        bindings,
+        cmds,
+        hosts,
+    })
 }
 
 /// `--home`: absolute, no `..`, and not the caller's `HOME`, compared by
@@ -310,30 +340,64 @@ fn check_home(dir: &Path, caller: Option<&OsStr>) -> Result<OsString, Refusal> {
     Ok(dir.as_os_str().to_os_string())
 }
 
-/// `--allow-hosts`, checked as `agent token issue --allow-host` checks
-/// it: non-empty ASCII, no whitespace, scheme, path, or userinfo.
-/// Lowercased, in order, without repeats.
-fn parse_hosts(raw: &[String]) -> Result<Vec<String>, Refusal> {
-    let mut hosts: Vec<String> = Vec::new();
-    for h in raw {
-        let bad = h.is_empty()
-            || !h.is_ascii()
-            || h.contains("://")
-            || h.chars()
-                .any(|c| c.is_ascii_whitespace() || c == '/' || c == '@');
-        if bad {
-            return Err(refuse(
-                exit::USAGE,
-                "usage",
-                format!("bad --allow-hosts '{h}'"),
-            ));
-        }
-        let h = h.to_ascii_lowercase();
-        if !hosts.contains(&h) {
-            hosts.push(h);
+/// `--allow-host` entries, lowercased, in first-seen order.
+fn parse_allow_hosts(raw: &[String]) -> Result<Vec<String>, Refusal> {
+    let mut hosts = Vec::new();
+    for host in raw {
+        let host = cmd::agent::normalize_host(host)
+            .map_err(|e| refuse(exit::USAGE, "usage", error_text(&e)))?;
+        if !hosts.contains(&host) {
+            hosts.push(host);
         }
     }
     Ok(hosts)
+}
+
+/// True only in a test build that asked to skip host confinement.
+fn unconfined_run(args: &RunArgs) -> bool {
+    #[cfg(feature = "test-trusted-root")]
+    {
+        args.test_unconfined_hosts
+    }
+    #[cfg(not(feature = "test-trusted-root"))]
+    {
+        let _ = args;
+        false
+    }
+}
+
+/// Usable `allow_hosts` for a secret binding, or the shared refusal.
+/// Local `geode run` and custody both call this. Empty is not allow-all.
+pub(crate) fn secret_hosts_or_refuse(hosts: &[String]) -> Result<Vec<String>, Refusal> {
+    match geode_os::egress::require_secret_hosts(hosts) {
+        Ok(()) => Ok(hosts.to_vec()),
+        Err(err) => Err(refuse(exit::POLICY, err.code(), err.to_string())),
+    }
+}
+
+/// Hosts passed to spawn. An empty secret list writes a deny row and
+/// returns the refusal. The test seam skips the check and confines nothing.
+fn resolve_spawn_hosts(
+    chain: &mut Chain,
+    row: &RowBase,
+    bindings: &[BindingSpec],
+    hosts: &[String],
+    unconfined: bool,
+) -> Result<Vec<String>, Refusal> {
+    if unconfined || bindings.is_empty() {
+        return Ok(Vec::new());
+    }
+    match secret_hosts_or_refuse(hosts) {
+        Ok(list) => Ok(list),
+        Err(err) => Err(plan_refusal(
+            chain,
+            row,
+            PlanError::Deny {
+                reason: err.msg,
+                exe: None,
+            },
+        )),
+    }
 }
 
 /// Allow rules from `--allow-cmd` and `--allow-cmds-file`. When require-pin
@@ -394,13 +458,12 @@ fn load_refusal(e: &Error) -> Refusal {
 }
 
 fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refusal> {
-    let (bindings, cmds) = preflight(args)?;
-    let home = args
-        .home
-        .as_deref()
-        .map(|d| check_home(d, std::env::var_os("HOME").as_deref()))
-        .transpose()?;
-    let hosts = parse_hosts(&args.allow_hosts)?;
+    let Prepared {
+        bindings,
+        cmds,
+        hosts: hosts_in,
+        home,
+    } = preflight(args)?;
     if geode_os::deny_core_dumps().is_err() {
         eprintln!("geode: warning: could not refuse core dumps for this process");
     }
@@ -427,15 +490,33 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         )
     })?;
 
+    let unconfined = unconfined_run(args);
+    let mut row = RowBase {
+        principal: LOCAL_PRINCIPAL.into(),
+        token_id: String::new(),
+        peer_uid: None,
+        peer_pid: None,
+        vault_id: cmd::hex(&ctx.vault_id.0),
+        paths: bindings.iter().map(|b| b.path.clone()).collect(),
+        custody: false,
+        hosts: "refused".into(),
+    };
+    let spawn_hosts = resolve_spawn_hosts(&mut chain, &row, &bindings, &hosts_in, unconfined)?;
+    row.hosts = if spawn_hosts.is_empty() {
+        inject::hosts_label(&[])
+    } else {
+        inject::hosts_label(&spawn_hosts)
+    };
     let principal = PrincipalId(LOCAL_PRINCIPAL.into());
     let caller = Caller {
         principal: &principal,
         policy: &policy,
         token: None,
         allow_cmds: &cmds,
-        allow_hosts: &hosts,
+        allow_hosts: &spawn_hosts,
         redact: RedactLevel::Strict,
-        enforce_hosts: cfg!(target_os = "linux"),
+        // A non-empty list is enforced on every platform, not only Linux.
+        enforce_hosts: !spawn_hosts.is_empty(),
     };
     let view = VaultView {
         root: &args.vault,
@@ -444,16 +525,6 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         manifest: &ctx.manifest,
     };
     let base_path = std::env::var_os("PATH");
-    let row = RowBase {
-        principal: LOCAL_PRINCIPAL.into(),
-        token_id: String::new(),
-        peer_uid: None,
-        peer_pid: None,
-        vault_id: cmd::hex(&ctx.vault_id.0),
-        paths: bindings.iter().map(|b| b.path.clone()).collect(),
-        custody: false,
-        hosts: inject::hosts_label(&hosts),
-    };
     let request = PlanRequest {
         bindings: &bindings,
         argv: &args.command,
@@ -464,14 +535,7 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         Ok(p) => p,
         Err(e) => return Err(plan_refusal(&mut chain, &row, e)),
     };
-    let exec = LocalExec { home, hosts };
-    execute(args, out, exec, &mut plan, &mut chain, &row)
-}
-
-/// The validated `--home` and `--allow-hosts` of one local run.
-struct LocalExec {
-    home: Option<OsString>,
-    hosts: Vec<String>,
+    execute(args, out, &mut plan, &mut chain, &row, (spawn_hosts, home))
 }
 
 /// Production `plan`, or the test root when that feature is compiled in.
@@ -520,6 +584,7 @@ fn now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append(
     chain: &mut Chain,
     row: &RowBase,
@@ -527,6 +592,7 @@ fn append(
     argv: ArgvCommit,
     exit_code: Option<i32>,
     hits: BTreeMap<String, u64>,
+    hosts: &str,
 ) -> Result<(), Refusal> {
     let input = AuditInput {
         ts: now(),
@@ -541,7 +607,7 @@ fn append(
         redaction_hits: hits,
         outcome: outcome.into(),
         custody: row.custody,
-        hosts: row.hosts.clone(),
+        hosts: hosts.into(),
         argv,
     };
     // Fail closed (Fix 3): the SQLite chain is the source of truth, so a
@@ -590,6 +656,7 @@ pub(crate) fn plan_refusal(chain: &mut Chain, row: &RowBase, e: PlanError) -> Re
                 not_spawned(),
                 None,
                 BTreeMap::new(),
+                &row.hosts,
             ) {
                 return r;
             }
@@ -604,6 +671,7 @@ pub(crate) fn plan_refusal(chain: &mut Chain, row: &RowBase, e: PlanError) -> Re
                 ArgvCommit::Rejected { exe },
                 None,
                 BTreeMap::new(),
+                &row.hosts,
             ) {
                 return r;
             }
@@ -642,6 +710,10 @@ pub(crate) struct ExecOpts {
     pub(crate) timeout: Duration,
     pub(crate) identity: geode_os::ChildIdentity,
     pub(crate) allow_hosts: Vec<String>,
+    /// Test-only. When set, an empty host list does not refuse a secret
+    /// binding and the child is not confined. Absent from release builds.
+    #[cfg(any(test, feature = "test-trusted-root"))]
+    pub(crate) test_unconfined_hosts: bool,
     /// `HOME` for the child; `None` keeps the caller's.
     pub(crate) home: Option<OsString>,
 }
@@ -672,9 +744,34 @@ pub(crate) fn execute_plan(
         argv0: plan.exe.clone(),
         args: plan.args.clone(),
     };
+    // Host refusal is before the intent row and before the child env, so a
+    // secret with no allowlist never leaves the plan.
+    let hosts_for_child = match confined_hosts(plan, &opts) {
+        Ok(hosts) => hosts,
+        Err(err) => {
+            return Err(plan_refusal(
+                chain,
+                row,
+                PlanError::Deny {
+                    reason: err.msg,
+                    exe: None,
+                },
+            ));
+        }
+    };
+    let isolate = !hosts_for_child.is_empty();
     // Intent row before any value leaves the plan (Fix 3). If it cannot be
     // written, no child env is built and nothing spawns.
-    append(chain, row, "started", argv(), None, BTreeMap::new())?;
+    append(
+        chain,
+        row,
+        "started",
+        argv(),
+        None,
+        BTreeMap::new(),
+        &row.hosts,
+    )?;
+    let denials = geode_os::HostDenials::default();
     let spec = geode_os::SpawnSpec {
         program: PathBuf::from(&plan.exe),
         args: plan.args.iter().map(OsString::from).collect(),
@@ -682,10 +779,11 @@ pub(crate) fn execute_plan(
         cwd: opts.cwd,
         inherit_stdin: opts.inherit_stdin,
         timeout: opts.timeout,
+        host_denials: denials.clone(),
     };
     let mut collector = Collector::new(plan);
     let spawned =
-        geode_os::spawn_with_pin(spec, pin, &opts.identity, &opts.allow_hosts, |s, chunk| {
+        geode_os::spawn_with_pin(spec, pin, &opts.identity, &hosts_for_child, |s, chunk| {
             let ch = match s {
                 geode_os::Stream::Stdout => Channel::Stdout,
                 geode_os::Stream::Stderr => Channel::Stderr,
@@ -703,10 +801,11 @@ pub(crate) fn execute_plan(
                 not_spawned(),
                 None,
                 BTreeMap::new(),
+                &row.hosts,
             )?;
             // A list that cannot be enforced is a refusal, never an
             // unconfined run.
-            return Err(if opts.allow_hosts.is_empty() {
+            return Err(if !isolate {
                 refuse(
                     exit::USAGE,
                     "spawn_failed",
@@ -726,6 +825,7 @@ pub(crate) fn execute_plan(
         emit(ch, tail);
     }
     let hits = collector.hits();
+    record_host_denials(chain, row, &argv, &denials)?;
     let label = if outcome.timed_out {
         "timed_out"
     } else {
@@ -738,6 +838,7 @@ pub(crate) fn execute_plan(
         argv(),
         Some(outcome.process_exit()),
         hits.clone(),
+        &row.hosts,
     )?;
     Ok(Executed {
         outcome,
@@ -746,13 +847,60 @@ pub(crate) fn execute_plan(
     })
 }
 
+/// One `host_denied` audit row per proxy refusal, after the child and
+/// before the close row. A failed append is `audit_failed`; the child has
+/// already run. The token is not written.
+fn record_host_denials(
+    chain: &mut Chain,
+    row: &RowBase,
+    argv: &impl Fn() -> ArgvCommit,
+    denials: &geode_os::HostDenials,
+) -> Result<(), Refusal> {
+    for host in denials.snapshot() {
+        append(
+            chain,
+            row,
+            "host_denied",
+            argv(),
+            None,
+            BTreeMap::new(),
+            &host,
+        )?;
+    }
+    Ok(())
+}
+
+/// Hosts the child may dial. The test seam returns an empty list and does
+/// not refuse. Otherwise a secret binding with an empty list is a refusal.
+fn confined_hosts(plan: &inject::Plan, opts: &ExecOpts) -> Result<Vec<String>, Refusal> {
+    if exec_unconfined(opts) {
+        return Ok(Vec::new());
+    }
+    if plan.env.is_empty() {
+        return Ok(opts.allow_hosts.clone());
+    }
+    secret_hosts_or_refuse(&opts.allow_hosts)
+}
+
+fn exec_unconfined(opts: &ExecOpts) -> bool {
+    #[cfg(any(test, feature = "test-trusted-root"))]
+    {
+        opts.test_unconfined_hosts
+    }
+    #[cfg(not(any(test, feature = "test-trusted-root")))]
+    {
+        let _ = opts;
+        false
+    }
+}
+
 fn execute(
     args: &RunArgs,
     out: OutMode,
-    exec: LocalExec,
     plan: &mut inject::Plan,
     chain: &mut Chain,
     row: &RowBase,
+    (hosts, home): (Vec<String>, Option<OsString>),
 ) -> Result<i32, Refusal> {
     // After authorization, before spawn (harmonized spec §3 Output).
     eprintln!(
@@ -764,8 +912,10 @@ fn execute(
         inherit_stdin: args.stdin,
         timeout: Duration::from_secs(args.timeout),
         identity: geode_os::ChildIdentity::Inherit,
-        allow_hosts: exec.hosts,
-        home: exec.home,
+        allow_hosts: hosts,
+        #[cfg(any(test, feature = "test-trusted-root"))]
+        test_unconfined_hosts: unconfined_run(args),
+        home,
     };
     let (mut buf_out, mut buf_err) = (Vec::new(), Vec::new());
     let emit = |ch: Channel, bytes: Vec<u8>| match (out, ch) {
@@ -815,7 +965,89 @@ fn execute(
 }
 
 #[cfg(test)]
-mod tests {
+mod host_policy_tests {
+    use super::secret_hosts_or_refuse;
+    use crate::output::exit;
+
+    #[test]
+    fn empty_secret_allow_hosts_is_policy_deny() {
+        let err = secret_hosts_or_refuse(&[]).unwrap_err();
+        assert_eq!(err.code, exit::POLICY);
+        assert_eq!(err.kind, "policy_deny");
+        assert!(err.msg.contains("allow_hosts"), "{}", err.msg);
+        assert!(err.msg.contains("refusing"), "{}", err.msg);
+        let unusable = secret_hosts_or_refuse(&[":not-a-port".into()]).unwrap_err();
+        assert_eq!(unusable.kind, "policy_deny");
+    }
+
+    #[test]
+    fn local_and_custody_host_gate_agree() {
+        let hosts = vec!["API.example.com".into(), "db.example.com:5432".into()];
+        assert!(secret_hosts_or_refuse(&hosts).is_ok());
+        let cases = [
+            ("api.example.com", 443u16, true),
+            ("db.example.com", 5432, true),
+            ("db.example.com", 5433, false),
+            ("evil.example", 443, false),
+        ];
+        for (host, port, allowed) in cases {
+            let decided = geode_os::egress::gate(&hosts, host, port);
+            assert_eq!(decided.is_ok(), allowed, "{host}:{port}");
+            if let Err(err) = decided {
+                assert_eq!(err.code(), "host_denied");
+            }
+        }
+    }
+
+    #[test]
+    fn proxy_denial_is_an_audit_row() {
+        let dir = std::env::temp_dir().join(format!(
+            "geode-deny-audit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("audit.db");
+        let mut chain = geode_grotto::audit::open(&db).unwrap();
+        let row = super::RowBase {
+            principal: "human:local".into(),
+            token_id: String::new(),
+            peer_uid: None,
+            peer_pid: None,
+            vault_id: "00".into(),
+            paths: vec!["cfg/note".into()],
+            custody: false,
+            hosts: "api.example.com".into(),
+        };
+        let denials = geode_os::HostDenials::default();
+        denials.record("blocked.example", 443);
+        let argv = || geode_grotto::audit::ArgvCommit::Clean {
+            argv0: "/bin/sh".into(),
+            args: Vec::new(),
+        };
+        super::record_host_denials(&mut chain, &row, &argv, &denials)
+            .unwrap_or_else(|err| panic!("{}", err.msg));
+        drop(chain);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let (outcome, hosts): (String, String) = conn
+            .query_row(
+                "SELECT outcome, hosts FROM audit ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(outcome, "host_denied");
+        assert_eq!(hosts, "blocked.example:443");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod home_tests {
     use super::*;
     use clap::Parser;
 
@@ -825,11 +1057,18 @@ mod tests {
         run: RunArgs,
     }
 
-    fn parse(flags: &[&str]) -> RunArgs {
+    fn parse(flags: &[&str]) -> Result<RunArgs, clap::Error> {
         let mut argv = vec!["geode", "--vault", "/v"];
         argv.extend_from_slice(flags);
         argv.extend(["--", "/bin/true"]);
-        Cli::parse_from(argv).run
+        Cli::try_parse_from(argv).map(|c| c.run)
+    }
+
+    fn refused_ok<T>(r: Result<T, Refusal>) -> T {
+        match r {
+            Ok(v) => v,
+            Err(e) => panic!("refused: {}", e.msg),
+        }
     }
 
     fn refused<T>(r: Result<T, Refusal>) -> Refusal {
@@ -840,43 +1079,25 @@ mod tests {
     }
 
     #[test]
-    fn omitting_both_flags_keeps_caller_home_and_no_hosts() {
-        let a = parse(&[]);
-        assert!(a.home.is_none());
-        assert!(a.allow_hosts.is_empty());
-        assert!(parse_hosts(&a.allow_hosts).ok().unwrap().is_empty());
-        assert_eq!(inject::hosts_label(&[]), "unrestricted");
+    fn only_allow_host_is_accepted() {
+        let a = parse(&["--allow-host", "api.example.com"]).unwrap();
+        assert_eq!(a.allow_host, ["api.example.com"]);
+        assert!(parse(&["--allow-hosts", "api.example.com"]).is_err());
     }
 
     #[test]
-    fn allow_hosts_repeats_and_appends_in_order() {
-        let a = parse(&[
-            "--allow-hosts",
-            "api.example.com",
-            "--allow-hosts",
-            "Cdn.Example.com:443",
-            "--allow-hosts",
-            "api.example.com",
-        ]);
-        assert_eq!(a.allow_hosts.len(), 3);
-        assert_eq!(
-            parse_hosts(&a.allow_hosts).ok().unwrap(),
-            ["api.example.com", "cdn.example.com:443"]
-        );
-    }
-
-    #[test]
-    fn bad_allow_hosts_are_usage_errors() {
-        for h in ["", "https://x.example", "x.example/p", "u@x.example", "a b"] {
-            let r = refused(parse_hosts(&[h.to_owned()]));
-            assert_eq!(r.code, exit::USAGE, "{h}");
-            assert!(r.msg.contains("--allow-hosts"), "{}", r.msg);
-        }
+    fn secret_without_hosts_is_refused_with_home_on_every_os() {
+        let a = parse(&["--home", "/srv/geode-home", "--secret", "K=cfg/k"]).unwrap();
+        assert!(a.allow_host.is_empty());
+        let err = refused(secret_hosts_or_refuse(&refused_ok(parse_allow_hosts(
+            &a.allow_host,
+        ))));
+        assert_eq!((err.code, err.kind), (exit::POLICY, "policy_deny"));
     }
 
     #[test]
     fn home_flag_parses_to_the_dir() {
-        let a = parse(&["--home", "/srv/geode-home"]);
+        let a = parse(&["--home", "/srv/geode-home"]).unwrap();
         assert_eq!(a.home.as_deref(), Some(Path::new("/srv/geode-home")));
         let got = check_home(a.home.as_deref().unwrap(), Some(OsStr::new("/Users/me")));
         assert_eq!(got.ok().unwrap(), OsString::from("/srv/geode-home"));
@@ -901,16 +1122,14 @@ mod tests {
 
     #[test]
     fn home_resolving_to_caller_home_is_refused() {
-        let base = std::env::temp_dir().join(format!("geode-p0-home-{}", std::process::id()));
-        let real = base.join("real");
-        let link = base.join("link");
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real");
+        let link = base.path().join("link");
         std::fs::create_dir_all(&real).unwrap();
-        let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let r = refused(check_home(&link, Some(real.as_os_str())));
         assert!(r.msg.contains("caller's HOME"), "{}", r.msg);
-        assert!(check_home(&base, Some(real.as_os_str())).is_ok());
-        let _ = std::fs::remove_dir_all(&base);
+        assert!(check_home(base.path(), Some(real.as_os_str())).is_ok());
     }
 
     #[test]

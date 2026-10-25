@@ -75,8 +75,14 @@ impl Fx {
     }
 
     /// `geode --key k.gkey run --vault v.geode <pre> -- <cmd>`.
+    ///
+    /// The test-only seam skips host confinement so these cases can spawn
+    /// without a network namespace. Release builds do not have the flag.
+    /// Tests of the allowlist do not use this helper.
     fn run(&self, pre: &[&str], cmd: &[&str]) -> Output {
         let mut args = vec!["--key", "k.gkey", "run", "--vault", "v.geode"];
+        #[cfg(feature = "test-trusted-root")]
+        args.push("--test-unconfined-hosts");
         args.extend_from_slice(pre);
         args.push("--");
         args.extend_from_slice(cmd);
@@ -278,7 +284,10 @@ fn child_exit_3_is_spawned_and_passed_through() {
     let mut args = vec![
         "--key", "k.gkey", "--output", "json", "run", "--vault", "v.geode",
     ];
-    args.extend_from_slice(&[allow[0], allow[1], "--secret", "KEY=cfg/dummy.env", "--"]);
+    args.extend_from_slice(&[allow[0], allow[1], "--secret", "KEY=cfg/dummy.env"]);
+    #[cfg(feature = "test-trusted-root")]
+    args.push("--test-unconfined-hosts");
+    args.push("--");
     args.extend_from_slice(&["sh", "-c", "echo $KEY >&2; exit 3"]);
     let j = fx.geode(&args);
     assert_eq!(code(&j), Some(3), "{}", err(&j));
@@ -309,6 +318,115 @@ fn timeout_terms_the_child() {
     assert_eq!(code(&o), Some(128 + 15), "{}", err(&o));
     assert!(err(&o).contains("timed out"), "{}", err(&o));
     assert_eq!(fx.rows().last().unwrap().0, "timed_out");
+}
+
+#[test]
+fn empty_allow_hosts_on_a_secret_binding_refuses() {
+    let fx = Fx::new();
+    let allow = fx.allow_sh();
+    let touch = fx.touch_script();
+    // Not `fx.run`: that helper sets the test-only seam.
+    let o = fx.geode(&[
+        "--key",
+        "k.gkey",
+        "run",
+        "--vault",
+        "v.geode",
+        allow[0],
+        allow[1],
+        "--secret",
+        "KEY=cfg/dummy.env",
+        "--",
+        "sh",
+        "-c",
+        &touch,
+    ]);
+    assert_eq!(code(&o), Some(3), "{}", err(&o));
+    let text = format!("{}{}", out(&o), err(&o));
+    assert!(text.contains("allow_hosts"), "{text}");
+    assert!(text.contains("refusing"), "{text}");
+    assert!(!text.contains("injected:"), "{text}");
+    assert!(!fx.marker().exists(), "empty allow_hosts spawned");
+    assert_no_dummy(&o, "empty allow_hosts");
+}
+
+/// Linux can confine only with `CAP_SYS_ADMIN` (bit 21 of `CapEff`).
+#[cfg(target_os = "linux")]
+fn cap_sys_admin() -> bool {
+    let text = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let Some(raw) = text.lines().find_map(|line| line.strip_prefix("CapEff:")) else {
+        return false;
+    };
+    let hex = raw.trim().trim_start_matches("0x");
+    let tail = hex.get(hex.len().saturating_sub(16)..).unwrap_or(hex);
+    let bits = u64::from_str_radix(tail, 16).unwrap_or(0);
+    bits & (1 << 21) != 0
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn last_hosts(fx: &Fx) -> String {
+    let conn = rusqlite::Connection::open(fx.db()).unwrap();
+    conn.query_row(
+        "SELECT hosts FROM audit ORDER BY seq DESC LIMIT 1",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+/// macOS must confine. Linux confines when it holds `CAP_SYS_ADMIN` and
+/// otherwise refuses. Neither path is an unconfined child.
+#[test]
+fn local_allow_hosts_outcome_is_per_os() {
+    let fx = Fx::new();
+    let allow = fx.allow_sh();
+    let touch = fx.touch_script();
+    let o = fx.geode(&[
+        "--key",
+        "k.gkey",
+        "run",
+        "--vault",
+        "v.geode",
+        allow[0],
+        allow[1],
+        "--secret",
+        "KEY=cfg/dummy.env",
+        "--allow-host",
+        "api.example.com",
+        "--",
+        "sh",
+        "-c",
+        &touch,
+    ]);
+    let text = format!("{}{}", out(&o), err(&o));
+    #[cfg(target_os = "macos")]
+    {
+        assert_eq!(code(&o), Some(0), "{text}");
+        assert!(fx.marker().exists(), "confined child did not run");
+        assert_eq!(last_hosts(&fx), "api.example.com");
+        assert_no_dummy(&o, "confined");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if cap_sys_admin() {
+            assert_eq!(code(&o), Some(0), "{text}");
+            assert!(fx.marker().exists(), "confined child did not run");
+            assert_eq!(last_hosts(&fx), "api.example.com");
+            assert_no_dummy(&o, "confined");
+        } else {
+            assert_eq!(code(&o), Some(3), "{text}");
+            assert!(text.contains("allow_hosts"), "{text}");
+            assert!(!fx.marker().exists(), "ran without isolation");
+            assert_no_dummy(&o, "refused");
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        assert_eq!(code(&o), Some(3), "{text}");
+        assert!(text.contains("allow_hosts"), "{text}");
+        assert!(!fx.marker().exists(), "ran without isolation");
+        assert_no_dummy(&o, "refused");
+    }
 }
 
 #[test]
@@ -1490,4 +1608,68 @@ fn missing_or_unreadable_allow_cmds_file_does_not_spawn() {
     );
     assert_no_dummy(&unreadable, "mode 000 allow-cmds-file");
     assert!(!fx.marker().exists(), "mode 000 allow-cmds-file spawned");
+}
+
+/// `--home` does not loosen the host gate: a secret run with no
+/// `--allow-host` is refused before spawn on every OS, Linux included.
+#[test]
+fn home_with_secret_and_no_allow_host_refuses_on_every_os() {
+    let fx = Fx::new();
+    let allow = fx.allow_sh();
+    let touch = fx.touch_script();
+    let home = fx.dir.join("child-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.to_str().unwrap().to_owned();
+    // Not `fx.run`: that helper sets the test-only seam.
+    let o = fx.geode(&[
+        "--key",
+        "k.gkey",
+        "run",
+        "--vault",
+        "v.geode",
+        allow[0],
+        allow[1],
+        "--home",
+        &home,
+        "--secret",
+        "KEY=cfg/dummy.env",
+        "--",
+        "sh",
+        "-c",
+        &touch,
+    ]);
+    assert_eq!(code(&o), Some(3), "{}", err(&o));
+    let text = format!("{}{}", out(&o), err(&o));
+    assert!(text.contains("allow_hosts"), "{text}");
+    assert!(!text.contains("injected:"), "{text}");
+    assert!(!fx.marker().exists(), "secret run with no hosts spawned");
+    assert_no_dummy(&o, "home + empty hosts");
+    assert_eq!(fx.rows().last().unwrap().0, "policy_deny");
+}
+
+/// The pre-#106 spelling is gone; only `--allow-host` parses.
+#[test]
+fn allow_hosts_plural_is_a_usage_error() {
+    let fx = Fx::new();
+    let allow = fx.allow_sh();
+    let o = fx.geode(&[
+        "--key",
+        "k.gkey",
+        "run",
+        "--vault",
+        "v.geode",
+        allow[0],
+        allow[1],
+        "--allow-hosts",
+        "api.example.com",
+        "--secret",
+        "KEY=cfg/dummy.env",
+        "--",
+        "sh",
+        "-c",
+        "true",
+    ]);
+    assert_eq!(code(&o), Some(1), "{}", err(&o));
+    assert!(!fx.marker().exists());
+    assert_no_dummy(&o, "--allow-hosts");
 }
