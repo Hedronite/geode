@@ -16,8 +16,9 @@
 //! pin runs `geode-pin-helper`, a Cargo bin, not a copy of `/bin/sh`:
 //! macOS launch constraints SIGKILL a relocated platform binary. The
 //! success test injects a trust root under that bin (feature
-//! `test-trusted-root`). A root-owned install is `#[ignore]` and is not
-//! part of the default run.
+//! `test-trusted-root`). That feature is also what builds the helper, so
+//! the helper tests are compiled only when it is on. A root-owned install
+//! is `#[ignore]` and is not part of the default run.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -726,6 +727,9 @@ fn run_help_documents_pinning() {
 ///
 /// Stable Cargo exports `CARGO_BIN_EXE_<bin>` with the hyphen kept.
 /// Older Cargo rewrote hyphens to underscores. Accept either.
+/// The bin's `required-features` is `test-trusted-root`, so these tests
+/// are absent unless that feature is enabled.
+#[cfg(feature = "test-trusted-root")]
 fn pin_helper() -> PathBuf {
     let raw = option_env!("CARGO_BIN_EXE_geode-pin-helper")
         .or(option_env!("CARGO_BIN_EXE_geode_pin_helper"))
@@ -735,11 +739,13 @@ fn pin_helper() -> PathBuf {
 
 /// Root-owned copy of `geode-pin-helper` for the ignored sudo test only.
 /// Default tests do not call this. A missing anchor fails the test.
+#[cfg(feature = "test-trusted-root")]
 struct InstalledPin {
     dir: PathBuf,
     bin: PathBuf,
 }
 
+#[cfg(feature = "test-trusted-root")]
 impl InstalledPin {
     fn place() -> Self {
         let src = pin_helper();
@@ -766,12 +772,14 @@ impl InstalledPin {
     }
 }
 
+#[cfg(feature = "test-trusted-root")]
 impl Drop for InstalledPin {
     fn drop(&mut self) {
         remove_pin(&self.dir, &self.bin);
     }
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn component_is_trusted(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let Ok(meta) = std::fs::symlink_metadata(path) else {
@@ -780,6 +788,7 @@ fn component_is_trusted(path: &Path) -> bool {
     !meta.file_type().is_symlink() && meta.uid() == 0 && meta.mode() & 0o022 == 0
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn tree_is_trusted(bin: &Path) -> Result<(), String> {
     let canon = std::fs::canonicalize(bin).map_err(|e| e.to_string())?;
     let mut cur = PathBuf::new();
@@ -796,6 +805,7 @@ fn tree_is_trusted(bin: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn euid_is_root() -> bool {
     let out = Command::new("id")
         .arg("-u")
@@ -815,6 +825,7 @@ fn euid_is_root() -> bool {
     }
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn run_as_root(args: &[&str]) -> Result<(), String> {
     let (program, rest) = args.split_first().expect("argv");
     let mut cmd = if euid_is_root() {
@@ -839,6 +850,7 @@ fn run_as_root(args: &[&str]) -> Result<(), String> {
     ))
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn install_pin(src: &Path, dir: &Path, bin: &Path) -> Result<(), String> {
     let src_s = src.to_str().expect("utf8 pin helper");
     let dir_s = dir.to_str().expect("utf8 fixture dir");
@@ -854,6 +866,7 @@ fn install_pin(src: &Path, dir: &Path, bin: &Path) -> Result<(), String> {
     tree_is_trusted(bin)
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn pin_paths_ok(dir: &Path, bin: &Path) -> bool {
     let Some(name) = dir.file_name().and_then(|s| s.to_str()) else {
         return false;
@@ -870,6 +883,7 @@ fn pin_paths_ok(dir: &Path, bin: &Path) -> bool {
     bin.parent() == Some(dir) && bin.file_name().is_some_and(|n| n == "geode-pin-helper")
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn remove_pin(dir: &Path, bin: &Path) {
     if !pin_paths_ok(dir, bin) {
         return;
@@ -883,6 +897,7 @@ fn remove_pin(dir: &Path, bin: &Path) {
 /// Canonical `/tmp`. macOS resolves the symlink to `/private/tmp`.
 /// Fails if `/tmp` cannot be resolved, is some other directory, or
 /// cannot be written.
+#[cfg(feature = "test-trusted-root")]
 fn canonical_sticky_tmp() -> PathBuf {
     let canon =
         std::fs::canonicalize("/tmp").unwrap_or_else(|e| panic!("cannot canonicalize /tmp: {e}"));
@@ -897,6 +912,7 @@ fn canonical_sticky_tmp() -> PathBuf {
     canon
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn assert_pinned_ok(fx: &Fx, output: &Output, tool: &str, what: &str) {
     assert_eq!(code(output), Some(0), "{}", err(output));
     assert_eq!(out(output), "ok");
@@ -908,6 +924,7 @@ fn assert_pinned_ok(fx: &Fx, output: &Output, tool: &str, what: &str) {
 }
 
 /// Copy the Cargo helper into a 0755 directory owned by this uid.
+#[cfg(feature = "test-trusted-root")]
 fn stage_helper(dir: &Path) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let root = dir.join("pin-root");
@@ -930,6 +947,7 @@ fn stage_helper(dir: &Path) -> (PathBuf, PathBuf) {
     )
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn current_uid() -> String {
     let out = Command::new("id").arg("-u").output().expect("spawn id -u");
     assert!(
@@ -948,6 +966,7 @@ fn current_uid() -> String {
     uid
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn pinned_matching_command_runs() {
     let fx = Fx::new();
@@ -1009,6 +1028,7 @@ fn pinned_matching_command_runs() {
 /// Real root-owned install. Not part of `cargo test` or nextest.
 /// `pin-macos` runs it with `--ignored` and this name. Missing `sudo -n`
 /// fails the test.
+#[cfg(feature = "test-trusted-root")]
 #[test]
 #[ignore = "passwordless sudo; pin-macos runs it with --ignored"]
 fn pinned_sudo_trusted_path_runs() {
@@ -1035,6 +1055,7 @@ fn pinned_sudo_trusted_path_runs() {
     assert_pinned_ok(&fx, &o, &tool_s, "sudo pin");
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn pinned_cargo_target_is_refused() {
     let fx = Fx::new();
@@ -1056,6 +1077,7 @@ fn pinned_cargo_target_is_refused() {
     assert_eq!(fx.rows().last().unwrap().0, "policy_deny");
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn assert_real_pin_refused(tool: &Path) {
     let fx = Fx::new();
     let tool_s = tool.to_str().expect("utf8").to_owned();
@@ -1081,6 +1103,7 @@ fn assert_real_pin_refused(tool: &Path) {
     assert!(!fx.marker().exists(), "untrusted pin spawned");
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn pinned_user_tmp_writable_and_symlink_are_refused() {
     use std::os::unix::fs::PermissionsExt;

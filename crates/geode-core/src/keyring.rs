@@ -451,7 +451,7 @@ mod tests {
             default: Some(GOOD_ID.into()),
             keys: vec![KeyringKey {
                 id: GOOD_ID.into(),
-                path: "/home/evan/.config/hedronite/geode/default.gkey".into(),
+                path: "/home/user/.config/hedronite/geode/default.gkey".into(),
                 label: "default".into(),
                 hybrid: Some(false),
                 has_passphrase: Some(true),

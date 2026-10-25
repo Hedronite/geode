@@ -4,62 +4,54 @@ type: repo-changelog
 status: current
 created: "2026-09-15"
 updated: "2026-10-25"
-related:
-  - "[[foundry/geode/geode-spec-0.0.0/SPEC]]"
-  - "[[foundry/geode/geode-spec-0.0.0/12-roadmap]]"
-  - "[[foundry/geode/SPEC-v010]]"
-  - "[[foundry/geode/SPEC-v020]]"
-  - "[[foundry/geode/SPEC-v021]]"
-  - "[[foundry/geode/SPEC-v022]]"
-  - "[[foundry/geode/SPEC-v023]]"
-  - "[[foundry/geode/SPEC-v024]]"
-  - "[[foundry/geode/SPEC-v025]]"
-  - "[[foundry/geode/SPEC-v026]]"
-  - "[[foundry/geode/SPEC-v027]]"
-  - "[[foundry/geode/SPEC-v028]]"
-  - "[[foundry/geode/SPEC-v029]]"
-  - "[[foundry/geode/specs/SPEC-v030]]"
-  - "[[foundry/geode/specs/SPEC-v031]]"
-  - "[[foundry/geode/specs/SPEC-v032]]"
-  - "[[foundry/geode/specs/SPEC-v033]]"
 ---
 
 # Changelog
 
-Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` ([[foundry/geode/geode-spec-0.0.0/12-roadmap]] compatibility promise). Foundry packs v021/v022 are milestones, not the git tag ([[foundry/SEMVER]]).
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` (compatibility promise). Foundry packs v021/v022 are milestones, not the git tag.
 
 ## [Unreleased]
 
-- `geode run` and the custody daemon fail closed on the audit log (Fix 3). A `started` row is written before the child env is built or anything spawns; if any audit append fails (intent, close, deny or argv-rejected row), the run refuses with kind `audit_failed`, exit 1. A Facet mirror error is still not fatal.
+## [2.0.0] — 2026-10-25
+
+Incompatible CLI and MCP release. Suite `0x01` is unchanged. `GDE1` objects written by 1.0.0 through 1.2.1 remain readable. Raw identity keys written by earlier releases still load.
+
+### BREAKING
+
+- `geode keygen` protects new identity keys by default (`fix(keygen)!`). With no mode flag it prompts for a passphrase and writes the wrapped form (kind `0x01`). Callers that relied on the old raw key (kind `0x00`) must pass `--insecure-plaintext`. That flag warns on stderr that anyone who can read the file holds the identity. A non-interactive `geode keygen` (stdin is not a terminal, and `GEODE_PASSPHRASE` is unset) exits 1 and writes nothing unless it passes `--insecure-plaintext` or `--keychain`. `--keychain` keeps a random wrap passphrase in the OS keychain, adds the key to `geode keyring`, and unlocks without a prompt. `--password` is accepted and ignored; it warns that a passphrase is now the default. `--cheap` applies only to the passphrase mode and is refused with `--insecure-plaintext` or `--keychain`. An empty passphrase, including an empty `GEODE_PASSPHRASE`, is refused.
+- MCP `geode_read` with no `mode` returns the sealed `content_root` for every token, including tokens that hold `read`. Clients that omitted `mode` must pass `"mode": "text"`. `text` and `hex` require that explicit mode and the `read` op. Hash mode does not return a plaintext `sha256` and does not open the object. CLI `geode agent read` still defaults to text when the token has `read`.
+- CLI hash output prints `content_root` instead of `sha256`.
 
 ### Added
 
 - Coding agents should start with the metadata skill in `.agents/skills/geode/` (`SKILL.md` plus a Nushell body over `geode --output json`). The same files are copied to `.claude/skills/geode/`, `.grok/skills/geode/`, and `.cursor/skills/geode/`. It wraps `list`, `verify --cheap` or `verify --sample`, `vault recipients`, `snapshot ls`, `policy show`, `policy check`, `audit verify`, `custody status`, and `keyring list`. It refuses every other command, including anything that reads secret bytes or changes custody. `geode agent serve` is unchanged.
-- `geode scan PATH... [--json] [--hook] [--allow FILE] [--max-bytes N]` finds secret-looking values in files. Rules: AWS access key ids (`AKIA` + 16), GitHub tokens (`gh[pousr]_`, `github_pat_`), Slack tokens (`xox[abpr]-`), PEM private-key blocks, and high-entropy base64 or hex runs of 20 or more characters (defaults 4.0 and 3.0 bits per character; `--base64-bits` and `--hex-bits` tune them). Binary files are scanned.
-- Each finding prints the path, line, column, rule, and a 128-bit keyed BLAKE3 fingerprint. The matched value, an excerpt, and context are never printed, and `geode scan` writes nothing to the audit log. The fingerprint key is derived from `--key` under `geode/v1/scan-fp` when a key is given. Otherwise it is a per-user random key at `~/.config/hedronite/geode/scan.key` (mode 0600, created on first use). Fingerprints and allowlists do not carry across keys.
+- `geode scan PATH... [--json] [--hook] [--allow FILE] [--max-bytes N]` is a fail-closed scanner for unknown secrets. Rules: AWS access key ids (`AKIA` + 16), GitHub tokens (`gh[pousr]_`, `github_pat_`), Slack tokens (`xox[abpr]-`), PEM private-key blocks, and high-entropy base64 or hex runs of 20 or more characters (defaults 4.0 and 3.0 bits per character; `--base64-bits` and `--hex-bits` tune them). Binary files are scanned.
+- Each finding prints the path, line, column, rule, and a 128-bit keyed BLAKE3 fingerprint. The matched value, an excerpt, and context are never printed, and `geode scan` writes nothing to the audit log. The fingerprint key is derived from `--key` under `geode/v1/scan-fp` when a key is given. Otherwise it is a per-user random key at `~/.config/hedronite/geode/scan.key` (mode 0600, created on first use). A `scan.key` readable by others is refused. Fingerprints and allowlists do not carry across keys.
 - `--hook` exits 2 on any finding, 0 when clean, and 1 on any error. An unreadable file, a file larger than `--max-bytes` (default 16 MiB), a symlink that resolves outside its scan root, and a special file are errors, not skips.
 - The allowlist (`--allow FILE`, default `.geode/scan-allow`) holds fingerprints only, one per line. Output reports how many findings it suppressed. `scan.key`, the default identity key, the `--key` in use, and any `default.gkey` inside a scan root are always findings (rule `geode-key-file`) and cannot be allowlisted.
-- `geode agent token issue --run-only` sets `kind: run`. The token may list, inject, and hash-read. The issuer rejects `read` on it. Text or hex is `plaintext_denied` before the object is opened. A token with no `kind` stays a full token. Suite `0x01` is unchanged.
+- `geode agent token issue --run-only` sets `kind: run`. The token may list, inject, and hash-read. The issuer rejects `read` on it. Text or hex is `plaintext_denied` before the object is opened. A token with no `kind` stays a full token. A run-only token cannot read secret plaintext through Geode's read paths; a command it is allowed to run still receives the secret in its environment. Suite `0x01` is unchanged.
 - `geode run` accepts a sha256 pin on `--allow-cmd` and `--allow-cmds-file`. A pin is `{"path","sha256","args_prefix"}`. `path` is an absolute canonical executable. `sha256` is the lowercase hex digest of that file (uppercase hex is accepted and stored lowercase) and is required on the pin form. `args_prefix` is the required leading arguments after the program and may be empty or omitted. A bare `--allow-cmd PATH` is unchanged and does not pin. `token issue --allow-cmds-file` still treats `sha256` as optional.
 - `geode run --require-pin`, and `"require_pin": true` in an `--allow-cmds-file` object `{"require_pin", "cmds"}`, refuse an allow rule with no sha256 at load time. A bare `--allow-cmd PATH` is an error while the option is on. The default stays off. A JSON list does not turn the option on.
+- `geode seal --as PATH` stores one file or symlink at that vault path (then `--seal-names`, when set) instead of the source basename. A directory with `--as`, and an empty, `.`, absolute, `..`, backslash, trailing-slash, or NUL path, exits 1 before any vault write. Omitting `--as` keeps the basename.
+- `geode seal` warns on stderr when it replaces an existing vault path (`warning: replacing existing vault path …`). The line names the stored path, including a sealed name. The seal still replaces the entry and exits 0.
 
 ### Changed
 
-- **BREAKING:** `geode keygen` no longer writes an unwrapped key by default. With no mode flag it prompts for a passphrase and writes the wrapped form (kind `0x01`). `--keychain` keeps a random wrap passphrase in the OS keychain, adds the key to `geode keyring`, and unlocks without a prompt. `--insecure-plaintext` is the only way to write a raw key (kind `0x00`), and it warns on stderr. Non-interactive `geode keygen` (stdin not a terminal, no `GEODE_PASSPHRASE`) now exits 1 and writes nothing unless it passes `--insecure-plaintext` or `--keychain`. `--password` is accepted as a deprecated no-op for one minor. `--cheap` now applies to the default passphrase mode and is refused with `--insecure-plaintext` or `--keychain`. An empty `GEODE_PASSPHRASE` is refused. Raw keys written by earlier releases still load.
-- **BREAKING:** MCP `geode_read` with no `mode` returns the sealed `content_root` for every token, including tokens that hold `read`. Clients that omitted `mode` must pass `"mode": "text"`. `text` and `hex` require that explicit mode and the `read` op. Hash mode does not return a plaintext `sha256`. CLI `geode agent read` still defaults to text when the token has `read`.
-- **BREAKING:** CLI hash output now prints `content_root` instead of `sha256`.
 - CI actions are pinned by commit SHA. `ci.yml` runs with `contents: read`, and its cosign download requires HTTPS and TLS 1.2.
 - The workspace `repository` field points at `https://github.com/Hedronite/geode`.
 
 ### Security
 
-- A `sha256`-pinned `allow_cmds` rule now runs the bytes it hashed. The plan opens the canonical `argv[0]` once (`O_RDONLY|O_CLOEXEC|O_NOFOLLOW`), checks with `fstat` that the fd is a regular file with an exec bit, and streams the hash from that fd. The path is not read a second time. A symlink swapped in at the final component after canonicalize is refused. Unpinned rules still exec by path.
+- `geode run` and the custody daemon fail closed on the audit log. A `started` row is written before the child env is built or anything spawns. If any audit append fails (intent, close, deny, or argv-rejected row), the run refuses with kind `audit_failed`, exit 1. A Facet mirror error is still not fatal.
+- A `sha256`-pinned `allow_cmds` rule runs the bytes it hashed. The plan opens the canonical `argv[0]` once (`O_RDONLY|O_CLOEXEC|O_NOFOLLOW`), checks with `fstat` that the fd is a regular file with an exec bit, and streams the hash from that fd. The path is not read a second time. A symlink swapped in at the final component after canonicalize is refused. Unpinned rules still exec by path.
 - Linux execs the hashed fd (`fexecve`). A file renamed over the path after the check never runs. The fd is `O_CLOEXEC` and never reaches the child.
-- Pinned `#!` scripts on Linux now fail with `is a #! script; a sha256 pin needs a binary`. `fexecve` cannot start a script from an `O_CLOEXEC` fd, and Geode will not hand the child an inheritable fd. Pin the interpreter and put the script in `args_prefix`.
-- macOS has no `fexecve`. The child checks, just before it execs the path, that the path and the hashed fd still match the device, inode, size, and mtime recorded before the hash. A pinned program writable by group or other is refused. Residual risk: a swap that lands between that check and the kernel's open at exec still wins. Under `ChildIdentity::Seatbelt`, `sandbox-exec` opens the path later still.
-- The published API is unchanged. `inject::Plan.exe` is still `pub exe: String`, and `geode_os::SpawnSpec` keeps its six fields. Two additions carry the pin. `Plan::take_pin()` hands over the hashed fd and its `fstat`. `geode_os::spawn_with_pin(spec, pin, identity, allow_hosts, on_chunk)` takes it as a `PinnedExe`. `spawn`, `spawn_as`, and `spawn_with` keep their signatures and exec by path.
-- A pinned `geode run` refuses to start when the resolved command is not pinned, the opened file's sha256 does not match, the arguments do not start with `args_prefix`, or the path is relative or resolves through a symlink to a different file. The digest is the hash of the same fd Linux execs. macOS still has no `fexecve`; a pinned run there uses the existing last-moment device, inode, size, and mtime check, and a group- or world-writable pin is refused. An unpinned rule for a path cannot bypass a pin for that path. Errors name the path only and do not print a secret value or the argument list.
-- A sha256 pin now also requires a trusted path, on Linux and macOS. The binary and every ancestor of its canonical path, up to `/`, must be owned by uid 0, must not be group- or other-writable, and must not be a symlink. The refusal names the first failing component from `/` down and does not include a secret. On macOS this is the main defense in front of the inode-check fallback. The sticky bit is not special, so a pin under `/tmp` is refused. A release build has no flag, environment variable, or config key that moves that root or the expected uid.
+- Pinned `#!` scripts on Linux fail with `is a #! script; a sha256 pin needs a binary`. `fexecve` cannot start a script from an `O_CLOEXEC` fd, and Geode will not hand the child an inheritable fd. Pin the interpreter and put the script in `args_prefix`.
+- macOS has no `fexecve`. The child checks, just before it execs the path, that the path and the hashed fd still match the device, inode, size, and mtime recorded before the hash. A pinned program writable by group or other is refused. A swap that lands between that check and the kernel's open at exec still wins. Under `ChildIdentity::Seatbelt`, `sandbox-exec` opens the path later still.
+- `inject::Plan.exe` stays `pub exe: String`, and `geode_os::SpawnSpec` keeps its six fields. `Plan::take_pin()` hands over the hashed fd and its `fstat`. `geode_os::spawn_with_pin(spec, pin, identity, allow_hosts, on_chunk)` takes it as a `PinnedExe`. `spawn`, `spawn_as`, and `spawn_with` keep their signatures and exec by path.
+- A pinned `geode run` refuses to start when the resolved command is not pinned, the opened file's sha256 does not match, the arguments do not start with `args_prefix`, or the path is relative or resolves through a symlink to a different file. The digest is the hash of the same fd Linux execs. macOS still has no `fexecve`; a pinned run there uses the device, inode, size, and mtime check, and a group- or world-writable pin is refused. An unpinned rule for a path cannot bypass a pin for that path. Errors name the path only and do not print a secret value or the argument list.
+- A sha256 pin requires a trusted path, on Linux and macOS. The binary and every ancestor of its canonical path, up to `/`, must be owned by uid 0, must not be group- or other-writable, and must not be a symlink. The refusal names the first failing component from `/` down and does not include a secret. On macOS this is the check in front of the inode fallback. The sticky bit is not special, so a pin under `/tmp` is refused. A release build has no flag, environment variable, or config key that moves that root or the expected uid.
+- `ctutils` is 0.4.5 (lockfile only). 0.4.2 was reachable through `polyval`, `argon2`, and `digest`. 0.4.5 clears RUSTSEC-2026-0385, the constant-time masking advisory.
+- `cargo deny` ignores three pre-existing unmaintained-crate advisories that arrive through `keyring` to `zbus` 5, with no dependency bump: RUSTSEC-2026-0370 (`zvariant`), RUSTSEC-2026-0371 (`zbus_names`), and RUSTSEC-2026-0372 (`zvariant_derive`).
 
 ## [1.2.1] — 2026-10-15
 
@@ -106,7 +98,7 @@ Compatible 1.x minor. Foundry pack **v033** (cosign Ed25519 verb). No format cha
 
 ## [1.0.1] — 2026-09-25
 
-Compatible 1.x patch on the 1.0 contract (foundry [[foundry/SEMVER]]). CLI verbs, exit codes, MCP tools `geode_list` / `geode_read` / `geode_write`, and GDE1 suite `0x01` are unchanged. `GDE1` objects written by 1.0.0 remain readable.
+Compatible 1.x patch on the 1.0 contract. CLI verbs, exit codes, MCP tools `geode_list` / `geode_read` / `geode_write`, and GDE1 suite `0x01` are unchanged. `GDE1` objects written by 1.0.0 remain readable.
 
 ### Fixed
 
@@ -174,7 +166,7 @@ Compatible 0.x patch. Foundry pack **v028** (git sidecar + hooks). No format cha
 
 ## [0.2.5] — 2026-09-21
 
-Compatible 0.x patch. Foundry packs **v026** (X25519 recipients) and **v027** (epoch rotate + reseal). No format change; `GDE1` objects from 0.2.4 remain readable. Also ships Evan's Jev remainder (shadow; TUI Jev-free).
+Compatible 0.x patch. Foundry packs **v026** (X25519 recipients) and **v027** (epoch rotate + reseal). No format change; `GDE1` objects from 0.2.4 remain readable. Also ships the maintainer's Jev remainder (shadow; TUI Jev-free).
 
 ### Added
 
@@ -237,11 +229,11 @@ Compatible 0.x patch (Cargo: feature/fix on 0.x bumps patch). Covers foundry pac
 
 ## [0.2.0] — 2026-09-15
 
-TUI operator release. **Workspace version is bumped to 0.2.0 with this release.** SemVer note: on 0.x, `geode tui` changing from "exit 1, not available" to a working TUI is treated as a breaking surface change, so 0.2.0 rather than 0.1.2. The v0.2.0 git tag is NOT cut here; PM tags after Evan GO. No format change; `GDE1` objects from 0.1.x remain readable.
+TUI operator release. **Workspace version is bumped to 0.2.0 with this release.** SemVer note: on 0.x, `geode tui` changing from "exit 1, not available" to a working TUI is treated as a breaking surface change, so 0.2.0 rather than 0.1.2. The v0.2.0 git tag is NOT cut here; PM tags after the maintainer approves. No format change; `GDE1` objects from 0.1.x remain readable.
 
 ### Added
 
-- `geode tui [VAULT] [--key PATH]` — Ratatui operator TUI over `geode-grotto` ([[foundry/geode/geode-spec-0.0.0/14-tui]]): vault picker, in-process session unlock (ISK held in `Secret32`, zeroized on drop), tree/preview/evidence panes, family-aligned keybindings. Secrets are never painted (14-tui §4 closed set).
+- `geode tui [VAULT] [--key PATH]` — Ratatui operator TUI over `geode-grotto`: vault picker, in-process session unlock (ISK held in `Secret32`, zeroized on drop), tree/preview/evidence panes, family-aligned keybindings. Secrets are never painted (14-tui §4 closed set).
 - `geode-tui` crate (adapter only; `geode-grotto` has no ratatui/crossterm dependency).
 - `geode-cli` feature `tui`, default-on; a `--no-default-features` build answers `geode tui` with exit 1 and "this build has no TUI" (14-tui §2.3).
 
@@ -251,11 +243,11 @@ TUI operator release. **Workspace version is bumped to 0.2.0 with this release.*
 
 ## [0.1.1] — 2026-09-15
 
-Hygiene + keyring release. **Workspace version is bumped to 0.1.1 with this release** (the alternative — holding 0.1.0 until Evan GO on the tag — was rejected: the shipped binary should report what it is). The v0.1.1 git tag itself is NOT cut here; PM tags after Evan GO. No format change; `GDE1` objects from 0.1.0 remain readable.
+Hygiene + keyring release. **Workspace version is bumped to 0.1.1 with this release** (the alternative — holding 0.1.0 until the maintainer approved the tag — was rejected: the shipped binary should report what it is). The v0.1.1 git tag itself is NOT cut here; PM tags after the maintainer approves. No format change; `GDE1` objects from 0.1.0 remain readable.
 
 ### Added
 
-- `geode keyring list` / `geode keyring add PATH --label NAME` — named identity keys over the `keyring.json` index ([[foundry/geode/geode-spec-0.0.0/schemas/keyring.schema.json]]); labels, paths, and key ids only, never secret material. First added key becomes the keyring default.
+- `geode keyring list` / `geode keyring add PATH --label NAME` — named identity keys over the `keyring.json` index; labels, paths, and key ids only, never secret material. First added key becomes the keyring default.
 - OS keyring storage for ISK / wrap passphrase (Keychain / Credential Manager / Secret Service) with a 0600 file fallback.
 - `geode keygen --password` writes the passphrase-wrapped `GKEY` form (02-cryptography §6.2) via the public wrap API; `--cheap` selects the constrained-host Argon2id parameters.
 - Key resolution order: `--key PATH` → `GEODE_KEY_FILE` → keyring default → `~/.config/hedronite/geode/default.gkey` (XDG-aware, when the file exists).
@@ -267,7 +259,7 @@ Hygiene + keyring release. **Workspace version is bumped to 0.1.1 with this rele
 
 ## [0.1.0] — 2026-09-15
 
-First release. Conformance profile **`core`** ([[foundry/geode/geode-spec-0.0.0/SPEC]] §2): format, crypto, vault init, seal, open, verify, list, cat, key files. No mount, git sidecar, MCP, PQ, or TUI.
+First release. Conformance profile **`core`** (§2): format, crypto, vault init, seal, open, verify, list, cat, key files. No mount, git sidecar, MCP, PQ, or TUI.
 
 ### Added
 
@@ -278,7 +270,8 @@ First release. Conformance profile **`core`** ([[foundry/geode/geode-spec-0.0.0/
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/Hedronite/geode/compare/v1.2.1...HEAD
+[Unreleased]: https://github.com/Hedronite/geode/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/Hedronite/geode/compare/v1.2.1...v2.0.0
 [1.2.1]: https://github.com/Hedronite/geode/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Hedronite/geode/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/Hedronite/geode/compare/v1.0.1...v1.1.0

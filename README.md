@@ -47,7 +47,7 @@ The on-disk format is **GDE1**, cipher suite **`0x01`**: AEGIS-256-X2, BLAKE3, A
 | Format | GDE1, suite `0x01` |
 | Binary | `geode` ([`geode-cli`](crates/geode-cli)) |
 | Library | [`geode-grotto`](crates/geode-core) (Rust import `geode_grotto`) |
-| Version | **1.2.1** · [release](https://github.com/Hedronite/geode/releases/tag/v1.2.1) · [changelog](CHANGELOG.md) |
+| Version | **2.0.0** · [release](https://github.com/Hedronite/geode/releases/tag/v2.0.0) · [changelog](CHANGELOG.md) |
 | Platforms | Linux and macOS |
 | Rust | 1.89 |
 | License | [Apache-2.0](LICENSE) |
@@ -205,7 +205,7 @@ The program reads `API_KEY` from its own environment. Do not write `$API_KEY` on
   ```
 
   `path` is an absolute canonical executable. A relative path, or a symlink that resolves to a different file, is refused. `sha256` is the SHA-256 of that file and is required on this form (lowercase hex; uppercase is accepted). `args_prefix` is the required leading arguments after the program. It may be empty or omitted, and then any arguments are allowed. The first matching pin is the one that runs, and an empty prefix matches every argument list.
-- A pin runs only when the binary and every directory from its canonical path up to `/` is owned by root, is not writable by group or other, and is not a symlink. The refusal names the first component that fails, starting at `/`. The check runs on Linux and macOS. On macOS it is the main defense, because the kernel cannot exec the hashed file descriptor. The sticky bit is not an exception, so a pin under `/tmp` is refused. A release build has no switch that moves that root or the expected owner.
+- A pin runs only when the binary and every directory from its canonical path up to `/` is owned by root, is not writable by group or other, and is not a symlink. The refusal names the first component that fails, starting at `/`. The check runs on Linux and macOS. On macOS it is the main defense, because the kernel cannot exec the hashed file descriptor. The sticky bit is not an exception, so a pin under `/tmp` is refused. A release build has no switch that moves that root or the expected owner. See [Security notes](#security-notes).
 - `--require-pin`, or `"require_pin": true` on an `--allow-cmds-file` object, refuses any allow rule that has no `sha256`, including a bare `--allow-cmd PATH`. The check is at load time, before a child starts. The default is off.
 
   ```json
@@ -251,6 +251,12 @@ vectors/v1/           # golden vectors: kdf, chunk, wrap, name
 
 </details>
 
+## Security notes
+
+`cargo install geode-cli` installs the `geode` binary only. A pin is trusted only when the binary and every ancestor up to `/` is owned by root.
+
+The Cargo feature `test-trusted-root` is test-only and insecure. It compiles a hidden pair of flags, `--test-trusted-root` and `--test-trusted-uid`, that move the directory and the uid a pin trusts, so tests can stage a fixture. It is off by default. A release build refuses to compile it, including `cargo install geode-cli --features test-trusted-root`. A debug build can still enable it. Do not ship or run a binary built with that feature. The fixture binary `geode-pin-helper` is built only when the feature is on, and a normal `cargo install` does not install it.
+
 ## Limits
 
 | | Today |
@@ -264,10 +270,11 @@ vectors/v1/           # golden vectors: kdf, chunk, wrap, name
 | Secret scan | `geode scan` matches known token shapes and high-entropy strings. It misses low-entropy secrets such as Wi-Fi passphrases and short passwords, so it is a backstop: decide what to capture with an allowlist first. It also flags public keys, hashes, and other random-looking strings. Findings show a keyed fingerprint, never the value, but paths, line numbers and fingerprints in CI logs are kept by the CI provider. An allowlist works only under the key that made it. |
 | Terminal UI | A human surface. It unlocks with your key, never with a token. |
 | Without default features | `cargo install geode-cli --no-default-features` has no terminal UI; `geode tui` exits 1. |
+| Pin trust root | Stops at `/` and expects root. Feature `test-trusted-root` can move it, is test-only and insecure, and is refused in release builds. See [Security notes](#security-notes). |
 
 ## Status
 
-Version **1.2.1**, git tag [`v1.2.1`](https://github.com/Hedronite/geode/releases/tag/v1.2.1). The crates `geode-cli`, `geode-grotto`, `geode-tui`, `geode-redact`, and `geode-os` are published at the same version.
+Version **2.0.0**, git tag [`v2.0.0`](https://github.com/Hedronite/geode/releases/tag/v2.0.0). The crates `geode-cli`, `geode-grotto`, `geode-tui`, `geode-redact`, and `geode-os` are published at the same version.
 
 - The format is GDE1, suite `0x01`. Objects written by 1.0.0 are still readable.
 - 1.2 added keyring custody and secret injection: `geode run`, the custody daemon, `geode custody`, `geode audit verify`, and the `inject` token operation.

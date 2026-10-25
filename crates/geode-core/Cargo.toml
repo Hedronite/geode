@@ -14,8 +14,10 @@ path = "src/lib.rs"
 
 [features]
 default = []
-# Test-only. Off unless a build asks for it. Release builds of `geode`
-# do not enable it, so they have no way to move the pin's trust root.
+# Test-only and insecure. Off unless a build asks for it. Exposes
+# `plan_with_test_root`, which moves the pin trust root. A release
+# build refuses to compile this feature. Release builds of `geode` do
+# not enable it.
 test-trusted-root = []
 
 [dependencies]
@@ -58,7 +60,7 @@ ed25519-dalek = { version = "2", features = ["zeroize"] }
 keyring = "4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 # G6 (v034): named redaction for `inject::plan` and its output collector.
-geode-redact = { version = "1.2.1", path = "../geode-redact" }
+geode-redact = { version = "2.0.0", path = "../geode-redact" }
 # Fix 4: `O_NOFOLLOW` for the pinned `allow_cmds` open in `inject.rs`.
 # Constants only; this crate still forbids unsafe.
 libc = "0.2"

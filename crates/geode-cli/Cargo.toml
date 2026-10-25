@@ -12,19 +12,23 @@ publish = true
 name = "geode"
 path = "src/main.rs"
 
-# Pin-test fixture only. `cargo install` builds it too; it is not a
-# documented command. A copy of `/bin/sh` cannot be the fixture: macOS
-# launch constraints SIGKILL relocated platform binaries.
+# Pin-test fixture only. Not a documented command. `required-features`
+# keeps `cargo install geode-cli` from installing it. A copy of `/bin/sh`
+# cannot be the fixture: macOS launch constraints SIGKILL relocated
+# platform binaries.
 [[bin]]
 name = "geode-pin-helper"
 path = "src/bin/geode-pin-helper.rs"
 test = false
 doc = false
+required-features = ["test-trusted-root"]
 
 [features]
 default = ["tui"]
-# Test-only pin trust root. Off by default, so `cargo build --release`
-# does not include it. Not part of the supported `geode` surface.
+# Test-only and insecure. A debug build may move the pin trust root
+# (`--test-trusted-root` / `--test-trusted-uid`). Off by default. A
+# release build, including `cargo install`, refuses to compile this
+# feature. Not part of the supported `geode` surface.
 test-trusted-root = ["geode-grotto/test-trusted-root"]
 # 14-tui 2.2: default-on for release builds; a core-profile build
 # (--no-default-features) compiles with no ratatui and answers
@@ -36,12 +40,12 @@ tui = ["dep:geode-tui"]
 fuse = ["dep:fuser"]
 
 [dependencies]
-geode-grotto = { version = "1.2.1", path = "../geode-core" }
-geode-tui = { version = "1.2.1", path = "../geode-tui", optional = true }
+geode-grotto = { version = "2.0.0", path = "../geode-core" }
+geode-tui = { version = "2.0.0", path = "../geode-tui", optional = true }
 # G6 (v034): the only spawn path for `geode run`.
-geode-os = { version = "1.2.1", path = "../geode-os" }
+geode-os = { version = "2.0.0", path = "../geode-os" }
 # geode scan: the pure scanner lives in geode-redact.
-geode-redact = { version = "1.2.1", path = "../geode-redact" }
+geode-redact = { version = "2.0.0", path = "../geode-redact" }
 secrecy = "0.10"
 fuser = { version = "0.15.1", optional = true }
 blake3 = "1"
