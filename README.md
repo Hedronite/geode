@@ -47,7 +47,7 @@ The on-disk format is **GDE1**, cipher suite **`0x01`**: AEGIS-256-X2, BLAKE3, A
 | Format | GDE1, suite `0x01` |
 | Binary | `geode` ([`geode-cli`](crates/geode-cli)) |
 | Library | [`geode-grotto`](crates/geode-core) (Rust import `geode_grotto`) |
-| Version | **1.2.1** · [release](https://github.com/Hedronite/geode/releases/tag/v1.2.1) · [changelog](CHANGELOG.md) |
+| Version | **2.0.0** · [release](https://github.com/Hedronite/geode/releases/tag/v2.0.0) · [changelog](CHANGELOG.md) |
 | Platforms | Linux and macOS |
 | Rust | 1.89 |
 | License | [Apache-2.0](LICENSE) |
@@ -267,7 +267,7 @@ vectors/v1/           # golden vectors: kdf, chunk, wrap, name
 
 ## Status
 
-Version **1.2.1**, git tag [`v1.2.1`](https://github.com/Hedronite/geode/releases/tag/v1.2.1). The crates `geode-cli`, `geode-grotto`, `geode-tui`, `geode-redact`, and `geode-os` are published at the same version.
+Version **2.0.0**, git tag [`v2.0.0`](https://github.com/Hedronite/geode/releases/tag/v2.0.0). The crates `geode-cli`, `geode-grotto`, `geode-tui`, `geode-redact`, and `geode-os` are published at the same version.
 
 - The format is GDE1, suite `0x01`. Objects written by 1.0.0 are still readable.
 - 1.2 added keyring custody and secret injection: `geode run`, the custody daemon, `geode custody`, `geode audit verify`, and the `inject` token operation.
