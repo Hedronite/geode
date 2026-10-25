@@ -371,7 +371,9 @@ fn may_skip_redaction(caller: &Caller<'_>, bindings: &[BindingSpec]) -> bool {
 /// the entry sets them). Shells get no special case. No globs.
 ///
 /// A pinned entry opens `canon` once and hashes that fd; the fd travels in
-/// the result so spawn execs the bytes that were hashed (Fix 4).
+/// the result so spawn execs the bytes that were hashed (Fix 4). When any
+/// rule for that path carries `sha256`, an unpinned rule for the same path
+/// is ignored.
 fn match_cmd(
     allow: &[CmdRule],
     argv0: &str,
@@ -381,39 +383,110 @@ fn match_cmd(
     if allow.is_empty() {
         return Err(deny("allow_cmds is empty: nothing may run", None));
     }
+    let (found, followed_symlink) = resolve_for_match(argv0, base_path)?;
+    let canon = std::fs::canonicalize(&found)
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .ok_or_else(|| deny(&format!("argv[0] '{argv0}' cannot be resolved"), None))?;
+    let rule = select_rule(allow, &canon, args, argv0, followed_symlink)?;
+    let Some(want) = &rule.sha256 else {
+        return Ok(VerifiedExe { canon, fd: None });
+    };
+    let pinned =
+        open_pinned(Path::new(&canon), want).map_err(|e| pin_mismatch(&canon, e, allow))?;
+    Ok(VerifiedExe {
+        canon,
+        fd: Some(pinned),
+    })
+}
+
+/// Refuse a relative `argv[0]`. A bare name is resolved on `PATH` later.
+fn resolve_for_match(argv0: &str, base_path: Option<&OsStr>) -> Result<(PathBuf, bool), PlanError> {
+    if argv0.contains('/') && !Path::new(argv0).is_absolute() {
+        return Err(deny(
+            &format!("argv[0] '{argv0}' is not an absolute path"),
+            None,
+        ));
+    }
     let found = resolve_argv0(argv0, base_path).ok_or_else(|| {
         deny(
             &format!("argv[0] '{argv0}' is not an executable on PATH"),
             None,
         )
     })?;
-    let canon = std::fs::canonicalize(&found)
-        .ok()
-        .and_then(|p| p.to_str().map(str::to_owned))
-        .ok_or_else(|| deny(&format!("argv[0] '{argv0}' cannot be resolved"), None))?;
-    let not_listed = || deny(&format!("argv[0] {canon} is not in allow_cmds"), None);
-    let rule = allow
-        .iter()
-        .find(|r| r.path == canon && args_match(&r.args_prefix, args))
-        .ok_or_else(not_listed)?;
-    let Some(want) = &rule.sha256 else {
-        return Ok(VerifiedExe { canon, fd: None });
-    };
-    let pinned = open_pinned(Path::new(&canon), want).map_err(|e| match e {
-        PinError::Unusable => not_listed(),
+    let followed_symlink =
+        std::fs::symlink_metadata(&found).is_ok_and(|m| m.file_type().is_symlink());
+    Ok((found, followed_symlink))
+}
+
+/// Pick the rule that authorizes `canon`. A digest on the path wins over an
+/// unpinned rule, so the pin cannot be skipped.
+fn select_rule<'a>(
+    allow: &'a [CmdRule],
+    canon: &str,
+    args: &[String],
+    argv0: &str,
+    followed_symlink: bool,
+) -> Result<&'a CmdRule, PlanError> {
+    let mut matched: Vec<&CmdRule> = allow.iter().filter(|r| r.path == canon).collect();
+    if matched.is_empty() {
+        // A bare name may land on a symlink (`/bin/sh` -> dash). That is
+        // PATH resolution, reported as not listed. A path the operator
+        // named that is itself a symlink, and does not canonicalize to a
+        // pin, is the swap.
+        if followed_symlink && argv0.contains('/') {
+            return Err(deny(
+                &format!(
+                    "argv[0] '{argv0}' resolves through a symlink to {canon}, which is not pinned"
+                ),
+                None,
+            ));
+        }
+        return Err(unlisted(allow, canon));
+    }
+    if matched.iter().any(|r| r.sha256.is_some()) {
+        matched.retain(|r| r.sha256.is_some());
+    }
+    matched
+        .into_iter()
+        .find(|r| args_match(&r.args_prefix, args))
+        .ok_or_else(|| {
+            deny(
+                &format!("argv[0] {canon} does not match its allow_cmds args_prefix"),
+                Some(canon.to_owned()),
+            )
+        })
+}
+
+fn unlisted(allow: &[CmdRule], canon: &str) -> PlanError {
+    if allow.iter().all(|r| r.sha256.is_some()) {
+        deny(&format!("argv[0] {canon} is not pinned"), None)
+    } else {
+        deny(&format!("argv[0] {canon} is not in allow_cmds"), None)
+    }
+}
+
+fn pin_mismatch(canon: &str, err: PinError, allow: &[CmdRule]) -> PlanError {
+    match err {
         PinError::Mismatch => deny(
             &format!("argv[0] {canon} does not match its allow_cmds sha256"),
-            Some(canon.clone()),
+            Some(canon.to_owned()),
         ),
         PinError::Script => deny(
             &format!("argv[0] {canon} is a #! script; a sha256 pin needs a binary"),
-            Some(canon.clone()),
+            Some(canon.to_owned()),
         ),
-    })?;
-    Ok(VerifiedExe {
-        canon,
-        fd: Some(pinned),
-    })
+        PinError::Unusable
+            if std::fs::symlink_metadata(Path::new(canon))
+                .is_ok_and(|m| m.file_type().is_symlink()) =>
+        {
+            deny(
+                &format!("argv[0] {canon} is a symlink; a sha256 pin opens the pinned file only"),
+                Some(canon.to_owned()),
+            )
+        }
+        PinError::Unusable => unlisted(allow, canon),
+    }
 }
 
 /// Why a pinned `argv[0]` failed its check.
@@ -886,7 +959,74 @@ mod tests {
             &bindings(&[("KEY", "cfg/x")]),
             &["sh", "-c", "false"],
         );
-        assert!(matches!(r, Err(PlanError::Deny { .. })), "{r:?}");
+        assert!(
+            matches!(r, Err(PlanError::Deny { ref reason, .. }) if reason.contains("args_prefix")),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn relative_argv0_is_refused() {
+        let (rule, _) = sh_rule();
+        let r = match_cmd(&[rule], "./sh", &[], Some(OsStr::new("/bin")));
+        let Err(PlanError::Deny { reason, .. }) = r else {
+            panic!("relative argv0 was allowed");
+        };
+        assert!(reason.contains("not an absolute path"), "{reason}");
+    }
+
+    #[test]
+    fn pinned_list_refuses_a_different_path() {
+        let (mut rule, _) = sh_rule();
+        rule.path = "/nonexistent/geode-pin".into();
+        rule.sha256 = Some("ab".repeat(32));
+        let r = match_cmd(
+            std::slice::from_ref(&rule),
+            "sh",
+            &[],
+            Some(OsStr::new("/bin")),
+        );
+        let Err(PlanError::Deny { reason, .. }) = r else {
+            panic!("an unpinned path was allowed");
+        };
+        assert!(reason.contains("is not pinned"), "{reason}");
+    }
+
+    #[test]
+    fn unpinned_rule_does_not_bypass_a_pin() {
+        let (unpinned, _) = sh_rule();
+        let mut pinned = unpinned.clone();
+        pinned.sha256 = Some("00".repeat(32));
+        let r = match_cmd(&[unpinned, pinned], "sh", &[], Some(OsStr::new("/bin")));
+        let Err(PlanError::Deny { reason, .. }) = r else {
+            panic!("an unpinned rule bypassed the pin");
+        };
+        assert!(reason.contains("sha256"), "{reason}");
+    }
+
+    #[test]
+    fn symlink_to_a_different_file_is_not_pinned() {
+        let (_real_dir, real) = file_in("real", b"\x7fELF-real", 0o755);
+        let (_other_dir, other) = file_in("other", b"\x7fELF-other", 0o755);
+        let link = other.with_file_name("via-link");
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        let rule = CmdRule {
+            path: real.to_str().unwrap().to_owned(),
+            sha256: Some(sha_of(&real)),
+            args_prefix: Vec::new(),
+        };
+        let r = match_cmd(
+            std::slice::from_ref(&rule),
+            link.to_str().unwrap(),
+            &[],
+            None,
+        );
+        let Err(PlanError::Deny { reason, .. }) = r else {
+            panic!("a symlink to a different file was allowed");
+        };
+        assert!(reason.contains("symlink"), "{reason}");
+        assert!(reason.contains("not pinned"), "{reason}");
+        assert!(!reason.contains("ELF"), "{reason}");
     }
 
     fn sha_of(path: &Path) -> String {

@@ -49,6 +49,8 @@ tempfile = "3"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde_yaml = "0.9"
 blake3 = "1"
+# Pin tests hash the fixture binary. Same crate and major as geode-grotto.
+sha2 = "0.10"
 
 [lints]
 workspace = true
