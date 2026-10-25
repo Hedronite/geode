@@ -30,6 +30,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+- `geode run` and the custody daemon fail closed on the audit log (Fix 3). A `started` row is written before the child env is built or anything spawns; if any audit append fails (intent, close, deny or argv-rejected row), the run refuses with kind `audit_failed`, exit 1. A Facet mirror error is still not fatal.
+
 ### Added
 
 - Coding agents should start with the metadata skill in `.agents/skills/geode/` (`SKILL.md` plus a Nushell body over `geode --output json`). The same files are copied to `.claude/skills/geode/`, `.grok/skills/geode/`, and `.cursor/skills/geode/`. It wraps `list`, `verify --cheap` or `verify --sample`, `vault recipients`, `snapshot ls`, `policy show`, `policy check`, `audit verify`, `custody status`, and `keyring list`. It refuses every other command, including anything that reads secret bytes or changes custody. `geode agent serve` is unchanged.
