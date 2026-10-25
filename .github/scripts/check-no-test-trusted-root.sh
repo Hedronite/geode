@@ -53,3 +53,16 @@ if ! grep -q 'refusing an optimized build' "$err"; then
   tail -n 20 "$err" >&2
   exit 1
 fi
+
+# Every release, publish, or tag workflow must run this script. Prove the
+# guard rejects such a workflow without it, then check the real ones.
+probe=$(mktemp -d)
+trap 'rm -f "$err"; rm -rf "$probe"' EXIT
+printf 'on:\n  push:\n    tags: ["v*"]\njobs:\n  p:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo publish --dry-run\n' >"$probe/release.yml"
+if "$root/.github/scripts/check-release-workflows.sh" "$probe" 2>/dev/null; then
+  echo "release-workflow guard accepted a workflow without this check" >&2
+  exit 1
+fi
+printf '      - run: .github/scripts/check-no-test-trusted-root.sh\n' >>"$probe/release.yml"
+"$root/.github/scripts/check-release-workflows.sh" "$probe"
+"$root/.github/scripts/check-release-workflows.sh"
