@@ -209,6 +209,10 @@ impl Plan {
 
 /// Authorize, resolve, decrypt, and check one run. Nothing is spawned here.
 ///
+/// A sha256 pin is trusted only when every component from the canonical
+/// path up to `/` is owned by uid 0. There is no argument that moves that
+/// root.
+///
 /// # Errors
 ///
 /// See [`PlanError`]. On any error no value has left this function.
@@ -216,6 +220,34 @@ pub fn plan(
     caller: &Caller<'_>,
     vault: &VaultView<'_>,
     req: &PlanRequest<'_>,
+) -> Result<Plan, PlanError> {
+    plan_anchored(caller, vault, req, Path::new("/"), 0)
+}
+
+/// Same as [`plan`], but the trust walk stops at `root` and expects `uid`.
+///
+/// Compiled only for unit tests and for the `test-trusted-root` feature.
+/// A release build of `geode` does not call this and does not contain it.
+#[cfg(any(test, feature = "test-trusted-root"))]
+pub fn plan_with_test_root(
+    caller: &Caller<'_>,
+    vault: &VaultView<'_>,
+    req: &PlanRequest<'_>,
+    root: &Path,
+    uid: u32,
+) -> Result<Plan, PlanError> {
+    if !root.is_absolute() {
+        return Err(PlanError::Usage("test trusted root is not absolute".into()));
+    }
+    plan_anchored(caller, vault, req, root, uid)
+}
+
+fn plan_anchored(
+    caller: &Caller<'_>,
+    vault: &VaultView<'_>,
+    req: &PlanRequest<'_>,
+    root: &Path,
+    uid: u32,
 ) -> Result<Plan, PlanError> {
     check_names(req.bindings)?;
     if req.argv.is_empty() {
@@ -231,11 +263,12 @@ pub fn plan(
     let VerifiedExe {
         canon: exe,
         fd: pin,
-    } = match_cmd(
+    } = match_cmd_trusted(
         caller.allow_cmds,
         &req.argv[0],
         &req.argv[1..],
         req.base_path,
+        TrustAnchor { root, uid },
     )?;
     if req.no_redact && !may_skip_redaction(caller, req.bindings) {
         return Err(deny(
@@ -381,11 +414,40 @@ fn may_skip_redaction(caller: &Caller<'_>, bindings: &[BindingSpec]) -> bool {
 /// refusal names the first failing component from `/` down. The check runs
 /// on Linux and macOS. On macOS there is no `fexecve`, so this is what
 /// stops a non-root writer from winning the inode-check window.
+/// The production caller stops at `/` and uid 0. A test build can pass
+/// another directory and uid; a release build has no such caller.
+/// Where a pin's trust walk stops, and the uid that must own that subtree.
+/// Production is `/` and uid 0. Tests may pass another absolute directory.
+struct TrustAnchor<'a> {
+    root: &'a Path,
+    uid: u32,
+}
+
+#[cfg(test)]
 fn match_cmd(
     allow: &[CmdRule],
     argv0: &str,
     args: &[String],
     base_path: Option<&OsStr>,
+) -> Result<VerifiedExe, PlanError> {
+    match_cmd_trusted(
+        allow,
+        argv0,
+        args,
+        base_path,
+        TrustAnchor {
+            root: Path::new("/"),
+            uid: 0,
+        },
+    )
+}
+
+fn match_cmd_trusted(
+    allow: &[CmdRule],
+    argv0: &str,
+    args: &[String],
+    base_path: Option<&OsStr>,
+    anchor: TrustAnchor<'_>,
 ) -> Result<VerifiedExe, PlanError> {
     if allow.is_empty() {
         return Err(deny("allow_cmds is empty: nothing may run", None));
@@ -399,7 +461,7 @@ fn match_cmd(
     let Some(want) = &rule.sha256 else {
         return Ok(VerifiedExe { canon, fd: None });
     };
-    ensure_trusted_pin(&canon)?;
+    ensure_trusted_pin(&canon, anchor.root, anchor.uid)?;
     let pinned =
         open_pinned(Path::new(&canon), want).map_err(|e| pin_mismatch(&canon, e, allow))?;
     Ok(VerifiedExe {
@@ -534,8 +596,10 @@ enum TrustError {
     Unreadable { path: PathBuf, detail: String },
     Symlink(PathBuf),
     NotRoot(PathBuf),
+    NotUid { path: PathBuf, uid: u32 },
     GroupWritable(PathBuf),
     OtherWritable(PathBuf),
+    Outside { canon: PathBuf, root: PathBuf },
 }
 
 impl TrustError {
@@ -551,8 +615,16 @@ impl TrustError {
             }
             Self::Symlink(p) => format!("trusted path: {} is a symlink", p.display()),
             Self::NotRoot(p) => format!("trusted path: {} is not owned by root", p.display()),
+            Self::NotUid { path, uid } => {
+                format!("trusted path: {} is not owned by uid {uid}", path.display())
+            }
             Self::GroupWritable(p) => format!("trusted path: {} is group-writable", p.display()),
             Self::OtherWritable(p) => format!("trusted path: {} is other-writable", p.display()),
+            Self::Outside { canon, root } => format!(
+                "trusted path: {} is outside {}",
+                canon.display(),
+                root.display()
+            ),
         }
     }
 }
@@ -582,36 +654,70 @@ fn trusted_components(canon: &Path) -> Result<Vec<PathBuf>, TrustError> {
     Ok(out)
 }
 
-/// The binary and every ancestor up to `/` must be root-owned, not group-
-/// or other-writable, and not a symlink. The first failure from `/` down
-/// is the one reported.
+/// Production walk: uid 0, every component from `canon` up to `/`.
+#[cfg(test)]
 fn check_trusted_path(canon: &Path, stat: &impl PathStat) -> Result<(), TrustError> {
+    check_anchored(canon, stat, Path::new("/"), 0)
+}
+
+/// `root` and `uid` are the production pair (`/`, 0) or a test injection.
+/// Components strictly above `root` are not checked. The first failure from
+/// `root` down is the one reported.
+fn check_anchored(
+    canon: &Path,
+    stat: &impl PathStat,
+    root: &Path,
+    uid: u32,
+) -> Result<(), TrustError> {
+    if !root.is_absolute() {
+        return Err(TrustError::NotAbsolute(root.to_path_buf()));
+    }
+    let mut saw_root = false;
     for component in trusted_components(canon)? {
+        if !component.starts_with(root) {
+            continue;
+        }
+        saw_root = true;
         let st = stat
             .stat_nofollow(&component)
             .map_err(|e| TrustError::Unreadable {
                 path: component.clone(),
                 detail: e.to_string(),
             })?;
-        if st.is_symlink {
-            return Err(TrustError::Symlink(component));
-        }
-        if st.uid != 0 {
-            return Err(TrustError::NotRoot(component));
-        }
-        let mode = st.mode & 0o777;
-        if mode & 0o020 != 0 {
-            return Err(TrustError::GroupWritable(component));
-        }
-        if mode & 0o002 != 0 {
-            return Err(TrustError::OtherWritable(component));
-        }
+        reject_component(component, &st, uid)?;
+    }
+    if !saw_root {
+        return Err(TrustError::Outside {
+            canon: canon.to_path_buf(),
+            root: root.to_path_buf(),
+        });
     }
     Ok(())
 }
 
-fn ensure_trusted_pin(canon: &str) -> Result<(), PlanError> {
-    check_trusted_path(Path::new(canon), &FsStat).map_err(|e| {
+fn reject_component(path: PathBuf, st: &ComponentStat, uid: u32) -> Result<(), TrustError> {
+    if st.is_symlink {
+        return Err(TrustError::Symlink(path));
+    }
+    if st.uid != uid {
+        return Err(if uid == 0 {
+            TrustError::NotRoot(path)
+        } else {
+            TrustError::NotUid { path, uid }
+        });
+    }
+    let mode = st.mode & 0o777;
+    if mode & 0o020 != 0 {
+        return Err(TrustError::GroupWritable(path));
+    }
+    if mode & 0o002 != 0 {
+        return Err(TrustError::OtherWritable(path));
+    }
+    Ok(())
+}
+
+fn ensure_trusted_pin(canon: &str, root: &Path, uid: u32) -> Result<(), PlanError> {
+    check_anchored(Path::new(canon), &FsStat, root, uid).map_err(|e| {
         deny(
             &format!("argv[0] {canon}: {}", e.reason()),
             Some(canon.to_owned()),
@@ -1430,7 +1536,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_user_owned_file_is_refused_before_exec() {
+    fn trusted_path_user_owned_pin_is_refused_before_exec() {
         let (_tmp, p) = file_in("tool", b"\x7fELF", 0o755);
         let canon = p.to_str().unwrap().to_owned();
         let rule = CmdRule {
@@ -1449,5 +1555,85 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn trusted_path_injected_root_accepts_user_tree() {
+        let leaf = "/tmp/pin-root/bin/tool";
+        let mut stat = trust_tree(leaf);
+        for path in ["/tmp/pin-root", "/tmp/pin-root/bin", leaf] {
+            stat.0.insert(
+                PathBuf::from(path),
+                ComponentStat {
+                    uid: 1000,
+                    mode: 0o755,
+                    is_symlink: false,
+                },
+            );
+        }
+        let root = Path::new("/tmp/pin-root");
+        assert!(check_anchored(Path::new(leaf), &stat, root, 1000).is_ok());
+        stat.0.insert(
+            PathBuf::from("/tmp/pin-root/bin"),
+            ComponentStat {
+                uid: 1000,
+                mode: 0o775,
+                is_symlink: false,
+            },
+        );
+        let reason = check_anchored(Path::new(leaf), &stat, root, 1000)
+            .unwrap_err()
+            .reason();
+        assert!(reason.contains("/tmp/pin-root/bin"), "{reason}");
+        assert!(reason.contains("group-writable"), "{reason}");
+    }
+
+    #[test]
+    fn trusted_path_real_untrusted_trees_are_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir();
+        let canon_tmp = std::fs::canonicalize(&tmp).unwrap();
+        assert!(
+            canon_tmp == Path::new("/tmp")
+                || canon_tmp.starts_with("/tmp")
+                || canon_tmp.starts_with("/private/tmp"),
+            "temp dir is not /tmp: {}",
+            canon_tmp.display()
+        );
+        let base = canon_tmp.join(format!("geode-trust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let file = base.join("tool");
+        std::fs::write(&file, b"\x7fELF").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let user = check_trusted_path(&file, &FsStat).unwrap_err().reason();
+        assert!(user.contains("trusted path"), "{user}");
+
+        let in_tmp = canon_tmp.join(format!("geode-trust-file-{}", std::process::id()));
+        std::fs::write(&in_tmp, b"\x7fELF").unwrap();
+        let tmp_reason = check_trusted_path(&in_tmp, &FsStat).unwrap_err().reason();
+        assert!(tmp_reason.contains("trusted path"), "{tmp_reason}");
+        let _ = std::fs::remove_file(&in_tmp);
+
+        for mode in [0o775_u32, 0o777] {
+            let anc = base.join(format!("m{mode:o}"));
+            std::fs::create_dir(&anc).unwrap();
+            std::fs::set_permissions(&anc, std::fs::Permissions::from_mode(mode)).unwrap();
+            let nested = anc.join("tool");
+            std::fs::write(&nested, b"\x7fELF").unwrap();
+            let reason = check_trusted_path(&nested, &FsStat).unwrap_err().reason();
+            assert!(reason.contains("trusted path"), "{mode:o} {reason}");
+        }
+
+        let real = base.join("real");
+        std::fs::create_dir(&real).unwrap();
+        let tool = real.join("tool");
+        std::fs::write(&tool, b"\x7fELF").unwrap();
+        let link = base.join("via");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let via = link.join("tool");
+        let reason = check_trusted_path(&via, &FsStat).unwrap_err().reason();
+        assert!(reason.contains("trusted path"), "{reason}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

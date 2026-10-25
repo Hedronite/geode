@@ -23,6 +23,9 @@ doc = false
 
 [features]
 default = ["tui"]
+# Test-only pin trust root. Off by default, so `cargo build --release`
+# does not include it. Not part of the supported `geode` surface.
+test-trusted-root = ["geode-grotto/test-trusted-root"]
 # 14-tui 2.2: default-on for release builds; a core-profile build
 # (--no-default-features) compiles with no ratatui and answers
 # `geode tui` with exit 1.

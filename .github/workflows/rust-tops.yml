@@ -46,6 +46,8 @@ jobs:
           sudo apt-get install --no-install-recommends -y pkg-config libfuse3-dev libfuse-dev
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: release build has no test trust root
+        run: .github/scripts/check-no-test-trusted-root.sh
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny@0.20.2

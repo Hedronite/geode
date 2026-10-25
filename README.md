@@ -205,7 +205,7 @@ The program reads `API_KEY` from its own environment. Do not write `$API_KEY` on
   ```
 
   `path` is an absolute canonical executable. A relative path, or a symlink that resolves to a different file, is refused. `sha256` is the SHA-256 of that file and is required on this form (lowercase hex; uppercase is accepted). `args_prefix` is the required leading arguments after the program. It may be empty or omitted, and then any arguments are allowed. The first matching pin is the one that runs, and an empty prefix matches every argument list.
-- A pin runs only when the binary and every directory from its canonical path up to `/` is owned by root, is not writable by group or other, and is not a symlink. The refusal names the first component that fails, starting at `/`. The check runs on Linux and macOS. On macOS it is the main defense, because the kernel cannot exec the hashed file descriptor. The sticky bit is not an exception, so a pin under `/tmp` is refused.
+- A pin runs only when the binary and every directory from its canonical path up to `/` is owned by root, is not writable by group or other, and is not a symlink. The refusal names the first component that fails, starting at `/`. The check runs on Linux and macOS. On macOS it is the main defense, because the kernel cannot exec the hashed file descriptor. The sticky bit is not an exception, so a pin under `/tmp` is refused. A release build has no switch that moves that root or the expected owner.
 - `--require-pin`, or `"require_pin": true` on an `--allow-cmds-file` object, refuses any allow rule that has no `sha256`, including a bare `--allow-cmd PATH`. The check is at load time, before a child starts. The default is off.
 
   ```json

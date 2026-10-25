@@ -117,6 +117,15 @@ pub struct RunArgs {
     /// does the same. Off by default, so a bare path still runs.
     #[arg(long)]
     pub require_pin: bool,
+    /// Test-only. Compiled out of release builds. Both this and
+    /// `test_trusted_uid` are required together; production runs pass neither.
+    #[cfg(feature = "test-trusted-root")]
+    #[arg(long, hide = true, value_name = "DIR")]
+    pub test_trusted_root: Option<PathBuf>,
+    /// Uid that must own `test_trusted_root` and every component under it.
+    #[cfg(feature = "test-trusted-root")]
+    #[arg(long, hide = true, value_name = "UID")]
+    pub test_trusted_uid: Option<u32>,
     /// Seconds before SIGTERM; SIGKILL follows 2 seconds later.
     #[arg(long, value_name = "SECS", default_value_t = DEFAULT_TIMEOUT_SECS)]
     pub timeout: u64,
@@ -365,20 +374,43 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         custody: false,
         hosts: inject::hosts_label(&[]),
     };
-    let mut plan = match inject::plan(
-        &caller,
-        &view,
-        &PlanRequest {
-            bindings: &bindings,
-            argv: &args.command,
-            base_path: base_path.as_deref(),
-            no_redact: args.no_redact,
-        },
-    ) {
+    let request = PlanRequest {
+        bindings: &bindings,
+        argv: &args.command,
+        base_path: base_path.as_deref(),
+        no_redact: args.no_redact,
+    };
+    let mut plan = match plan_run(args, &caller, &view, &request) {
         Ok(p) => p,
         Err(e) => return Err(plan_refusal(&mut chain, &row, e)),
     };
     execute(args, out, &mut plan, &mut chain, &row)
+}
+
+/// Production `plan`, or the test root when that feature is compiled in.
+fn plan_run<'a>(
+    args: &RunArgs,
+    caller: &Caller<'a>,
+    view: &VaultView<'a>,
+    request: &PlanRequest<'a>,
+) -> Result<inject::Plan, PlanError> {
+    #[cfg(feature = "test-trusted-root")]
+    {
+        match (args.test_trusted_root.as_deref(), args.test_trusted_uid) {
+            (None, None) => inject::plan(caller, view, request),
+            (Some(root), Some(uid)) => {
+                inject::plan_with_test_root(caller, view, request, root, uid)
+            }
+            _ => Err(PlanError::Usage(
+                "test-trusted-root and test-trusted-uid must be set together".into(),
+            )),
+        }
+    }
+    #[cfg(not(feature = "test-trusted-root"))]
+    {
+        let _ = args;
+        inject::plan(caller, view, request)
+    }
 }
 
 /// Fields every audit row of one run shares. Local runs are
