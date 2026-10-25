@@ -192,10 +192,9 @@ jobs:
         run: |
           cargo install cargo-nextest --version 0.9.148 --locked
           id builder >/dev/null 2>&1 || useradd --create-home builder
-          chown -R builder:builder "$GITHUB_WORKSPACE"
-          chmod -R a+rX /usr/local/cargo /usr/local/rustup
+          chown -R builder:builder "$GITHUB_WORKSPACE" /github/home/.cargo /github/home/.rustup
           # Root reads a mode 000 allow-cmds file. The floor runs tests as builder.
-          runuser -u builder -- env HOME=/home/builder PATH="/usr/local/cargo/bin:/usr/local/bin:$PATH" CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup GEODE_REQUIRE_NU=1 cargo nextest run --workspace --all-features --profile ci
+          runuser -u builder -- env HOME=/home/builder PATH="/github/home/.cargo/bin:/usr/local/bin:$PATH" CARGO_HOME=/github/home/.cargo RUSTUP_HOME=/github/home/.rustup GEODE_REQUIRE_NU=1 cargo nextest run --workspace --all-features --profile ci
       - name: doctests
         run: cargo test --doc --workspace --all-features
       - name: msrv 1.89.0
