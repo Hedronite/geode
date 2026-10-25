@@ -15,8 +15,8 @@ if cargo tree -p geode-cli -e features --locked | grep -F test-trusted-root; the
 fi
 
 bin=target/release/geode
-if grep -a -F -e test-trusted-root -e test-trusted-uid "$bin" >/dev/null; then
-  echo "release binary contains the test trust switch" >&2
+if grep -a -F -e test-trusted-root -e test-trusted-uid -e test-unconfined-hosts "$bin" >/dev/null; then
+  echo "release binary contains a test-only switch" >&2
   exit 1
 fi
 
@@ -28,6 +28,15 @@ if "$bin" run --test-trusted-root / --test-trusted-uid 0 -- /bin/true >"$err" 2>
 fi
 if ! grep -q 'unexpected argument' "$err"; then
   echo "expected clap to reject --test-trusted-root" >&2
+  cat "$err" >&2
+  exit 1
+fi
+if "$bin" run --test-unconfined-hosts -- /bin/true >"$err" 2>&1; then
+  echo "release geode accepted --test-unconfined-hosts" >&2
+  exit 1
+fi
+if ! grep -q 'unexpected argument' "$err"; then
+  echo "expected clap to reject --test-unconfined-hosts" >&2
   cat "$err" >&2
   exit 1
 fi

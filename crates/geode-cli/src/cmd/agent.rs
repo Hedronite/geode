@@ -465,7 +465,7 @@ fn finish_rule(mut rule: CmdRule, label: &str, require_sha256: bool) -> Result<C
 
 /// Validate a host: non-empty ASCII with no whitespace, scheme, path, or
 /// userinfo. Lowercased.
-fn normalize_host(host: &str) -> Result<String> {
+pub(crate) fn normalize_host(host: &str) -> Result<String> {
     let bad = host.is_empty()
         || !host.is_ascii()
         || host.contains("://")

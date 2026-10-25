@@ -12,6 +12,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+### BREAKING
+
+- Linux custody and local `geode run` refuse a secret binding whose `allow_hosts` is empty or unusable (`policy_deny`, nothing spawned). Tokens issued with an empty list no longer run and must be reissued with the hosts they may contact.
+
+### Security
+
+- Local `geode run` enforces `allow_hosts` for every secret binding on every platform, including macOS. The check is the custody allowlist (`AllowList`): a host that is not listed is `host_denied` and is not dialed. A secret binding with an empty or unusable `allow_hosts` is refused before spawn (non-zero exit). There is no environment variable, flag, or config key that disables the check. Pass hosts with repeatable `--allow-host`. macOS confines the child with a deny-by-default seatbelt: file and process access is limited to what the child needs to run, mach-lookup is a named allowlist with no network service, Apple events are denied, and network helper programs cannot be exec'd. LaunchServices, the preferences daemon, and the keychain service are not on that list. The seatbelt used when there is no egress proxy is deny-by-default as well and has no outbound network. Outbound network for a confined run is allowed only to the local egress proxy. The proxy listens on both loopback stacks, because the seatbelt loopback name covers both, and refuses to start if either bind fails. Each run puts a token in the proxy URL; a request without it is not dialed. A process that can read the child environment can present that token. A DNS answer in a loopback, private, link-local, multicast, benchmarking, reserved, NAT64, or other non-global range is not dialed unless the request host is an IP literal already on `allow_hosts`. Proxy denials are audit rows with outcome `host_denied`. Linux keeps the network namespace and the same proxy checks.
+
+### Changed
+
 - Tests: CLI test helpers point `HOME` and the XDG dirs at per-test tempdirs and drop `GEODE_KEY_FILE`/`GEODE_PASSPHRASE`, so no test can resolve the operator's key. Custody `geode_run` gains Fix 3 audit-fault tests (started-row and close-row) on the in-process daemon.
 
 ## [2.0.0] — 2026-10-25

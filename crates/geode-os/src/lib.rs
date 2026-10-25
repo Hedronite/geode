@@ -15,6 +15,7 @@ pub mod ident;
 #[cfg(target_os = "linux")]
 pub mod netns;
 mod spawn;
+pub use egress::HostDenials;
 pub use ident::ChildIdentity;
 pub use spawn::{
     spawn, spawn_as, spawn_with, spawn_with_pin, ChildOutcome, PinnedExe, SpawnSpec, Stream,

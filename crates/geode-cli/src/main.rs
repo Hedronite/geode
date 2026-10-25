@@ -160,7 +160,10 @@ enum Commands {
     /// Run a command with vault secrets in its environment.
     ///
     /// Needs your key, and refuses a token. Put the command after `--`.
-    /// Output is redacted. Redaction does not stop a hostile command.
+    /// `--allow-host` is required with `--secret`. An empty list is refused
+    /// before the child starts. The host check is the custody allowlist, on
+    /// macOS and on Linux. Output is redacted. Redaction does not stop a
+    /// hostile command.
     /// Pin the program with `--allow-cmd` JSON or `--allow-cmds-file`
     /// (`path`, `sha256`, `args_prefix`). A bare `--allow-cmd PATH` does
     /// not pin. `--require-pin`, or `"require_pin": true` in that file,
