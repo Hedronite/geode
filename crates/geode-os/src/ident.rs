@@ -387,10 +387,14 @@ pub fn seatbelt_profile(deny: &[std::path::PathBuf]) -> Result<String, String> {
 /// Seatbelt lines that deny outbound network except the local egress proxy.
 /// The host check stays in [`crate::egress::AllowList`]; this only pins the
 /// child to that proxy so it cannot dial around the check.
+///
+/// `sandbox-exec` accepts `localhost` or `*` as the host in a network
+/// address, and rejects an IP literal. `localhost` is the loopback the
+/// proxy listens on.
 #[must_use]
 pub fn proxy_network_rules(port: u16) -> String {
     format!(
-        "(deny network-outbound)\n(allow network-outbound (remote tcp \"127.0.0.1:{port}\"))\n(allow network-outbound (remote ip \"127.0.0.1:{port}\"))\n"
+        "(deny network-outbound)\n(allow network-outbound (remote tcp \"localhost:{port}\"))\n(allow network-outbound (remote ip \"localhost:{port}\"))\n"
     )
 }
 
@@ -508,11 +512,11 @@ mod tests {
     fn confined_profile_limits_network_to_the_proxy() {
         let open = seatbelt_profile_confined(&[], 9).unwrap();
         assert!(open.contains("(deny network-outbound)\n"), "{open}");
-        assert!(open.contains("127.0.0.1:9"), "{open}");
+        assert!(open.contains("localhost:9"), "{open}");
         assert!(!open.contains("file-read"), "{open}");
         let closed = seatbelt_profile_confined(&["/a/k.gkey".into()], 9).unwrap();
         assert!(closed.contains("(literal \"/a/k.gkey\")"), "{closed}");
-        assert!(closed.contains("127.0.0.1:9"), "{closed}");
+        assert!(closed.contains("localhost:9"), "{closed}");
         assert!(seatbelt_profile_confined(&["rel".into()], 9).is_err());
     }
 
