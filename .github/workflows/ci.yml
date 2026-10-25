@@ -70,3 +70,24 @@ jobs:
           fi
       - name: clippy -D warnings
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # One job, not the full matrix. Proves a pinned run of geode-pin-helper
+  # (a Cargo bin installed on a root-owned path). A copied /bin/sh is
+  # SIGKILL'd: CODESIGNING Launch Constraint Violation, platform id 26.
+  pin-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: trusted-path and run-path tests
+        run: |
+          cargo test -p geode-grotto --lib trusted_path --locked
+          cargo test -p geode-os --lib pinned_non_platform_helper_runs --locked
+          cargo test -p geode-cli --test run_cli --locked
+      # Not a gate. Castle saw exit 2 here; record whether macos-latest does too.
+      - name: observe recipients_cli add_recipient_fail_closed
+        continue-on-error: true
+        run: cargo test -p geode-cli --test recipients_cli add_recipient_fail_closed --locked -- --nocapture

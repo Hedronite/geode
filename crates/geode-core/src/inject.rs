@@ -8,9 +8,10 @@
 //! transport feeds child output through.
 //!
 //! Order: binding names, `allow_hosts`, authorize every binding, resolve and
-//! match `argv[0]`, `--no-redact` gate, decrypt, value checks, argv needle
-//! check. All pass or nothing is spawned. Errors name binding NAMEs and the
-//! canonical `argv[0]` only — never a value or the full argv.
+//! match `argv[0]` (a pin also has to sit on a trusted path), `--no-redact`
+//! gate, decrypt, value checks, argv needle check. All pass or nothing is
+//! spawned. Errors name binding NAMEs and the canonical `argv[0]` only —
+//! never a value or the full argv.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -374,6 +375,12 @@ fn may_skip_redaction(caller: &Caller<'_>, bindings: &[BindingSpec]) -> bool {
 /// the result so spawn execs the bytes that were hashed (Fix 4). When any
 /// rule for that path carries `sha256`, an unpinned rule for the same path
 /// is ignored.
+///
+/// Before that open, the canonical path and every ancestor up to `/` must
+/// be owned by uid 0, not group- or other-writable, and not a symlink. The
+/// refusal names the first failing component from `/` down. The check runs
+/// on Linux and macOS. On macOS there is no `fexecve`, so this is what
+/// stops a non-root writer from winning the inode-check window.
 fn match_cmd(
     allow: &[CmdRule],
     argv0: &str,
@@ -392,6 +399,7 @@ fn match_cmd(
     let Some(want) = &rule.sha256 else {
         return Ok(VerifiedExe { canon, fd: None });
     };
+    ensure_trusted_pin(&canon)?;
     let pinned =
         open_pinned(Path::new(&canon), want).map_err(|e| pin_mismatch(&canon, e, allow))?;
     Ok(VerifiedExe {
@@ -487,6 +495,128 @@ fn pin_mismatch(canon: &str, err: PinError, allow: &[CmdRule]) -> PlanError {
         }
         PinError::Unusable => unlisted(allow, canon),
     }
+}
+
+/// One `lstat` of a path component. `mode` is the permission bits only
+/// (`st_mode & 0o777`). Symlinks are reported here and are not followed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ComponentStat {
+    uid: u32,
+    mode: u32,
+    is_symlink: bool,
+}
+
+/// Ownership source for the trusted-path check. Production uses `lstat`.
+/// Tests supply a map so they do not need a root-owned tree.
+trait PathStat {
+    fn stat_nofollow(&self, path: &Path) -> std::io::Result<ComponentStat>;
+}
+
+/// `lstat` via `symlink_metadata`: a symlink is visible, not followed.
+struct FsStat;
+
+impl PathStat for FsStat {
+    fn stat_nofollow(&self, path: &Path) -> std::io::Result<ComponentStat> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(path)?;
+        Ok(ComponentStat {
+            uid: meta.uid(),
+            mode: meta.mode() & 0o777,
+            is_symlink: meta.file_type().is_symlink(),
+        })
+    }
+}
+
+/// Why a pinned path is not trusted. The path is the failing component.
+#[derive(Debug, PartialEq, Eq)]
+enum TrustError {
+    NotAbsolute(PathBuf),
+    Unreadable { path: PathBuf, detail: String },
+    Symlink(PathBuf),
+    NotRoot(PathBuf),
+    GroupWritable(PathBuf),
+    OtherWritable(PathBuf),
+}
+
+impl TrustError {
+    /// One line. Names the component and the reason. No file bytes.
+    fn reason(&self) -> String {
+        match self {
+            Self::NotAbsolute(p) => format!("trusted path: {} is not absolute", p.display()),
+            Self::Unreadable { path, detail } => {
+                format!(
+                    "trusted path: {} cannot be checked: {detail}",
+                    path.display()
+                )
+            }
+            Self::Symlink(p) => format!("trusted path: {} is a symlink", p.display()),
+            Self::NotRoot(p) => format!("trusted path: {} is not owned by root", p.display()),
+            Self::GroupWritable(p) => format!("trusted path: {} is group-writable", p.display()),
+            Self::OtherWritable(p) => format!("trusted path: {} is other-writable", p.display()),
+        }
+    }
+}
+
+/// `/`, then each ancestor, then `canon` itself.
+fn trusted_components(canon: &Path) -> Result<Vec<PathBuf>, TrustError> {
+    if !canon.is_absolute() {
+        return Err(TrustError::NotAbsolute(canon.to_path_buf()));
+    }
+    let mut out = Vec::new();
+    let mut cur = PathBuf::new();
+    for c in canon.components() {
+        match c {
+            std::path::Component::RootDir => cur.push(std::path::MAIN_SEPARATOR_STR),
+            std::path::Component::Normal(seg) => cur.push(seg),
+            std::path::Component::Prefix(_)
+            | std::path::Component::CurDir
+            | std::path::Component::ParentDir => {
+                return Err(TrustError::NotAbsolute(canon.to_path_buf()));
+            }
+        }
+        out.push(cur.clone());
+    }
+    if out.is_empty() {
+        return Err(TrustError::NotAbsolute(canon.to_path_buf()));
+    }
+    Ok(out)
+}
+
+/// The binary and every ancestor up to `/` must be root-owned, not group-
+/// or other-writable, and not a symlink. The first failure from `/` down
+/// is the one reported.
+fn check_trusted_path(canon: &Path, stat: &impl PathStat) -> Result<(), TrustError> {
+    for component in trusted_components(canon)? {
+        let st = stat
+            .stat_nofollow(&component)
+            .map_err(|e| TrustError::Unreadable {
+                path: component.clone(),
+                detail: e.to_string(),
+            })?;
+        if st.is_symlink {
+            return Err(TrustError::Symlink(component));
+        }
+        if st.uid != 0 {
+            return Err(TrustError::NotRoot(component));
+        }
+        let mode = st.mode & 0o777;
+        if mode & 0o020 != 0 {
+            return Err(TrustError::GroupWritable(component));
+        }
+        if mode & 0o002 != 0 {
+            return Err(TrustError::OtherWritable(component));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_trusted_pin(canon: &str) -> Result<(), PlanError> {
+    check_trusted_path(Path::new(canon), &FsStat).map_err(|e| {
+        deny(
+            &format!("argv[0] {canon}: {}", e.reason()),
+            Some(canon.to_owned()),
+        )
+    })
 }
 
 /// Why a pinned `argv[0]` failed its check.
@@ -1161,6 +1291,163 @@ mod tests {
             assert_eq!(r.unwrap_err(), PinError::Script);
         } else {
             assert!(r.is_ok(), "{r:?}");
+        }
+    }
+
+    /// Map stand-in for [`PathStat`]. Missing paths fail closed.
+    struct FakeStat(BTreeMap<PathBuf, ComponentStat>);
+
+    impl PathStat for FakeStat {
+        fn stat_nofollow(&self, path: &Path) -> std::io::Result<ComponentStat> {
+            self.0.get(path).copied().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no stat for component")
+            })
+        }
+    }
+
+    /// A fully root-owned tree, then one component overwritten.
+    fn trust_tree(leaf: &str) -> FakeStat {
+        let comps = trusted_components(Path::new(leaf)).unwrap();
+        let map = comps
+            .into_iter()
+            .map(|p| {
+                (
+                    p,
+                    ComponentStat {
+                        uid: 0,
+                        mode: 0o755,
+                        is_symlink: false,
+                    },
+                )
+            })
+            .collect();
+        FakeStat(map)
+    }
+
+    fn trust_reason(leaf: &str, stat: &FakeStat) -> String {
+        check_trusted_path(Path::new(leaf), stat)
+            .unwrap_err()
+            .reason()
+    }
+
+    #[test]
+    fn trusted_path_rejects_group_writable_ancestor() {
+        let leaf = "/usr/local/bin/tool";
+        let mut stat = trust_tree(leaf);
+        stat.0.insert(
+            PathBuf::from("/usr/local"),
+            ComponentStat {
+                uid: 0,
+                mode: 0o775,
+                is_symlink: false,
+            },
+        );
+        let reason = trust_reason(leaf, &stat);
+        assert!(reason.contains("/usr/local"), "{reason}");
+        assert!(reason.contains("group-writable"), "{reason}");
+        assert!(!reason.contains("/usr/local/bin"), "{reason}");
+    }
+
+    #[test]
+    fn trusted_path_rejects_other_writable_binary() {
+        let leaf = "/usr/local/bin/tool";
+        let mut stat = trust_tree(leaf);
+        stat.0.insert(
+            PathBuf::from(leaf),
+            ComponentStat {
+                uid: 0,
+                mode: 0o757,
+                is_symlink: false,
+            },
+        );
+        let reason = trust_reason(leaf, &stat);
+        assert!(reason.contains(leaf), "{reason}");
+        assert!(reason.contains("other-writable"), "{reason}");
+    }
+
+    #[test]
+    fn trusted_path_rejects_non_root_owner() {
+        let leaf = "/usr/local/bin/tool";
+        let mut stat = trust_tree(leaf);
+        stat.0.insert(
+            PathBuf::from(leaf),
+            ComponentStat {
+                uid: 1000,
+                mode: 0o755,
+                is_symlink: false,
+            },
+        );
+        let reason = trust_reason(leaf, &stat);
+        assert!(reason.contains(leaf), "{reason}");
+        assert!(reason.contains("not owned by root"), "{reason}");
+    }
+
+    #[test]
+    fn trusted_path_rejects_symlinked_ancestor() {
+        let leaf = "/usr/local/bin/tool";
+        let mut stat = trust_tree(leaf);
+        // A symlink's mode is often 0777. The symlink itself is the failure,
+        // not the write bits.
+        stat.0.insert(
+            PathBuf::from("/usr/local"),
+            ComponentStat {
+                uid: 0,
+                mode: 0o777,
+                is_symlink: true,
+            },
+        );
+        let reason = trust_reason(leaf, &stat);
+        assert!(reason.contains("/usr/local"), "{reason}");
+        assert!(reason.contains("is a symlink"), "{reason}");
+        assert!(!reason.contains("writable"), "{reason}");
+    }
+
+    #[test]
+    fn trusted_path_accepts_root_owned_path() {
+        let leaf = "/usr/bin/tool";
+        let stat = trust_tree(leaf);
+        assert!(check_trusted_path(Path::new(leaf), &stat).is_ok());
+    }
+
+    #[test]
+    fn trusted_path_real_system_shell_is_accepted() {
+        let canon = std::fs::canonicalize("/bin/sh").unwrap();
+        check_trusted_path(&canon, &FsStat).unwrap_or_else(|e| panic!("{}", e.reason()));
+    }
+
+    #[test]
+    fn trusted_path_real_user_tree_is_rejected() {
+        let (_tmp, p) = file_in("tool", b"\x7fELF", 0o755);
+        let reason = check_trusted_path(&p, &FsStat).unwrap_err().reason();
+        assert!(reason.contains("trusted path"), "{reason}");
+        assert!(
+            reason.contains("other-writable")
+                || reason.contains("group-writable")
+                || reason.contains("not owned by root")
+                || reason.contains("is a symlink"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn pinned_user_owned_file_is_refused_before_exec() {
+        let (_tmp, p) = file_in("tool", b"\x7fELF", 0o755);
+        let canon = p.to_str().unwrap().to_owned();
+        let rule = CmdRule {
+            path: canon.clone(),
+            sha256: Some(sha_of(&p)),
+            args_prefix: Vec::new(),
+        };
+        let err = match match_cmd(std::slice::from_ref(&rule), &canon, &[], None) {
+            Err(e) => e,
+            Ok(_) => panic!("user-owned pin was allowed"),
+        };
+        match err {
+            PlanError::Deny { reason, exe } => {
+                assert!(reason.contains("trusted path"), "{reason}");
+                assert_eq!(exe.as_deref(), Some(canon.as_str()));
+            }
+            other => panic!("{other:?}"),
         }
     }
 }

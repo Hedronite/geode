@@ -261,8 +261,11 @@ impl CArray {
 }
 
 /// Linux: exec the hashed fd itself, so a file swapped in at `program`
-/// after the hash never runs. argv and envp are copied from `cmd` now, so
-/// call this after the env is final. Registered after the identity hook.
+/// after the hash never runs. The plan has already refused a pin that is
+/// not on a trusted path (root-owned, not group- or other-writable, no
+/// symlink from the file up to `/`). argv and envp are copied from `cmd`
+/// now, so call this after the env is final. Registered after the identity
+/// hook.
 #[cfg(target_os = "linux")]
 fn arm_pin(cmd: &mut Command, pin: PinnedExe, _program: &Path) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
@@ -296,10 +299,12 @@ fn arm_pin(cmd: &mut Command, pin: PinnedExe, _program: &Path) -> io::Result<()>
     Ok(())
 }
 
-/// No `fexecve` here: the child execs `program` by path. Residual: between
-/// this check and the kernel's open of `program` at exec, a swap can still
-/// win. The hook narrows that to the last syscalls before exec. A program
-/// writable by group or other is refused outright.
+/// No `fexecve` here: the child execs `program` by path. The plan has
+/// already required a root-owned, non-writable, non-symlink path from the
+/// binary up to `/`. That is the main defense on macOS. Residual: between
+/// this inode check and the kernel's open of `program` at exec, a root
+/// writer can still swap the file. A program writable by group or other is
+/// refused outright.
 #[cfg(not(target_os = "linux"))]
 fn arm_pin(cmd: &mut Command, pin: PinnedExe, program: &Path) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
@@ -714,6 +719,30 @@ mod tests {
             }
         })?;
         Ok((o, String::from_utf8_lossy(&out).into_owned()))
+    }
+
+    #[test]
+    fn pinned_non_platform_helper_runs() {
+        // A rustc binary, not a copy of /bin/sh. macOS launch constraints
+        // SIGKILL a relocated platform image; this one is ad-hoc signed.
+        let dir = tmpdir("pin-helper");
+        let src = dir.join("helper.rs");
+        std::fs::write(&src, "fn main() { print!(\"ok\"); }\n").unwrap();
+        let prog = dir.join("helper");
+        let built = std::process::Command::new("rustc")
+            .arg(&src)
+            .arg("-o")
+            .arg(&prog)
+            .status()
+            .expect("rustc");
+        assert!(built.success(), "rustc helper");
+        let pinned = pin(&prog);
+        let mut s = spec("", Duration::from_secs(10));
+        s.program = prog;
+        s.args.clear();
+        let (o, out) = run(s, pinned).unwrap();
+        assert_eq!((o.exit_code, out.as_str()), (Some(0), "ok"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -205,7 +205,15 @@ The program reads `API_KEY` from its own environment. Do not write `$API_KEY` on
   ```
 
   `path` is an absolute canonical executable. A relative path, or a symlink that resolves to a different file, is refused. `sha256` is the SHA-256 of that file and is required on this form (lowercase hex; uppercase is accepted). `args_prefix` is the required leading arguments after the program. It may be empty or omitted, and then any arguments are allowed. The first matching pin is the one that runs, and an empty prefix matches every argument list.
-- Geode opens the pinned file once, hashes that file descriptor, and execs the same descriptor. A file swapped in after the check is not what runs. On macOS there is no `fexecve`; the child re-checks the path against the hashed file immediately before exec, which is the same residual window as a pinned custody command.
+- A pin runs only when the binary and every directory from its canonical path up to `/` is owned by root, is not writable by group or other, and is not a symlink. The refusal names the first component that fails, starting at `/`. The check runs on Linux and macOS. On macOS it is the main defense, because the kernel cannot exec the hashed file descriptor. The sticky bit is not an exception, so a pin under `/tmp` is refused.
+- `--require-pin`, or `"require_pin": true` on an `--allow-cmds-file` object, refuses any allow rule that has no `sha256`, including a bare `--allow-cmd PATH`. The check is at load time, before a child starts. The default is off.
+
+  ```json
+  {"require_pin": true, "cmds": [{"path": "/usr/bin/deploy", "sha256": "<64 hex>"}]}
+  ```
+
+  A JSON list is unchanged and does not turn require-pin on. Rules in the file still need `sha256` either way.
+- Geode opens the pinned file once, hashes that file descriptor, and execs the same descriptor. A file swapped in after the check is not what runs. On macOS there is no `fexecve`; the child re-checks the path against the hashed file immediately before exec. A root-owned, non-writable path is what keeps a non-root writer from winning that window.
 - A pinned run is refused when the resolved program is not pinned, the opened file's digest does not match, the arguments do not start with `args_prefix`, or the path is relative or resolves through a symlink to a different file. The error names the path. It does not print a secret, the digest of a secret, or the argument list.
 - Stdout carries only the child's redacted output. Stderr names which bindings were injected and never prints their values. A copy of a bound value in the output becomes `[REDACTED:NAME]`.
 - Redaction catches the raw value and its base64, hex, percent-encoded, and JSON-string forms. It does not catch shell quoting or any other transform. **Redaction stops accidents. It does not stop a hostile command.**

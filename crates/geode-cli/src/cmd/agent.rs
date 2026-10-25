@@ -298,9 +298,32 @@ fn read_cmds_file(file: &Path) -> Result<Vec<CmdRule>> {
     read_cmd_rules_file(file, false)
 }
 
+/// `--allow-cmds-file` for `geode run`, after it has been read.
+pub(crate) struct PinnedCmdsFile {
+    pub rules: Vec<CmdRule>,
+    /// `true` when the file is an object with `"require_pin": true`.
+    /// A JSON list leaves this off.
+    pub require_pin: bool,
+}
+
 /// Parse `--allow-cmds-file` for `geode run`. Every rule must include `sha256`.
-pub(crate) fn read_pinned_cmds_file(file: &Path) -> Result<Vec<CmdRule>> {
-    read_cmd_rules_file(file, true)
+///
+/// A JSON list is the existing file. An object
+/// `{"require_pin": true, "cmds": [ … ]}` is the same list plus the
+/// require-pin setting. Unknown keys are refused.
+pub(crate) fn read_pinned_cmds_file(file: &Path) -> Result<PinnedCmdsFile> {
+    let value = read_cmds_json(file)?;
+    match &value {
+        serde_json::Value::Array(list) => Ok(PinnedCmdsFile {
+            rules: rules_from_list(list, true)?,
+            require_pin: false,
+        }),
+        serde_json::Value::Object(obj) => parse_run_cmds_object(file, obj),
+        _ => Err(Error::Format(format!(
+            "allow-cmds-file {}: expected a JSON list of command rules, or an object with require_pin and cmds",
+            file.display()
+        ))),
+    }
 }
 
 /// One `--allow-cmd` value on `geode run`.
@@ -329,17 +352,25 @@ pub(crate) fn parse_allow_cmd_arg(raw: &str) -> Result<CmdRule> {
     })
 }
 
-fn read_cmd_rules_file(file: &Path, require_sha256: bool) -> Result<Vec<CmdRule>> {
+fn read_cmds_json(file: &Path) -> Result<serde_json::Value> {
     let bytes = std::fs::read(file)
         .map_err(|e| Error::Format(format!("allow-cmds-file {}: {e}", file.display())))?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| Error::Format(format!("allow-cmds-file {}: bad JSON: {e}", file.display())))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|e| Error::Format(format!("allow-cmds-file {}: bad JSON: {e}", file.display())))
+}
+
+fn read_cmd_rules_file(file: &Path, require_sha256: bool) -> Result<Vec<CmdRule>> {
+    let value = read_cmds_json(file)?;
     let list = value.as_array().ok_or_else(|| {
         Error::Format(format!(
             "allow-cmds-file {}: expected a JSON list of command rules",
             file.display()
         ))
     })?;
+    rules_from_list(list, require_sha256)
+}
+
+fn rules_from_list(list: &[serde_json::Value], require_sha256: bool) -> Result<Vec<CmdRule>> {
     let mut rules = Vec::with_capacity(list.len());
     for (i, item) in list.iter().enumerate() {
         rules.push(parse_rule_object(
@@ -349,6 +380,45 @@ fn read_cmd_rules_file(file: &Path, require_sha256: bool) -> Result<Vec<CmdRule>
         )?);
     }
     Ok(rules)
+}
+
+fn parse_run_cmds_object(
+    file: &Path,
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<PinnedCmdsFile> {
+    const KEYS: [&str; 2] = ["require_pin", "cmds"];
+    if let Some(k) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
+        return Err(Error::Format(format!(
+            "allow-cmds-file {}: unknown key '{k}' (require_pin, cmds)",
+            file.display()
+        )));
+    }
+    let require_pin = match obj.get("require_pin") {
+        None => false,
+        Some(serde_json::Value::Bool(on)) => *on,
+        Some(_) => {
+            return Err(Error::Format(format!(
+                "allow-cmds-file {}: require_pin must be true or false",
+                file.display()
+            )));
+        }
+    };
+    let cmds = obj.get("cmds").ok_or_else(|| {
+        Error::Format(format!(
+            "allow-cmds-file {}: expected \"cmds\" array",
+            file.display()
+        ))
+    })?;
+    let list = cmds.as_array().ok_or_else(|| {
+        Error::Format(format!(
+            "allow-cmds-file {}: \"cmds\" must be a JSON list of command rules",
+            file.display()
+        ))
+    })?;
+    Ok(PinnedCmdsFile {
+        rules: rules_from_list(list, true)?,
+        require_pin,
+    })
 }
 
 /// One `{path, sha256, args_prefix}` object. Unknown keys are refused.
