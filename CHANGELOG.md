@@ -12,6 +12,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+- Tests: CLI test helpers point `HOME` and the XDG dirs at per-test tempdirs and drop `GEODE_KEY_FILE`/`GEODE_PASSPHRASE`, so no test can resolve the operator's key. Custody `geode_run` gains Fix 3 audit-fault tests (started-row and close-row) on the in-process daemon.
+
 ## [2.0.0] — 2026-10-25
 
 Incompatible CLI and MCP release. Suite `0x01` is unchanged. `GDE1` objects written by 1.0.0 through 1.2.1 remain readable. Raw identity keys written by earlier releases still load.

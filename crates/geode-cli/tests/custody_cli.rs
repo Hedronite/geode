@@ -20,9 +20,16 @@ use std::thread;
 fn geode(dir: &Path) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_geode"));
     c.current_dir(dir)
-        .env_remove("GEODE_TOKEN")
+        // Never resolve the operator's key, keyring or config.
+        .env("HOME", dir.join(".iso/home"))
+        .env("XDG_CONFIG_HOME", dir.join(".iso/config"))
+        .env("XDG_DATA_HOME", dir.join(".iso/data"))
+        .env("XDG_STATE_HOME", dir.join(".iso/state"))
+        .env("XDG_CACHE_HOME", dir.join(".iso/cache"))
+        .env("XDG_RUNTIME_DIR", dir.join(".iso/runtime"))
         .env_remove("GEODE_KEY_FILE")
         .env_remove("GEODE_PASSPHRASE")
+        .env_remove("GEODE_TOKEN")
         .stdin(Stdio::null());
     c
 }
