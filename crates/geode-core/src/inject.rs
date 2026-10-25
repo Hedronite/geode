@@ -1591,15 +1591,11 @@ mod tests {
     #[test]
     fn trusted_path_real_untrusted_trees_are_refused() {
         use std::os::unix::fs::PermissionsExt;
-        let tmp = std::env::temp_dir();
-        let canon_tmp = std::fs::canonicalize(&tmp).unwrap();
-        assert!(
-            canon_tmp == Path::new("/tmp")
-                || canon_tmp.starts_with("/tmp")
-                || canon_tmp.starts_with("/private/tmp"),
-            "temp dir is not /tmp: {}",
-            canon_tmp.display()
-        );
+        // `$TMPDIR` on a macOS runner is `/var/folders/.../T`, not the
+        // sticky world-writable `/tmp` this case has to refuse. `/tmp` is
+        // a symlink to `/private/tmp` there. A missing or unexpected `/tmp`
+        // fails the test.
+        let canon_tmp = canonical_sticky_tmp();
         let base = canon_tmp.join(format!("geode-trust-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
@@ -1635,5 +1631,22 @@ mod tests {
         let reason = check_trusted_path(&via, &FsStat).unwrap_err().reason();
         assert!(reason.contains("trusted path"), "{reason}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Canonical `/tmp`. macOS resolves the symlink to `/private/tmp`.
+    /// Fails if `/tmp` cannot be resolved, is some other directory, or
+    /// cannot be written.
+    fn canonical_sticky_tmp() -> PathBuf {
+        let canon = std::fs::canonicalize("/tmp")
+            .unwrap_or_else(|e| panic!("cannot canonicalize /tmp: {e}"));
+        assert!(
+            canon == Path::new("/tmp") || canon == Path::new("/private/tmp"),
+            "/tmp canonicalized to {}, not /tmp or /private/tmp",
+            canon.display()
+        );
+        let probe = canon.join(format!(".geode-tmp-probe-{}", std::process::id()));
+        std::fs::write(&probe, b"x").unwrap_or_else(|e| panic!("cannot write /tmp: {e}"));
+        std::fs::remove_file(&probe).unwrap_or_else(|e| panic!("cannot remove /tmp probe: {e}"));
+        canon
     }
 }

@@ -880,6 +880,23 @@ fn remove_pin(dir: &Path, bin: &Path) {
     let _ = run_as_root(&["rmdir", dir_s]);
 }
 
+/// Canonical `/tmp`. macOS resolves the symlink to `/private/tmp`.
+/// Fails if `/tmp` cannot be resolved, is some other directory, or
+/// cannot be written.
+fn canonical_sticky_tmp() -> PathBuf {
+    let canon =
+        std::fs::canonicalize("/tmp").unwrap_or_else(|e| panic!("cannot canonicalize /tmp: {e}"));
+    assert!(
+        canon == Path::new("/tmp") || canon == Path::new("/private/tmp"),
+        "/tmp canonicalized to {}, not /tmp or /private/tmp",
+        canon.display()
+    );
+    let probe = canon.join(format!(".geode-tmp-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"x").unwrap_or_else(|e| panic!("cannot write /tmp: {e}"));
+    std::fs::remove_file(&probe).unwrap_or_else(|e| panic!("cannot remove /tmp probe: {e}"));
+    canon
+}
+
 fn assert_pinned_ok(fx: &Fx, output: &Output, tool: &str, what: &str) {
     assert_eq!(code(output), Some(0), "{}", err(output));
     assert_eq!(out(output), "ok");
@@ -1067,15 +1084,8 @@ fn assert_real_pin_refused(tool: &Path) {
 #[test]
 fn pinned_user_tmp_writable_and_symlink_are_refused() {
     use std::os::unix::fs::PermissionsExt;
-    let tmp = std::env::temp_dir();
-    let canon_tmp = std::fs::canonicalize(&tmp).expect("canonicalize temp");
-    assert!(
-        canon_tmp == Path::new("/tmp")
-            || canon_tmp.starts_with("/tmp")
-            || canon_tmp.starts_with("/private/tmp"),
-        "temp dir is not /tmp: {}",
-        canon_tmp.display()
-    );
+    // `$TMPDIR` on a macOS runner is `/var/folders/.../T`, not `/tmp`.
+    let canon_tmp = canonical_sticky_tmp();
     let base = canon_tmp.join(format!("geode-pin-neg-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();

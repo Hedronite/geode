@@ -50,6 +50,10 @@ jobs:
         env:
           GEODE_REQUIRE_NU: "1"
         run: |
+          # geode-tui's operator tests spawn target/debug/geode. Excluding
+          # geode-cli from the workspace run skips that binary, so build
+          # the default one first. The feature build is a later step.
+          cargo build -p geode-cli --locked --bin geode
           cargo test --workspace --locked --exclude geode-cli
           cargo test -p geode-cli --locked --features test-trusted-root
       - name: release build has no test trust root
