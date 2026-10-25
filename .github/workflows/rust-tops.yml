@@ -191,7 +191,11 @@ jobs:
       - name: cargo nextest
         run: |
           cargo install cargo-nextest --version 0.9.148 --locked
-          GEODE_REQUIRE_NU=1 cargo nextest run --workspace --all-features --profile ci
+          id builder >/dev/null 2>&1 || useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          chmod -R a+rX /usr/local/cargo /usr/local/rustup
+          # Root reads a mode 000 allow-cmds file. The floor runs tests as builder.
+          runuser -u builder -- env HOME=/home/builder PATH="/usr/local/cargo/bin:/usr/local/bin:$PATH" CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup GEODE_REQUIRE_NU=1 cargo nextest run --workspace --all-features --profile ci
       - name: doctests
         run: cargo test --doc --workspace --all-features
       - name: msrv 1.89.0
@@ -213,7 +217,7 @@ jobs:
       - name: fmt
         run: cargo fmt --all -- --check
       - name: clippy -D warnings
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --features test-trusted-root -- -D warnings
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-deny@0.20.2
@@ -223,10 +227,10 @@ jobs:
         with:
           tool: cargo-nextest@0.9.148
       - name: cargo nextest
-        run: cargo nextest run --workspace --profile ci
+        run: cargo nextest run --workspace --features test-trusted-root --profile ci
       - name: doctests
-        run: cargo test --doc --workspace
+        run: cargo test --doc --workspace --features test-trusted-root
       - name: msrv 1.89.0
         run: |
           rustup toolchain install 1.89.0 --profile minimal
-          cargo +1.89.0 check --workspace --locked
+          cargo +1.89.0 check --workspace --features test-trusted-root --locked
