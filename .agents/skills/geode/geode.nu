@@ -64,13 +64,21 @@ def envelope [command: string, sub: list<string>, rest: list<string>, ok_codes: 
   }
 }
 
-def "main list" [vault: string = "", prefix: string = ""] {
+def refuse-extra [rest: list<string>] {
+  if not ($rest | is-empty) {
+    error make { msg: "refusing: not a metadata command" }
+  }
+}
+
+def "main list" [vault: string = "", prefix: string = "", ...rest: string] {
+  refuse-extra $rest
   let vault = vault-of $vault
   let args = if $prefix == "" { ["--" $vault] } else { ["--" $vault $prefix] }
   envelope "list" [list] $args | to json
 }
 
-def "main verify" [vault: string = "", --sample: string = ""] {
+def "main verify" [vault: string = "", --sample: string = "", ...rest: string] {
+  refuse-extra $rest
   let vault = vault-of $vault
   let args = if $sample == "" {
     ["--cheap" "--" $vault]
@@ -80,19 +88,23 @@ def "main verify" [vault: string = "", --sample: string = ""] {
   envelope "verify" [verify] $args | to json
 }
 
-def "main recipients" [vault: string = ""] {
+def "main recipients" [vault: string = "", ...rest: string] {
+  refuse-extra $rest
   envelope "recipients" [vault recipients] ["--" (vault-of $vault)] | to json
 }
 
-def "main snapshots" [vault: string = ""] {
+def "main snapshots" [vault: string = "", ...rest: string] {
+  refuse-extra $rest
   envelope "snapshots" [snapshot ls] ["--" (vault-of $vault)] | to json
 }
 
-def "main policy" [vault: string = ""] {
+def "main policy" [vault: string = "", ...rest: string] {
+  refuse-extra $rest
   envelope "policy" [policy show] ["--" (vault-of $vault)] | to json
 }
 
-def "main can" [principal: string, op: string, path: string, vault: string = ""] {
+def "main can" [principal: string, op: string, path: string, vault: string = "", ...rest: string] {
+  refuse-extra $rest
   envelope "can" [policy check] [
     $"--principal=($principal)"
     $"--op=($op)"
@@ -102,16 +114,25 @@ def "main can" [principal: string, op: string, path: string, vault: string = ""]
   ] [0 3] | to json
 }
 
-def "main audit" [] { envelope "audit" [audit verify] [] [0 2] | to json }
+def "main audit" [...rest: string] {
+  refuse-extra $rest
+  envelope "audit" [audit verify] [] [0 2] | to json
+}
 
-def "main custody" [] { envelope "custody" [custody status] [] | to json }
+def "main custody" [...rest: string] {
+  refuse-extra $rest
+  envelope "custody" [custody status] [] | to json
+}
 
-def "main keyring" [] { envelope "keyring" [keyring list] [] | to json }
+def "main keyring" [...rest: string] {
+  refuse-extra $rest
+  envelope "keyring" [keyring list] [] | to json
+}
 
 def main [...args: string] {
   if ($args | is-empty) {
     print "geode skill: metadata only. commands: list, verify, recipients, snapshots, policy, can, audit, custody, keyring"
     return
   }
-  error make { msg: $"refusing ($args | str join ' '): not a metadata command" }
+  error make { msg: "refusing: not a metadata command" }
 }

@@ -1,4 +1,4 @@
-//! Metadata skill (`skills/geode`) against the shipped `geode` CLI.
+//! Metadata skill (`.agents/skills/geode`) against the shipped `geode` CLI.
 //!
 //! The Nushell body may spawn only the metadata allowlist. Fixture bytes
 //! and the generated identity key must not appear in wrapped output.
@@ -219,7 +219,7 @@ impl Skill {
         install_wrapper(&fx.dir);
         Self {
             nu: nu.to_path_buf(),
-            script: repo_root().join("skills/geode/geode.nu"),
+            script: repo_root().join(".agents/skills/geode/geode.nu"),
             dir: fx.dir.clone(),
             log: fx.dir.join("argv.log"),
         }
@@ -268,7 +268,7 @@ fn success_event(fx: &Fx, label: &str, out: &Output) -> serde_json::Value {
 
 #[test]
 fn skill_allowlist_is_the_metadata_set() {
-    let src = fs::read_to_string(repo_root().join("skills/geode/geode.nu")).unwrap();
+    let src = fs::read_to_string(repo_root().join(".agents/skills/geode/geode.nu")).unwrap();
     assert_eq!(parse_allowed(&src), ALLOWED);
     assert_eq!(src.matches("^geode").count(), 1);
     assert!(src.contains("--output json"));
@@ -279,8 +279,27 @@ fn skill_allowlist_is_the_metadata_set() {
 }
 
 #[test]
+fn skill_frontmatter_is_name_and_description_only() {
+    let doc = fs::read_to_string(repo_root().join(".agents/skills/geode/SKILL.md")).unwrap();
+    let mut lines = doc.lines();
+    assert_eq!(lines.next(), Some("---"));
+    let mut keys = Vec::new();
+    for line in lines {
+        if line == "---" {
+            break;
+        }
+        if line.is_empty() || line.starts_with(' ') || line.starts_with('\t') {
+            continue;
+        }
+        let key = line.split_once(':').expect("frontmatter key").0;
+        keys.push(key);
+    }
+    assert_eq!(keys, ["name", "description"]);
+}
+
+#[test]
 fn skill_doc_warns_that_entry_names_can_be_sensitive() {
-    let doc = fs::read_to_string(repo_root().join("skills/geode/SKILL.md")).unwrap();
+    let doc = fs::read_to_string(repo_root().join(".agents/skills/geode/SKILL.md")).unwrap();
     let lower = doc.to_lowercase();
     assert!(lower.contains("entry names"));
     assert!(lower.contains("sensitive"));
@@ -299,6 +318,56 @@ fn skill_doc_warns_that_entry_names_can_be_sensitive() {
     }
     assert!(doc.contains("unlock"));
     assert!(doc.contains("lock"));
+}
+
+#[test]
+fn skill_harness_copies_match_canonical_bytes() {
+    let root = repo_root();
+    let canonical = root.join(".agents/skills");
+    let canon_files = regular_rel_files(&canonical);
+    assert!(canon_files.iter().any(|p| p == Path::new("geode/SKILL.md")));
+    assert!(canon_files.iter().any(|p| p == Path::new("geode/geode.nu")));
+    for dest in [".claude/skills", ".grok/skills", ".cursor/skills"] {
+        let copy = root.join(dest);
+        let copy_files = regular_rel_files(&copy);
+        assert_eq!(canon_files, copy_files, "{dest}");
+        for rel in &canon_files {
+            let left = fs::read(canonical.join(rel)).unwrap();
+            let right = fs::read(copy.join(rel)).unwrap();
+            assert_eq!(left, right, "{dest}/{}", rel.display());
+        }
+    }
+    assert!(!root.join("skills/geode").exists());
+    assert!(!root.join(".omp/skills").exists());
+    assert!(!root.join(".codex/skills").exists());
+}
+
+fn regular_rel_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let meta = fs::symlink_metadata(root).unwrap_or_else(|_| panic!("missing {}", root.display()));
+    assert!(meta.is_dir(), "{}", root.display());
+    assert!(!meta.file_type().is_symlink(), "symlink {}", root.display());
+    walk_regular(root, root, &mut files);
+    files.sort();
+    files
+}
+
+fn walk_regular(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) {
+    let mut ents: Vec<_> = fs::read_dir(dir).unwrap().map(|ent| ent.unwrap()).collect();
+    ents.sort_by_key(|ent| ent.file_name());
+    for ent in ents {
+        let path = ent.path();
+        let meta = fs::symlink_metadata(&path).unwrap();
+        let kind = meta.file_type();
+        assert!(!kind.is_symlink(), "symlink {}", path.display());
+        if kind.is_dir() {
+            walk_regular(root, &path, files);
+        } else if kind.is_file() {
+            files.push(path.strip_prefix(root).unwrap().to_path_buf());
+        } else {
+            panic!("not a regular file: {}", path.display());
+        }
+    }
 }
 
 #[test]

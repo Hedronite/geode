@@ -17,10 +17,13 @@ Entry names can themselves be sensitive. Quote them only where the reader is
 allowed to know the vault holds them. The script returns names, sizes, and
 public hashes. It never returns file bytes.
 
-`list` and `keyring` print one JSON event per row. The script returns that
-as an array when there is more than one event. Every other command returns
-one JSON object. A denied `can` is still a result (`exit` 3). A broken
-audit chain is `exit` 2.
+Stdout is one JSON object with `ok`, `command`, `exit`, and `data`. `data`
+holds names and metadata only. `list` and `keyring` print one JSON event per
+row. The script returns that as an array when there is more than one event.
+Every other command returns one JSON object. A denied `can` is still a
+result (`exit` 3) and `ok` stays true. A broken audit chain is `exit` 2.
+The script exits 0 for those results. It never prints, logs, or writes a
+secret value.
 
 ## Commands
 
@@ -46,7 +49,8 @@ nu geode.nu keyring                            # keyring list
 `cat`, `open`, `mount`, `run`, `agent`, `keygen`, `seal`, `sign`, `vault init`,
 `vault add-recipient`, `vault rotate`, `policy set`, `keyring add`,
 `custody unlock` / `lock`, `gc`, `git unlock`. These read secret bytes, put
-them in an environment or on disk, or change custody. They need a human, and
-their output must never be pasted into notes, logs, or chat.
+them in an environment or on disk, or change custody. Re-key, rotate, and
+init-vault stay here too. They need a human, and their output must never be
+pasted into notes, logs, or chat.
 
 The script refuses any other command before it starts `geode`.
