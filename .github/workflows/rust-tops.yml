@@ -163,3 +163,73 @@ jobs:
           name: crap
           path: target/crap.json
           if-no-files-found: error
+
+  # G1b floor on Arch. Not pin-macos. The Ubuntu jobs above stay.
+  # archlinux has no GHA runner label; SPEC-gates uses this container.
+  floor-arch:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: bootstrap
+        run: |
+          pacman -Syu --noconfirm --needed git curl base-devel pkgconf fuse2 fuse3 ca-certificates
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: cargo deny
+        run: |
+          cargo install cargo-deny --version 0.20.2 --locked
+          cargo deny check
+      - name: Install nushell 0.116.1 (checksum-pinned)
+        run: .github/scripts/install-nushell.sh
+      - name: cargo nextest
+        run: |
+          cargo install cargo-nextest --version 0.9.148 --locked
+          id builder >/dev/null 2>&1 || useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE" /github/home/.cargo /github/home/.rustup
+          # Root reads a mode 000 allow-cmds file. The floor runs tests as builder.
+          runuser -u builder -- env HOME=/home/builder PATH="/github/home/.cargo/bin:/usr/local/bin:$PATH" CARGO_HOME=/github/home/.cargo RUSTUP_HOME=/github/home/.rustup GEODE_REQUIRE_NU=1 cargo nextest run --workspace --all-features --profile ci
+      - name: doctests
+        run: cargo test --doc --workspace --all-features
+      - name: msrv 1.89.0
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          cargo +1.89.0 check --workspace --all-features --locked
+
+  # G1b floor on macOS. This is not pin-macos. That job stays in ci.yml.
+  # fuse stays off: macos-latest has no macFUSE, and the crate keeps fuse
+  # off by default for that reason. The five floor commands still run.
+  floor-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master 2026-10-16
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy -D warnings
+        run: cargo clippy --workspace --all-targets --features test-trusted-root -- -D warnings
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-deny@0.20.2
+      - name: cargo deny
+        run: cargo deny check
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-nextest@0.9.148
+      - name: cargo nextest
+        run: cargo nextest run --workspace --features test-trusted-root --profile ci
+      - name: doctests
+        run: cargo test --doc --workspace --features test-trusted-root
+      - name: msrv 1.89.0
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          cargo +1.89.0 check --workspace --features test-trusted-root --locked
