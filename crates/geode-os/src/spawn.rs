@@ -1554,15 +1554,33 @@ int main(int argc, char **argv) {
     /// LaunchServices must not open an http URL for a confined child. The
     /// helper links CoreServices and calls `LSOpenCFURLRef`. A handler
     /// launched outside the seatbelt would hit the listener on its own.
+    ///
+    /// The same helper also runs with empty `allow_hosts`, which is
+    /// `spawn_open`: no seatbelt. An unconfined `LSOpenCFURLRef` is not a
+    /// reliable success on CI runners: often there is no GUI session and no
+    /// default http handler, so the status may be an error and the listener
+    /// may see nothing. The control asserts only that the helper reached
+    /// `main` and logged a status. A confined failure then comes from the
+    /// sandbox, not from a helper that never ran. Both statuses are printed.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_egress_launch_services_open_sends_nothing() {
         let dir = tmpdir("macos-egress-lsopen");
         let helper = compile_lsopen(&dir);
+        let (free_port, _) = http_upstream();
+        let free_url = format!("http://127.0.0.1:{free_port}/");
+        let (free_out, free_err, free_outcome) =
+            capture_lsopen(lsopen_spec(&helper, &free_url), &[]);
         let (port, seen) = http_upstream();
         let url = format!("http://127.0.0.1:{port}/");
-        let sp = lsopen_spec(&helper, &url);
-        let (out, err, outcome) = confined_output(sp);
+        let (out, err, outcome) =
+            capture_lsopen(lsopen_spec(&helper, &url), &["blocked.example".into()]);
+        eprintln!(
+            "LaunchServices status confined={} unconfined={}",
+            lsopen_status(&out),
+            lsopen_status(&free_out),
+        );
+        assert_lsopen_reported(&free_outcome, &free_out, &free_err);
         assert_lsopen_blocked(&outcome, &out, &err, seen);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1580,24 +1598,47 @@ int main(int argc, char **argv) {
         }
     }
 
+    /// `allow_hosts` empty is unconfined. A non-empty list applies the seatbelt.
     #[cfg(target_os = "macos")]
-    fn confined_output(sp: SpawnSpec) -> (String, String, ChildOutcome) {
+    fn capture_lsopen(sp: SpawnSpec, allow_hosts: &[String]) -> (String, String, ChildOutcome) {
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let outcome = spawn_with(
-            sp,
-            &ChildIdentity::Inherit,
-            &["blocked.example".into()],
-            |st, c| match st {
-                Stream::Stdout => out.extend_from_slice(c),
-                Stream::Stderr => err.extend_from_slice(c),
-            },
-        )
-        .expect("confined spawn");
+        let outcome = spawn_with(sp, &ChildIdentity::Inherit, allow_hosts, |st, c| match st {
+            Stream::Stdout => out.extend_from_slice(c),
+            Stream::Stderr => err.extend_from_slice(c),
+        })
+        .expect("lsopen spawn");
         (
             String::from_utf8_lossy(&out).into_owned(),
             String::from_utf8_lossy(&err).into_owned(),
             outcome,
         )
+    }
+
+    /// The numeric `lsopen <status>` line, or `missing` when the helper
+    /// printed none. Logged for both the confined run and the control.
+    #[cfg(target_os = "macos")]
+    fn lsopen_status(out: &str) -> String {
+        out.lines()
+            .find_map(|line| {
+                let rest = line.strip_prefix("lsopen ")?;
+                let value = rest.trim();
+                value.parse::<i32>().ok()?;
+                Some(value.to_owned())
+            })
+            .unwrap_or_else(|| "missing".into())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_lsopen_reported(outcome: &ChildOutcome, out: &str, err: &str) {
+        assert!(
+            out.contains("lsopen-start"),
+            "helper died before main: {outcome:?}\n{out}\n{err}"
+        );
+        assert_ne!(
+            lsopen_status(out),
+            "missing",
+            "helper did not report a status: {outcome:?}\n{out}\n{err}"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -1608,21 +1649,15 @@ int main(int argc, char **argv) {
         seen: mpsc::Receiver<()>,
     ) {
         assert!(!err.contains("sandbox-exec:"), "profile rejected: {err}");
-        assert!(
-            out.contains("lsopen-start"),
-            "helper died before main: {outcome:?}\n{out}\n{err}"
-        );
-        assert!(
-            out.contains("lsopen "),
-            "helper did not report a status: {outcome:?}\n{out}\n{err}"
-        );
-        assert!(
-            !out.contains("lsopen 0"),
+        assert_lsopen_reported(outcome, out, err);
+        assert_ne!(
+            lsopen_status(out),
+            "0",
             "LaunchServices opened the url: {outcome:?}\n{out}\n{err}"
         );
         assert_ne!(outcome.exit_code, Some(0), "{outcome:?}\n{out}\n{err}");
         assert!(
-            seen.recv_timeout(Duration::from_millis(800)).is_err(),
+            seen.recv_timeout(Duration::from_secs(3)).is_err(),
             "listener saw a connection"
         );
     }
