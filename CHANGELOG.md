@@ -16,6 +16,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 - Local `geode run` enforces `allow_hosts` for every secret binding on every platform, including macOS. The check is the custody allowlist (`AllowList`): a host that is not listed is `host_denied` and is not dialed. A secret binding with an empty or unusable `allow_hosts` is refused before spawn (non-zero exit). There is no environment variable, flag, or config key that disables the check. Pass hosts with repeatable `--allow-host`. macOS confines the child with a seatbelt that can reach only the local egress proxy; Linux keeps the network namespace. Both proxies call the same gate.
 
+### Changed
+
+- Tests: CLI test helpers point `HOME` and the XDG dirs at per-test tempdirs and drop `GEODE_KEY_FILE`/`GEODE_PASSPHRASE`, so no test can resolve the operator's key. Custody `geode_run` gains Fix 3 audit-fault tests (started-row and close-row) on the in-process daemon.
+
 ## [2.0.0] — 2026-10-25
 
 Incompatible CLI and MCP release. Suite `0x01` is unchanged. `GDE1` objects written by 1.0.0 through 1.2.1 remain readable. Raw identity keys written by earlier releases still load.
