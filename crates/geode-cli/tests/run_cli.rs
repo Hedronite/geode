@@ -1609,3 +1609,67 @@ fn missing_or_unreadable_allow_cmds_file_does_not_spawn() {
     assert_no_dummy(&unreadable, "mode 000 allow-cmds-file");
     assert!(!fx.marker().exists(), "mode 000 allow-cmds-file spawned");
 }
+
+/// `--home` does not loosen the host gate: a secret run with no
+/// `--allow-host` is refused before spawn on every OS, Linux included.
+#[test]
+fn home_with_secret_and_no_allow_host_refuses_on_every_os() {
+    let fx = Fx::new();
+    let allow = fx.allow_sh();
+    let touch = fx.touch_script();
+    let home = fx.dir.join("child-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let home = home.to_str().unwrap().to_owned();
+    // Not `fx.run`: that helper sets the test-only seam.
+    let o = fx.geode(&[
+        "--key",
+        "k.gkey",
+        "run",
+        "--vault",
+        "v.geode",
+        allow[0],
+        allow[1],
+        "--home",
+        &home,
+        "--secret",
+        "KEY=cfg/dummy.env",
+        "--",
+        "sh",
+        "-c",
+        &touch,
+    ]);
+    assert_eq!(code(&o), Some(3), "{}", err(&o));
+    let text = format!("{}{}", out(&o), err(&o));
+    assert!(text.contains("allow_hosts"), "{text}");
+    assert!(!text.contains("injected:"), "{text}");
+    assert!(!fx.marker().exists(), "secret run with no hosts spawned");
+    assert_no_dummy(&o, "home + empty hosts");
+    assert_eq!(fx.rows().last().unwrap().0, "policy_deny");
+}
+
+/// The pre-#106 spelling is gone; only `--allow-host` parses.
+#[test]
+fn allow_hosts_plural_is_a_usage_error() {
+    let fx = Fx::new();
+    let allow = fx.allow_sh();
+    let o = fx.geode(&[
+        "--key",
+        "k.gkey",
+        "run",
+        "--vault",
+        "v.geode",
+        allow[0],
+        allow[1],
+        "--allow-hosts",
+        "api.example.com",
+        "--secret",
+        "KEY=cfg/dummy.env",
+        "--",
+        "sh",
+        "-c",
+        "true",
+    ]);
+    assert_eq!(code(&o), Some(1), "{}", err(&o));
+    assert!(!fx.marker().exists());
+    assert_no_dummy(&o, "--allow-hosts");
+}

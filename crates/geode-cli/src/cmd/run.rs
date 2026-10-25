@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::Write as _;
 use std::os::unix::ffi::OsStrExt as _;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use clap::Args;
@@ -58,8 +58,9 @@ compile_error!(
 /// rejects a rule with no sha256. A pin is refused unless the binary and
 /// every ancestor up to `/` is owned by root, not group- or other-writable,
 /// and not a symlink. Every binding must pass policy, or nothing runs. The child
-/// gets a fresh env: `PATH`, `HOME`, `LANG`, `TERM`, then the bindings. It
-/// never gets `GEODE_TOKEN`.
+/// gets a fresh env: `PATH`, `HOME` (or `--home`), `LANG`, `TERM`, then the
+/// bindings. It never gets `GEODE_TOKEN`. A run with `--secret` and no
+/// `--allow-host` is refused before spawn on every OS.
 ///
 /// Stdout carries only the child's redacted stdout. Stderr carries
 /// `geode:` lines (warnings, `injected: NAMES (values withheld)`) and the
@@ -157,6 +158,13 @@ pub struct RunArgs {
     /// Working directory for the child.
     #[arg(long, value_name = "DIR")]
     pub cwd: Option<PathBuf>,
+    /// `HOME` for the child in place of the caller's. Must be absolute,
+    /// must not contain `..`, and must not be the caller's `HOME`. This is
+    /// a usability guard, not a boundary: the child still runs as the
+    /// caller. Custody homes should be pre-created, owned by root or the
+    /// daemon, mode 0700, and not a symlink.
+    #[arg(long, value_name = "DIR")]
+    pub home: Option<PathBuf>,
     /// Do not redact child output. Only a `human:*` principal with `admin`.
     #[arg(long)]
     pub no_redact: bool,
@@ -244,6 +252,7 @@ struct Prepared {
     bindings: Vec<BindingSpec>,
     cmds: Vec<CmdRule>,
     hosts: Vec<String>,
+    home: Option<OsString>,
 }
 
 /// Validate the parse-level rules before any key is touched.
@@ -289,11 +298,46 @@ fn preflight(args: &RunArgs) -> Result<Prepared, Refusal> {
     let bindings = parse_bindings(&args.secret)?;
     let cmds = load_run_cmds(args)?;
     let hosts = parse_allow_hosts(&args.allow_host)?;
+    let home = args
+        .home
+        .as_deref()
+        .map(|d| check_home(d, std::env::var_os("HOME").as_deref()))
+        .transpose()?;
     Ok(Prepared {
+        home,
         bindings,
         cmds,
         hosts,
     })
+}
+
+/// `--home`: absolute, no `..`, and not the caller's `HOME`, compared by
+/// components and again canonically when both resolve.
+fn check_home(dir: &Path, caller: Option<&OsStr>) -> Result<OsString, Refusal> {
+    let bad = |why: &str| {
+        refuse(
+            exit::USAGE,
+            "usage",
+            format!("--home {}: {why}", dir.display()),
+        )
+    };
+    if !dir.is_absolute() {
+        return Err(bad("must be an absolute path"));
+    }
+    if dir.components().any(|c| c == Component::ParentDir) {
+        return Err(bad("must not contain .."));
+    }
+    if let Some(caller) = caller.filter(|h| !h.is_empty()).map(Path::new) {
+        let same = dir == caller
+            || matches!(
+                (dir.canonicalize(), caller.canonicalize()),
+                (Ok(a), Ok(b)) if a == b
+            );
+        if same {
+            return Err(bad("is the caller's HOME"));
+        }
+    }
+    Ok(dir.as_os_str().to_os_string())
 }
 
 /// `--allow-host` entries, lowercased, in first-seen order.
@@ -418,6 +462,7 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         bindings,
         cmds,
         hosts: hosts_in,
+        home,
     } = preflight(args)?;
     if geode_os::deny_core_dumps().is_err() {
         eprintln!("geode: warning: could not refuse core dumps for this process");
@@ -490,7 +535,7 @@ fn local(args: &RunArgs, global: &GlobalArgs, out: OutMode) -> Result<i32, Refus
         Ok(p) => p,
         Err(e) => return Err(plan_refusal(&mut chain, &row, e)),
     };
-    execute(args, out, &mut plan, &mut chain, &row, spawn_hosts)
+    execute(args, out, &mut plan, &mut chain, &row, (spawn_hosts, home))
 }
 
 /// Production `plan`, or the test root when that feature is compiled in.
@@ -855,7 +900,7 @@ fn execute(
     plan: &mut inject::Plan,
     chain: &mut Chain,
     row: &RowBase,
-    hosts: Vec<String>,
+    (hosts, home): (Vec<String>, Option<OsString>),
 ) -> Result<i32, Refusal> {
     // After authorization, before spawn (harmonized spec §3 Output).
     eprintln!(
@@ -870,7 +915,7 @@ fn execute(
         allow_hosts: hosts,
         #[cfg(any(test, feature = "test-trusted-root"))]
         test_unconfined_hosts: unconfined_run(args),
-        home: None,
+        home,
     };
     let (mut buf_out, mut buf_err) = (Vec::new(), Vec::new());
     let emit = |ch: Channel, bytes: Vec<u8>| match (out, ch) {
@@ -998,5 +1043,98 @@ mod host_policy_tests {
         assert_eq!(outcome, "host_denied");
         assert_eq!(hosts, "blocked.example:443");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod home_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        run: RunArgs,
+    }
+
+    fn parse(flags: &[&str]) -> Result<RunArgs, clap::Error> {
+        let mut argv = vec!["geode", "--vault", "/v"];
+        argv.extend_from_slice(flags);
+        argv.extend(["--", "/bin/true"]);
+        Cli::try_parse_from(argv).map(|c| c.run)
+    }
+
+    fn refused_ok<T>(r: Result<T, Refusal>) -> T {
+        match r {
+            Ok(v) => v,
+            Err(e) => panic!("refused: {}", e.msg),
+        }
+    }
+
+    fn refused<T>(r: Result<T, Refusal>) -> Refusal {
+        match r {
+            Ok(_) => panic!("accepted"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn only_allow_host_is_accepted() {
+        let a = parse(&["--allow-host", "api.example.com"]).unwrap();
+        assert_eq!(a.allow_host, ["api.example.com"]);
+        assert!(parse(&["--allow-hosts", "api.example.com"]).is_err());
+    }
+
+    #[test]
+    fn secret_without_hosts_is_refused_with_home_on_every_os() {
+        let a = parse(&["--home", "/srv/geode-home", "--secret", "K=cfg/k"]).unwrap();
+        assert!(a.allow_host.is_empty());
+        let err = refused(secret_hosts_or_refuse(&refused_ok(parse_allow_hosts(
+            &a.allow_host,
+        ))));
+        assert_eq!((err.code, err.kind), (exit::POLICY, "policy_deny"));
+    }
+
+    #[test]
+    fn home_flag_parses_to_the_dir() {
+        let a = parse(&["--home", "/srv/geode-home"]).unwrap();
+        assert_eq!(a.home.as_deref(), Some(Path::new("/srv/geode-home")));
+        let got = check_home(a.home.as_deref().unwrap(), Some(OsStr::new("/Users/me")));
+        assert_eq!(got.ok().unwrap(), OsString::from("/srv/geode-home"));
+    }
+
+    #[test]
+    fn home_must_be_absolute_without_dotdot() {
+        for d in ["rel/home", "./home", "/srv/../Users/me"] {
+            let r = refused(check_home(Path::new(d), Some(OsStr::new("/Users/me"))));
+            assert_eq!(r.code, exit::USAGE, "{d}");
+            assert!(r.msg.starts_with("--home "), "{}", r.msg);
+        }
+    }
+
+    #[test]
+    fn home_equal_to_caller_home_is_refused() {
+        for d in ["/Users/me", "/Users/me/", "/Users//me", "/Users/./me"] {
+            let r = refused(check_home(Path::new(d), Some(OsStr::new("/Users/me"))));
+            assert!(r.msg.contains("caller's HOME"), "{d}: {}", r.msg);
+        }
+    }
+
+    #[test]
+    fn home_resolving_to_caller_home_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real");
+        let link = base.path().join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let r = refused(check_home(&link, Some(real.as_os_str())));
+        assert!(r.msg.contains("caller's HOME"), "{}", r.msg);
+        assert!(check_home(base.path(), Some(real.as_os_str())).is_ok());
+    }
+
+    #[test]
+    fn home_with_no_caller_home_is_accepted() {
+        assert!(check_home(Path::new("/srv/geode-home"), None).is_ok());
+        assert!(check_home(Path::new("/srv/geode-home"), Some(OsStr::new(""))).is_ok());
     }
 }
