@@ -58,7 +58,7 @@ ed25519-dalek = { version = "2", features = ["zeroize"] }
 keyring = "4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 # G6 (v034): named redaction for `inject::plan` and its output collector.
-geode-redact = { version = "1.2.1", path = "../geode-redact" }
+geode-redact = { version = "2.0.0", path = "../geode-redact" }
 # Fix 4: `O_NOFOLLOW` for the pinned `allow_cmds` open in `inject.rs`.
 # Constants only; this crate still forbids unsafe.
 libc = "0.2"
