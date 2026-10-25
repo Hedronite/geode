@@ -769,10 +769,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // TODO(Jupi macOS CI): un-ignore once the macOS runner lands. Passes on a
+    // TODO(macOS CI): un-ignore once a macOS runner lands. Passes on a
     // local macOS host with `cargo test -p geode-os -- --ignored`.
     #[cfg(not(target_os = "linux"))]
-    #[ignore = "macOS inode re-check; needs Jupi's macOS CI"]
+    #[ignore = "macOS inode re-check; needs a macOS CI runner"]
     #[test]
     fn swap_after_verify_is_refused_by_the_inode_recheck() {
         let dir = tmpdir("pin-swap");

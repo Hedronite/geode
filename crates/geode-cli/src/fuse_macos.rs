@@ -14,7 +14,7 @@ use std::path::Path;
 use geode_grotto::{Error, Result};
 
 /// Bundles, device nodes, and mount helpers. A path that exists means that
-/// driver is installed. Citadel has none of these; do not install one.
+/// driver is installed. A macOS host may have none of these; do not install one.
 const DRIVER_MARKERS: &[&str] = &[
     "/Library/Filesystems/macfuse.fs",
     "/Library/Filesystems/osxfuse.fs",

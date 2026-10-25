@@ -350,7 +350,7 @@ fn tree_hl_collapse_expand() {
 }
 
 #[test]
-fn castle_notes_geode_opens_when_present() {
+fn vault_notes_geode_opens_when_present() {
     let Some(home) = std::env::var_os("HOME") else {
         return;
     };
@@ -361,7 +361,7 @@ fn castle_notes_geode_opens_when_present() {
     let ctx =
         geode_tui::vault::open(&vault, None).expect("open ~/notes.geode with XDG default.gkey");
     assert!(!ctx.is_locked());
-    let cheap = geode_tui::vault::verify(&ctx, false).expect("cheap verify castle vault");
+    let cheap = geode_tui::vault::verify(&ctx, false).expect("cheap verify notes vault");
     assert!(cheap.chunks_checked >= 1 || cheap.files == 0);
     let mut app = App::with_options(
         Some(vault),

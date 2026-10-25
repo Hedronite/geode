@@ -37,6 +37,12 @@ use crate::{cmd, GlobalArgs, OutMode};
 const LOCAL_PRINCIPAL: &str = "human:local";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
+#[cfg(all(feature = "test-trusted-root", not(debug_assertions)))]
+compile_error!(
+    "feature `test-trusted-root` is test-only and insecure (it moves the pin trust root); \
+     release builds, including `cargo install`, cannot enable it"
+);
+
 /// `geode run` — run a command with vault secrets injected into its env.
 ///
 /// Local use needs a key. A token is refused (exit 4). `--` is required
@@ -117,7 +123,7 @@ pub struct RunArgs {
     /// does the same. Off by default, so a bare path still runs.
     #[arg(long)]
     pub require_pin: bool,
-    /// Test-only. Compiled out of release builds. Both this and
+    /// Test-only and insecure. Compiled out of release builds. Both this and
     /// `test_trusted_uid` are required together; production runs pass neither.
     #[cfg(feature = "test-trusted-root")]
     #[arg(long, hide = true, value_name = "DIR")]

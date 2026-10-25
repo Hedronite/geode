@@ -224,10 +224,18 @@ pub fn plan(
     plan_anchored(caller, vault, req, Path::new("/"), 0)
 }
 
+#[cfg(all(feature = "test-trusted-root", not(debug_assertions)))]
+compile_error!(
+    "feature `test-trusted-root` is test-only and insecure (it moves the pin trust root); \
+     release builds, including `cargo install`, cannot enable it"
+);
+
 /// Same as [`plan`], but the trust walk stops at `root` and expects `uid`.
 ///
-/// Compiled only for unit tests and for the `test-trusted-root` feature.
-/// A release build of `geode` does not call this and does not contain it.
+/// Test-only and insecure. Compiled for unit tests and for the
+/// `test-trusted-root` feature, which lets a caller move the pin trust
+/// root. A release build refuses to compile that feature, so a release
+/// `geode` does not call this and does not contain it.
 #[cfg(any(test, feature = "test-trusted-root"))]
 pub fn plan_with_test_root(
     caller: &Caller<'_>,

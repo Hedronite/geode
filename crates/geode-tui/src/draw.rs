@@ -1,9 +1,9 @@
 //! `draw.rs` — TUI rendering (v0.2.0 G5b/G5c + UX).
 //!
-//! Operator chrome matching `foundry/geode/refs/tui-chrome.png`: hex+◆
-//! mark, gold `geode`, grey verb tabs (shipped verbs only — no mount), gold
-//! dashed inner frame, two-row footer (§6.8 evidence + mock
-//! `default.gkey • suite 0x01 • AEGIS-256-X2`). Palette tokens come from
+//! Operator chrome: hex+◆ mark, gold `geode`, grey verb tabs (shipped
+//! verbs only — no mount), gold dashed inner frame, two-row footer
+//! (§6.8 evidence + mock `default.gkey • suite 0x01 • AEGIS-256-X2`).
+//! Palette tokens come from
 //! [`crate::theme::Palette`] (14-tui §11); no `Color::Rgb(...)` is
 //! constructed in this file.
 //!

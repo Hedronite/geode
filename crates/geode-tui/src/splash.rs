@@ -1,11 +1,11 @@
 //! `splash.rs` — opening splash (v0.2.0 TUI UX).
 //!
-//! Recreates the brandmark candidate `foundry/geode/brand/brandmark.jpg`
-//! in ratatui 0.30: black field, photoreal stone ring + teal crystal +
-//! gold star sampled into half-block cells (no Kitty graphics protocol,
-//! no `canvas` cargo feature, 14-tui §2.4). Header is `geode <version>`
-//! left / `GDE1 · core` right; footer is `sealed · keyring default ·
-//! exit 0`. Gold hairlines match the brandmark.
+//! Draws the brandmark in ratatui 0.30: black field, photoreal stone
+//! ring + teal crystal + gold star sampled into half-block cells (no
+//! Kitty graphics protocol, no `canvas` cargo feature, 14-tui §2.4).
+//! Header is `geode <version>` left / `GDE1 · core` right; footer is
+//! `sealed · keyring default · exit 0`. Gold hairlines match the
+//! brandmark.
 //!
 //! The splash is **skippable**: any key dismisses it, and a short timeout
 //! (~1.5 s) dismisses it. It paints **inside** the alternate screen, after
