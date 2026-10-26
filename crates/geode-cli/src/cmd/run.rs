@@ -37,10 +37,13 @@ use crate::{cmd, GlobalArgs, OutMode};
 const LOCAL_PRINCIPAL: &str = "human:local";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
-// The compile refusal is `not(debug_assertions)` only (`cargo build --release`,
-// `cargo install`). A dev or test build can still enable `test-trusted-root`;
-// the integration tests do. That is not a release guarantee.
-// `--test-unconfined-hosts` is behind the same feature.
+// Two compile refusals keep `test-trusted-root` out of an optimized binary:
+// this one (`not(debug_assertions)`: `cargo build --release`, `cargo
+// install`), and `build.rs`, which also refuses any `opt-level` other than
+// 0. The second catches a custom profile that turns debug assertions back
+// on. A plain dev or test build can still enable the feature; the
+// integration tests do. `--test-unconfined-hosts` is behind the same
+// feature.
 #[cfg(all(feature = "test-trusted-root", not(debug_assertions)))]
 compile_error!(
     "feature `test-trusted-root` is test-only and insecure (it moves the pin trust root); \
@@ -159,10 +162,12 @@ pub struct RunArgs {
     #[arg(long, value_name = "DIR")]
     pub cwd: Option<PathBuf>,
     /// `HOME` for the child in place of the caller's. Must be absolute,
-    /// must not contain `..`, and must not be the caller's `HOME`. This is
-    /// a usability guard, not a boundary: the child still runs as the
-    /// caller. Custody homes should be pre-created, owned by root or the
-    /// daemon, mode 0700, and not a symlink.
+    /// must not contain `..`, must not be the caller's `HOME`, and must not
+    /// itself be a symlink. These checks catch mistakes. They are not a
+    /// security boundary: the child still runs as the caller, and geode
+    /// does not check the directory's owner, mode, or parent directories.
+    /// A custody home should be pre-created by the operator, owned by root
+    /// or the daemon user, mode 0700, with no symlink anywhere in the path.
     #[arg(long, value_name = "DIR")]
     pub home: Option<PathBuf>,
     /// Do not redact child output. Only a `human:*` principal with `admin`.
@@ -336,6 +341,10 @@ fn check_home(dir: &Path, caller: Option<&OsStr>) -> Result<OsString, Refusal> {
         if same {
             return Err(bad("is the caller's HOME"));
         }
+    }
+    // Last path component only; owner, mode, and parents are not checked.
+    if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(bad("must not be a symlink"));
     }
     Ok(dir.as_os_str().to_os_string())
 }
@@ -1130,6 +1139,23 @@ mod home_tests {
         let r = refused(check_home(&link, Some(real.as_os_str())));
         assert!(r.msg.contains("caller's HOME"), "{}", r.msg);
         assert!(check_home(base.path(), Some(real.as_os_str())).is_ok());
+    }
+
+    #[test]
+    fn home_that_is_a_symlink_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().join("real");
+        let link = base.path().join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let r = refused(check_home(&link, Some(OsStr::new("/nonexistent-caller"))));
+        assert!(r.msg.contains("symlink"), "{}", r.msg);
+        assert_eq!(r.code, exit::USAGE);
+        assert!(check_home(&real, Some(OsStr::new("/nonexistent-caller"))).is_ok());
+        let dangling = base.path().join("dangling");
+        std::os::unix::fs::symlink(base.path().join("missing"), &dangling).unwrap();
+        let r = refused(check_home(&dangling, None));
+        assert!(r.msg.contains("symlink"), "{}", r.msg);
     }
 
     #[test]

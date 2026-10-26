@@ -4,7 +4,7 @@
 //! and fails when a SPEC rule breaks. It does not spawn.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const FIXTURE: &str = "tests/fixtures/p0-facet-secret-key.args";
 const PREFIX: [&str; 3] = ["request", "run", "--no-record"];
@@ -68,6 +68,25 @@ fn has_secret_bytes(text: &str) -> bool {
 }
 
 /// Every SPEC rule `text` breaks. Empty means the argv is valid.
+/// The pinned command must be a file directly in the libexec dir. Compares
+/// path components, not text. `Path::components` drops `//`, a trailing
+/// `/`, and inner `.`, so the raw string is checked for those too.
+fn pinned_cmd_path(path: &str) -> bool {
+    const DIR: &str = "/usr/local/libexec/hedronite";
+    if path.contains("//") || path.ends_with('/') || path.contains("/./") || path.ends_with("/.") {
+        return false;
+    }
+    let p = Path::new(path);
+    if !p.is_absolute()
+        || !p
+            .components()
+            .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
+    {
+        return false;
+    }
+    p.parent() == Some(Path::new(DIR)) && p.file_name().is_some_and(|n| !n.is_empty())
+}
+
 fn broken_rules(text: &str) -> BTreeSet<&'static str> {
     let mut bad = BTreeSet::new();
     if text.contains('\0') {
@@ -124,10 +143,7 @@ fn broken_rules(text: &str) -> BTreeSet<&'static str> {
         [raw] => match serde_json::from_str::<serde_json::Value>(raw) {
             Ok(serde_json::Value::Object(obj)) => {
                 let path = obj.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                if !Path::new(path).is_absolute()
-                    || path.contains("..")
-                    || !path.starts_with("/usr/local/libexec/hedronite/")
-                {
+                if !pinned_cmd_path(path) {
                     bad.insert("allow-cmd-path");
                 }
                 let sha = obj.get("sha256").and_then(|v| v.as_str()).unwrap_or("");
@@ -214,6 +230,51 @@ fn each_broken_rule_fails() {
             "\"path\":\"/usr/local/bin/facet\"",
         ),
         (
+            "allow-cmd-path",
+            "\"path\":\"/usr/local/libexec/hedronite/facet\"",
+            "\"path\":\"/usr/local/libexec/hedronite/\"",
+        ),
+        (
+            "allow-cmd-path",
+            "\"path\":\"/usr/local/libexec/hedronite/facet\"",
+            "\"path\":\"/usr/local/libexec/hedronite\"",
+        ),
+        (
+            "allow-cmd-path",
+            "\"path\":\"/usr/local/libexec/hedronite/facet\"",
+            "\"path\":\"/usr/local/libexec//hedronite/facet\"",
+        ),
+        (
+            "allow-cmd-path",
+            "\"path\":\"/usr/local/libexec/hedronite/facet\"",
+            "\"path\":\"/usr/local/libexec/hedronite//facet\"",
+        ),
+        (
+            "allow-cmd-path",
+            "\"path\":\"/usr/local/libexec/hedronite/facet\"",
+            "\"path\":\"/usr/local/libexec/hedronite/./facet\"",
+        ),
+        (
+            "allow-cmd-path",
+            "\"path\":\"/usr/local/libexec/hedronite/facet\"",
+            "\"path\":\"/usr/local/libexec/hedronite/../hedronite/facet\"",
+        ),
+        (
+            "allow-cmd-path",
+            "\"path\":\"/usr/local/libexec/hedronite/facet\"",
+            "\"path\":\"/usr/local/libexec/hedronite/sub/facet\"",
+        ),
+        (
+            "allow-cmd-path",
+            "\"path\":\"/usr/local/libexec/hedronite/facet\"",
+            "\"path\":\"/usr/local/libexec/hedronite-evil/facet\"",
+        ),
+        (
+            "allow-cmd-path",
+            "\"path\":\"/usr/local/libexec/hedronite/facet\"",
+            "\"path\":\"/usr/local/libexec/hedronite/facet/\"",
+        ),
+        (
             "facet-secret-key",
             "FACET_SECRET_KEY=cfg/facet-secret-key",
             "OTHER=cfg/facet-secret-key",
@@ -238,5 +299,26 @@ fn each_broken_rule_fails() {
         );
         let got = broken_rules(&base.replace(from, to));
         assert!(got.contains(rule), "broken {rule} reported {got:?}");
+    }
+}
+
+#[test]
+fn pinned_cmd_path_accepts_only_a_direct_child() {
+    assert!(pinned_cmd_path("/usr/local/libexec/hedronite/facet"));
+    for bad in [
+        "",
+        "facet",
+        "usr/local/libexec/hedronite/facet",
+        "/usr/local/libexec/hedronite",
+        "/usr/local/libexec/hedronite/",
+        "/usr/local/libexec//hedronite/facet",
+        "/usr/local/libexec/hedronite/./facet",
+        "/usr/local/libexec/hedronite/.",
+        "/usr/local/libexec/hedronite/../hedronite/facet",
+        "/usr/local/libexec/hedronite/sub/facet",
+        "/usr/local/libexec/hedronite-evil/facet",
+        "/usr/local/bin/facet",
+    ] {
+        assert!(!pinned_cmd_path(bad), "{bad:?} accepted");
     }
 }

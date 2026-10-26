@@ -26,10 +26,11 @@ required-features = ["test-trusted-root"]
 [features]
 default = ["tui"]
 # Test-only and insecure. Off by default. The crate refuses to compile
-# this feature only when debug assertions are off (`cargo build --release`,
-# `cargo install`). A dev or test build can still enable it; that is how
-# the integration tests build `geode`. Not a release guarantee, and not
-# part of the supported `geode` surface. `--test-trusted-root`,
+# this feature when debug assertions are off (`cargo build --release`,
+# `cargo install`) and, from build.rs, at any opt-level other than 0, so a
+# custom profile with debug assertions on cannot ship it either. A dev or
+# test build can still enable it; that is how the integration tests build
+# `geode`. Not part of the supported `geode` surface. `--test-trusted-root`,
 # `--test-trusted-uid`, and `--test-unconfined-hosts` exist only with
 # this feature.
 test-trusted-root = ["geode-grotto/test-trusted-root"]
