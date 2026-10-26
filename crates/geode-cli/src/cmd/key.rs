@@ -22,7 +22,7 @@ use crate::{cmd, OutMode};
 /// BLAKE3 domain for the identity's X25519 static secret (02-cryptography
 /// 6.3: "derived from BLAKE3-expand(ISK) streams"). CLI-local until the
 /// spec pins the exact string; changing it changes every `.gpub`.
-const X25519_IDENTITY_DOMAIN: &str = "geode/v1/x25519-identity";
+use geode_grotto::recipients::X25519_IDENTITY_DOMAIN;
 
 #[derive(Args, Debug)]
 pub struct KeygenArgs {

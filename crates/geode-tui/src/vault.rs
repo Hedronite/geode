@@ -26,6 +26,7 @@ use geode_grotto::kdf::{
 };
 use geode_grotto::manifest::{self, Manifest};
 use geode_grotto::object::{self, ObjectHeader};
+use geode_grotto::recipients::Recipients;
 use geode_grotto::session::{Session, DEFAULT_IDLE_LOCK};
 use geode_grotto::vault as corevault;
 use geode_grotto::{wrap, Error, Result};
@@ -333,11 +334,14 @@ pub fn open(vault: &Path, key: Option<&Path>) -> Result<VaultCtx> {
             .map_err(|_| Error::Format("epoch overflow".into()))?,
     );
 
-    // Session::unlock derives EK from ISK + vault_id + epoch + context and
-    // zeroizes ISK before returning. Context label "" matches vault init
-    // (04-vault 1); the wrapped EK in recipients.json is this same EK.
+    // Unwrap EK from the recipient entry this identity holds (symmetric by
+    // key_id, or X25519 by public, e.g. added with `vault add-recipient`),
+    // the same path the CLI uses; ISK is zeroized before returning. No
+    // matching recipient is AuthFail (exit 2).
+    let recs: Recipients = serde_json::from_value(read_json(&vault.join("recipients.json"))?)
+        .map_err(|e| Error::Format(format!("recipients.json: {e}")))?;
     let key_id = kdf::derive_key_id(&isk)?;
-    let session = Session::unlock(isk, vault_id, epoch, "", DEFAULT_IDLE_LOCK)?;
+    let session = Session::unlock_recipients(isk, &recs, vault_id, epoch, DEFAULT_IDLE_LOCK)?;
 
     let ek = session.ek()?;
     let mk = derive_manifest_key(ek, vault_id, epoch);

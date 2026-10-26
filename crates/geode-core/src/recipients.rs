@@ -4,6 +4,62 @@
 
 use crate::kdf::{Epoch, EpochKey, IdentitySecret, KeyId, VaultId};
 use crate::{Error, Result};
+
+/// BLAKE3 derive-key context for an identity's X25519 static secret
+/// (02-cryptography 6.3). The `.gpub` public is derived the same way.
+pub const X25519_IDENTITY_DOMAIN: &str = "geode/v1/x25519-identity";
+
+/// The identity's X25519 static secret, derived from its ISK.
+/// Secret material: never log or print.
+#[must_use]
+pub fn x25519_identity_secret(isk: &IdentitySecret) -> zeroize::Zeroizing<[u8; 32]> {
+    zeroize::Zeroizing::new(blake3::derive_key(X25519_IDENTITY_DOMAIN, isk.as_bytes()))
+}
+
+/// The identity's X25519 public key (the `.gpub` `x25519_public`).
+#[must_use]
+pub fn x25519_identity_public(isk: &IdentitySecret) -> [u8; 32] {
+    let sk = x25519_dalek::StaticSecret::from(*x25519_identity_secret(isk));
+    x25519_dalek::PublicKey::from(&sk).to_bytes()
+}
+
+/// True when a recipient's base64 X25519 public equals `own` (constant time).
+#[must_use]
+pub fn x25519_public_matches(public_b64: &str, own: &[u8; 32]) -> bool {
+    match Base64::decode_vec(public_b64) {
+        Ok(bytes) if bytes.len() == 32 => crate::zero::ct_eq(&bytes, own),
+        _ => false,
+    }
+}
+
+/// Unwrap the epoch key for the identity holding `isk` from `recs`.
+///
+/// Matches the identity's symmetric recipient (by `key_id`) or its X25519
+/// recipient (by public key, e.g. added with `vault add-recipient --gpub`)
+/// and unwraps that entry. No matching entry, or a wrap that does not
+/// authenticate, is [`Error::AuthFail`]. Errors never contain key bytes.
+pub fn unwrap_for_identity(
+    recs: &Recipients,
+    isk: &IdentitySecret,
+    vault_id: VaultId,
+    epoch: Epoch,
+) -> Result<EpochKey> {
+    let key_id = crate::kdf::derive_key_id(isk)?;
+    let own_public = x25519_identity_public(isk);
+    for r in &recs.recipients {
+        match r {
+            Recipient::Symmetric { key_id: kid, .. } if *kid == key_id => {
+                return unwrap_symmetric(r, isk, vault_id, epoch);
+            }
+            Recipient::X25519 { public, .. } if x25519_public_matches(public, &own_public) => {
+                let sk = x25519_identity_secret(isk);
+                return unwrap_x25519(r, &sk, vault_id, epoch);
+            }
+            _ => {}
+        }
+    }
+    Err(Error::AuthFail)
+}
 use aegis::aegis256x2::{Aegis256X2, Nonce};
 use base64ct::{Base64, Encoding};
 
@@ -652,5 +708,74 @@ mod x25519_tests {
         };
         let u = unwrap_hybrid(&r, &[0u8; 32], &[0u8; 32], VaultId([0x01; 16]), Epoch(1));
         assert!(matches!(u, Err(Error::NotImplemented)), "got {u:?}");
+    }
+}
+
+#[cfg(test)]
+mod identity_unwrap_tests {
+    use super::*;
+    use crate::kdf::{derive_epoch_key, derive_key_id};
+
+    fn isk(b: u8) -> IdentitySecret {
+        IdentitySecret::from_bytes([b; 32])
+    }
+
+    const VID: VaultId = VaultId([0x07; 16]);
+
+    fn recs_for(ek: &EpochKey, owner: &IdentitySecret, added: &IdentitySecret) -> Recipients {
+        let sym = wrap_symmetric(ek, owner, VID, Epoch(1), derive_key_id(owner).unwrap()).unwrap();
+        let x = wrap_x25519(
+            ek,
+            &x25519_identity_public(added),
+            VID,
+            Epoch(1),
+            derive_key_id(added).unwrap(),
+        )
+        .unwrap();
+        Recipients {
+            vault_id: crate::vault::hex_encode(&VID.0),
+            epoch: 1,
+            recipients: vec![sym, x],
+        }
+    }
+
+    #[test]
+    fn symmetric_and_x25519_identities_unwrap_same_ek() {
+        let (owner, added) = (isk(1), isk(2));
+        let ek = derive_epoch_key(&owner, VID, Epoch(1), "").unwrap();
+        let recs = recs_for(&ek, &owner, &added);
+        let a = unwrap_for_identity(&recs, &owner, VID, Epoch(1)).unwrap();
+        let b = unwrap_for_identity(&recs, &added, VID, Epoch(1)).unwrap();
+        assert_eq!(a.as_bytes(), ek.as_bytes());
+        assert_eq!(b.as_bytes(), ek.as_bytes());
+    }
+
+    #[test]
+    fn stranger_and_wrong_epoch_are_auth_fail() {
+        let (owner, added) = (isk(1), isk(2));
+        let ek = derive_epoch_key(&owner, VID, Epoch(1), "").unwrap();
+        let recs = recs_for(&ek, &owner, &added);
+        assert!(matches!(
+            unwrap_for_identity(&recs, &isk(3), VID, Epoch(1)),
+            Err(Error::AuthFail)
+        ));
+        assert!(unwrap_for_identity(&recs, &added, VID, Epoch(2)).is_err());
+    }
+
+    #[test]
+    fn identity_public_matches_gpub_derivation() {
+        let k = isk(9);
+        let sk = x25519_dalek::StaticSecret::from(*x25519_identity_secret(&k));
+        assert_eq!(
+            x25519_dalek::PublicKey::from(&sk).to_bytes(),
+            x25519_identity_public(&k)
+        );
+        let b64 = Base64::encode_string(&x25519_identity_public(&k));
+        assert!(x25519_public_matches(&b64, &x25519_identity_public(&k)));
+        assert!(!x25519_public_matches(
+            &b64,
+            &x25519_identity_public(&isk(8))
+        ));
+        assert!(!x25519_public_matches("not base64!", &[0u8; 32]));
     }
 }

@@ -17,6 +17,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 - An identity added with `vault add-recipient --gpub` (or `vault rotate --add-recipient`) can now open its vault: `verify`, `list`, `cat`, `open` and `rotate` unwrap the epoch key from the identity's X25519 recipient entry. Before, only symmetric recipients were matched and the added key failed with an authentication error.
 - `vault rotate` reseals from the epoch key it actually unwrapped, so a rotation run by an X25519 identity no longer resets the current manifest.
 - `vault rotate` fails closed: it refuses a kept symmetric recipient it cannot re-wrap (that recipient would be locked out), an unusable X25519 public, or a kept set no one can open; it verifies the new wraps, the new manifest and every resealed object before the header commits, and restores the old epoch on any failure.
+- `geode tui` unlocks a vault with an X25519 identity added with `vault add-recipient` (and after the original key was dropped by a rotate): it unwraps the epoch key from the identity's recipient entry, the same path the CLI uses, instead of re-deriving it from the ISK. A key with no recipient entry is refused (exit 2).
 
 ### Security
 
