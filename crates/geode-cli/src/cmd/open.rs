@@ -66,6 +66,52 @@ fn read_entry_plaintext(ctx: &cmd::VaultCtx, vault: &Path, e: &Entry) -> Result<
     Ok(data)
 }
 
+/// Owner-only mode for extracted plaintext: keep the owner bits of the
+/// sealed mode (so an owner-executable stays executable), never group or
+/// other, and always owner read+write. A 0644 entry lands as 0600.
+#[cfg(unix)]
+pub(crate) fn private_mode(sealed_mode: u32) -> u32 {
+    (sealed_mode & 0o700) | 0o600
+}
+
+/// Write extracted plaintext atomically. On unix the temp file is created
+/// 0600 before any byte is written, so the plaintext is never visible to
+/// group/other, even transiently.
+fn write_plaintext(target: &Path, data: &[u8], sealed_mode: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let parent = target
+            .parent()
+            .ok_or_else(|| Error::Format("open target has no parent".into()))?;
+        let mut nonce = [0u8; 8];
+        getrandom::fill(&mut nonce).map_err(|e| Error::Format(format!("rng: {e}")))?;
+        let tmp = parent.join(format!(".gde-open-{}", cmd::hex(&nonce)));
+        let res = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(data)?;
+            f.sync_all()?;
+            f.set_permissions(std::fs::Permissions::from_mode(private_mode(sealed_mode)))?;
+            std::fs::rename(&tmp, target)
+        })();
+        if let Err(e) = res {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(Error::Io(e));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = sealed_mode;
+        corevault::write_atomic(target, data)
+    }
+}
+
 pub fn run(args: &OpenArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     let key_path = cmd::require_key(global)?;
     let isk = cmd::load_isk(&key_path)?;
@@ -125,13 +171,7 @@ pub fn run(args: &OpenArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
             }
             EntryKind::File => {
                 let data = read_entry_plaintext(&ctx, &args.vault, e)?;
-                corevault::write_atomic(&target, &data)?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(e.mode))
-                        .map_err(Error::Io)?;
-                }
+                write_plaintext(&target, &data, e.mode)?;
                 files += 1;
                 plain_bytes += data.len() as u64;
             }

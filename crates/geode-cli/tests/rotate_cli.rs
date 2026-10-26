@@ -358,3 +358,151 @@ fn rotate_token_rejected() {
     assert_ok(&list, "list after rotate");
     assert!(String::from_utf8_lossy(&list.stdout).contains("note.txt"));
 }
+
+// ---- Re-key lockout regressions ----
+
+fn seal_note(dir: &Path) {
+    std::fs::write(dir.join("note.txt"), b"rekey-object\n").expect("write");
+    assert_ok(
+        &geode(dir, &["--key", "k.gkey", "seal", "note.txt", "v.geode"]),
+        "seal",
+    );
+}
+
+fn assert_reads(dir: &Path, key: &str, what: &str) {
+    assert_ok(&geode(dir, &["--key", key, "verify", "v.geode"]), what);
+    assert_ok(&geode(dir, &["--key", key, "list", "v.geode"]), what);
+    let cat = geode(dir, &["--key", key, "cat", "v.geode", "note.txt"]);
+    assert_ok(&cat, what);
+    assert_eq!(cat.stdout, b"rekey-object\n", "{what}");
+}
+
+fn vault_snapshot(root: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for ent in std::fs::read_dir(&d).expect("read_dir") {
+            let p = ent.expect("entry").path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                let rel = p.strip_prefix(root).unwrap().display().to_string();
+                out.push((rel, std::fs::read(&p).expect("read")));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn add_recipient_new_key_reads() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_vault(dir);
+    seal_note(dir);
+    add_bob(dir);
+    assert_reads(dir, "bob.gkey", "added x25519 recipient reads");
+    assert_reads(dir, "k.gkey", "original key still reads");
+}
+
+#[test]
+fn rotate_drop_old_reseal_new_key_still_reads() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_vault(dir);
+    seal_note(dir);
+    add_bob(dir);
+    let old_id = gpub_key_id(dir, "k.gpub");
+    let rot = geode(
+        dir,
+        &[
+            "--key",
+            "k.gkey",
+            "vault",
+            "rotate",
+            "v.geode",
+            "--yes",
+            "--drop-recipient",
+            &old_id,
+            "--reseal",
+        ],
+    );
+    assert_ok(&rot, "rotate drop old + reseal");
+    assert_no_isk(&rot, dir, &["k.gkey", "bob.gkey"], "drop old");
+    let (epoch, types) = recs_epoch_and_types(dir);
+    assert_eq!(epoch, 2);
+    assert_eq!(types, vec!["x25519".to_string()]);
+    assert_reads(dir, "bob.gkey", "new key after rotate");
+    let old = geode(dir, &["--key", "k.gkey", "cat", "v.geode", "note.txt"]);
+    assert_eq!(old.status.code(), Some(2), "old key: {}", combined(&old));
+    // The x25519 identity can now rotate the vault it holds alone.
+    assert_ok(
+        &geode(
+            dir,
+            &[
+                "--key", "bob.gkey", "vault", "rotate", "v.geode", "--yes", "--reseal",
+            ],
+        ),
+        "new key rotates",
+    );
+    assert_reads(dir, "bob.gkey", "new key after its own rotate");
+}
+
+#[test]
+fn rotate_lockout_refused_vault_unchanged() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_vault(dir);
+    seal_note(dir);
+    let bob_id = add_bob(dir);
+    let before = vault_snapshot(&dir.join("v.geode"));
+    // The x25519 identity cannot re-wrap the original symmetric recipient:
+    // keeping it (with or without dropping itself) would lock it out.
+    for drops in [vec![], vec!["--drop-recipient", bob_id.as_str()]] {
+        let mut args = vec![
+            "--key", "bob.gkey", "vault", "rotate", "v.geode", "--yes", "--reseal",
+        ];
+        args.extend(drops);
+        let out = geode(dir, &args);
+        assert_eq!(out.status.code(), Some(1), "refused: {}", combined(&out));
+        assert!(combined(&out).contains("locked out"), "{}", combined(&out));
+        assert_eq!(
+            vault_snapshot(&dir.join("v.geode")),
+            before,
+            "vault unchanged after refused rotate"
+        );
+    }
+    assert_reads(dir, "k.gkey", "original key after refusal");
+    assert_reads(dir, "bob.gkey", "x25519 key after refusal");
+}
+
+#[cfg(unix)]
+#[test]
+fn open_writes_plaintext_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_vault(dir);
+    std::fs::write(dir.join("note.txt"), b"rekey-object\n").expect("write");
+    std::fs::set_permissions(dir.join("note.txt"), std::fs::Permissions::from_mode(0o644))
+        .expect("chmod");
+    assert_ok(
+        &geode(dir, &["--key", "k.gkey", "seal", "note.txt", "v.geode"]),
+        "seal",
+    );
+    assert_ok(
+        &geode(dir, &["--key", "k.gkey", "open", "v.geode", "out"]),
+        "open",
+    );
+    let mode = std::fs::metadata(dir.join("out/note.txt"))
+        .expect("stat")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "open output mode {mode:o}");
+    assert_eq!(
+        std::fs::read(dir.join("out/note.txt")).expect("read"),
+        b"rekey-object\n"
+    );
+}
