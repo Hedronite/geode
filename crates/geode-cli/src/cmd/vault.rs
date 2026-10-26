@@ -338,7 +338,7 @@ fn rotate(args: &RotateArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     let recs: Recipients = serde_json::from_str(&rec_text)
         .map_err(|e| Error::Format(format!("recipients.json: {e}")))?;
     let keep = select_keep(recs.recipients, &args.drop_recipient, &args.add_recipient)?;
-    let own_public = cmd::key::x25519_public(isk.as_bytes());
+    let own_public = recipients::x25519_identity_public(&isk);
     // Refuse before anything touches disk: a kept recipient this operator
     // cannot re-wrap correctly, or a kept set nobody could open.
     check_keep_reachable(&keep, ctx.key_id)?;
@@ -538,7 +538,7 @@ fn verify_new_wraps(
         let ek = match r {
             Recipient::Symmetric { .. } => recipients::unwrap_symmetric(r, isk, vault_id, epoch)?,
             Recipient::X25519 { .. } => {
-                let sk = cmd::key::x25519_secret(isk.as_bytes());
+                let sk = recipients::x25519_identity_secret(isk);
                 recipients::unwrap_x25519(r, &sk, vault_id, epoch)?
             }
             Recipient::Hybrid { .. } => return Err(Error::NotImplemented),

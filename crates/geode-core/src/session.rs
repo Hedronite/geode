@@ -93,6 +93,33 @@ impl Session {
         })
     }
 
+    /// Unlock from the vault's recipients: unwrap the EK from the entry
+    /// this identity holds (symmetric or X25519), then zeroize ISK.
+    ///
+    /// Use this for an on-disk vault: it works for every recipient type the
+    /// CLI reads, including an identity added with `vault add-recipient`,
+    /// and for any epoch whose EK was not derived from this ISK.
+    pub fn unlock_recipients(
+        isk: IdentitySecret,
+        recs: &crate::recipients::Recipients,
+        vault_id: VaultId,
+        epoch: Epoch,
+        idle_timeout: Duration,
+    ) -> Result<Self> {
+        let key_id = derive_key_id(&isk)?;
+        let ek = crate::recipients::unwrap_for_identity(recs, &isk, vault_id, epoch)?;
+        drop(isk);
+        Ok(Self {
+            ek: Some(ek),
+            vault_id,
+            epoch,
+            key_id,
+            context_label: String::new(),
+            idle_timeout,
+            last_activity: Instant::now(),
+        })
+    }
+
     /// Convenience: unwrap a passphrase-wrapped `GKEY` then unlock.
     ///
     /// Loads ISK by unwrapping `wrapped` with `passphrase` (Argon2id +
@@ -425,5 +452,42 @@ mod tests {
         // Idle origin is t0: locking fires at t0 + timeout.
         assert!(s.lock_if_idle(t0 + Duration::from_millis(2)));
         assert!(s.is_locked());
+    }
+}
+
+#[cfg(test)]
+mod unlock_recipients_tests {
+    use super::*;
+    use crate::kdf::derive_epoch_key;
+    use crate::recipients::{wrap_x25519, x25519_identity_public, Recipients};
+
+    #[test]
+    fn x25519_identity_unlocks_session() {
+        let owner = IdentitySecret::from_bytes([1; 32]);
+        let added = IdentitySecret::from_bytes([2; 32]);
+        let vid = VaultId([0x05; 16]);
+        let ek = derive_epoch_key(&owner, vid, Epoch(1), "").unwrap();
+        let r = wrap_x25519(
+            &ek,
+            &x25519_identity_public(&added),
+            vid,
+            Epoch(1),
+            derive_key_id(&added).unwrap(),
+        )
+        .unwrap();
+        let recs = Recipients {
+            vault_id: crate::vault::hex_encode(&vid.0),
+            epoch: 1,
+            recipients: vec![r],
+        };
+        let added_kid = derive_key_id(&added).unwrap();
+        let s = Session::unlock_recipients(added, &recs, vid, Epoch(1), Duration::ZERO).unwrap();
+        assert_eq!(s.ek().unwrap().as_bytes(), ek.as_bytes());
+        assert_eq!(s.key_id, added_kid);
+        // The owner holds no entry here: fail closed.
+        assert!(matches!(
+            Session::unlock_recipients(owner, &recs, vid, Epoch(1), Duration::ZERO),
+            Err(Error::AuthFail)
+        ));
     }
 }
