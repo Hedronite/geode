@@ -45,8 +45,9 @@ pub enum VaultCmd {
     /// A vault that holds entries requires `--reseal` (objects are sealed per
     /// epoch; a new epoch without them would hide every entry). On an empty
     /// vault a drop without `--reseal` is incomplete revocation: the former
-    /// recipient keeps its old-epoch wrap. Do not fix incomplete revocation in policy — recipient
-    /// possession bypasses policy if the holder runs other software.
+    /// recipient keeps its old-epoch wrap. Do not fix incomplete revocation
+    /// in policy — recipient possession bypasses policy if the holder runs
+    /// other software.
     Rotate(RotateArgs),
 }
 
@@ -87,8 +88,10 @@ pub struct RotateArgs {
     /// revocation path.
     #[arg(long)]
     pub reseal: bool,
-    /// Drop a recipient by `key_id` (hex). Without `--reseal` this is
-    /// incomplete revocation: the former recipient still reads old objects.
+    /// Drop a recipient by `key_id` (hex). A vault that holds entries
+    /// requires `--reseal`, which completes the revocation. Only on an empty
+    /// vault is a drop without `--reseal` allowed; the former recipient then
+    /// keeps its old-epoch wrap (incomplete revocation, nothing to read).
     #[arg(long, value_name = "ID")]
     pub drop_recipient: Vec<String>,
     /// Wrap the new EK for an X25519 recipient `.gpub`.
@@ -325,7 +328,7 @@ fn bump_header_epoch(
 fn rotate(args: &RotateArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     if !args.yes {
         return Err(Error::Format(
-            "rotate requires --yes (skips confirmation; drop without --reseal is incomplete revocation)"
+            "rotate requires --yes (skips confirmation; a vault that holds entries also requires --reseal)"
                 .into(),
         ));
     }
@@ -421,7 +424,7 @@ fn rotate(args: &RotateArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         String::new()
     };
     let incomplete_bit = if incomplete {
-        "; drop without --reseal is incomplete revocation"
+        "; vault is empty, so the drop without --reseal is incomplete revocation (the former recipient keeps its old-epoch wrap)"
     } else {
         ""
     };

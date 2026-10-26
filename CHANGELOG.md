@@ -19,6 +19,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 - `vault rotate` fails closed: it refuses a kept symmetric recipient it cannot re-wrap (that recipient would be locked out), an unusable X25519 public, or a kept set no one can open; it verifies the new wraps, the new manifest and every resealed object before the header commits, and restores the old epoch on any failure.
 - `vault rotate` without `--reseal` on a vault that holds entries is now refused (exit 1, vault unchanged) with a hint to re-run with `--reseal`. It used to publish an empty new-epoch manifest, so every entry vanished from `list`/`cat`/`open`. Rotating an empty vault without `--reseal` still works.
 - A failed `vault rotate` now also removes the old-epoch recipients snapshot it wrote, and a failure while restoring is reported together with the original error (nonzero exit) instead of being ignored.
+- `vault rotate` help and messages no longer say a dropped recipient keeps reading old objects without `--reseal`: a vault that holds entries requires `--reseal`, so that incomplete-revocation case now only applies to empty vaults.
 
 ### Security
 
