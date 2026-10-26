@@ -296,17 +296,40 @@ fn load_recipients_for(
     let rec_text = std::fs::read_to_string(root.join("recipients.json")).map_err(Error::Io)?;
     let recs: Recipients = serde_json::from_str(&rec_text)
         .map_err(|e| Error::Format(format!("recipients.json: {e}")))?;
+    let own_public = key::x25519_public(isk.as_bytes());
     for r in &recs.recipients {
-        if let Recipient::Symmetric { key_id: kid, .. } = r {
-            if kid.0 == key_id {
+        match r {
+            Recipient::Symmetric { key_id: kid, .. } if kid.0 == key_id => {
                 return recipients::unwrap_symmetric(r, isk, vault_id, epoch);
             }
+            // A recipient added with `vault add-recipient --gpub` (or
+            // `rotate --add-recipient`) holds an X25519 wrap of the EK; its
+            // identity unwraps it with the ISK-derived X25519 secret.
+            Recipient::X25519 { public, .. } if x25519_public_matches(public, &own_public) => {
+                let sk = key::x25519_secret(isk.as_bytes());
+                return recipients::unwrap_x25519(r, &sk, vault_id, epoch);
+            }
+            _ => {}
         }
     }
     Err(Error::AuthFail)
 }
 
-fn load_manifest(root: &Path, ek: &EpochKey, vault_id: VaultId, epoch: Epoch) -> Result<Manifest> {
+/// True when a recipient's base64 X25519 public equals `own` (constant time).
+pub(crate) fn x25519_public_matches(public_b64: &str, own: &[u8; 32]) -> bool {
+    use base64ct::{Base64, Encoding};
+    match Base64::decode_vec(public_b64) {
+        Ok(bytes) if bytes.len() == 32 => geode_grotto::zero::ct_eq(&bytes, own),
+        _ => false,
+    }
+}
+
+pub(crate) fn load_manifest(
+    root: &Path,
+    ek: &EpochKey,
+    vault_id: VaultId,
+    epoch: Epoch,
+) -> Result<Manifest> {
     let mk = kdf::derive_manifest_key(ek, vault_id, epoch);
     let mjson = read_json(&manifest_path(root, epoch))?;
     verify_json_mac(&mk, &mjson, "manifest_mac")?;

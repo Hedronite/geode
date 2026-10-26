@@ -336,7 +336,10 @@ fn rotate(args: &RotateArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     let recs: Recipients = serde_json::from_str(&rec_text)
         .map_err(|e| Error::Format(format!("recipients.json: {e}")))?;
     let keep = select_keep(recs.recipients, &args.drop_recipient, &args.add_recipient)?;
-    snapshot_old_recipients(&args.dir, ctx.epoch, &rec_text)?;
+    let own_public = cmd::key::x25519_public(isk.as_bytes());
+    // Refuse before anything touches disk: a kept recipient this operator
+    // cannot re-wrap correctly, or a kept set nobody could open.
+    check_keep_reachable(&keep, ctx.key_id)?;
 
     let generator = format!("geode {}", env!("CARGO_PKG_VERSION"));
     let generated_at = now_ms() / 1000;
@@ -346,36 +349,54 @@ fn rotate(args: &RotateArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         context_label: "",
         keep,
     };
-    let outcome = rotate::rotate_epoch(&isk, &args.dir, &plan, &generator, generated_at)?;
-    let mut objects = 0u64;
-    if args.reseal {
-        objects = rotate::reseal(
-            &args.dir,
-            ctx.vault_id,
-            &rotate::EpochKeys {
-                old_epoch: ctx.epoch,
-                old_ek: &outcome.old_ek,
-                new_epoch: outcome.new_epoch,
-                new_ek: &outcome.new_ek,
-            },
-            &rotate::RotationStamp {
-                generator: &generator,
-                generated_at,
-            },
-        )?;
-    }
-    let policy_resealed = rotate::reseal_policy(
-        &args.dir,
-        ctx.vault_id,
-        &rotate::EpochKeys {
-            old_epoch: ctx.epoch,
-            old_ek: &outcome.old_ek,
-            new_epoch: outcome.new_epoch,
-            new_ek: &outcome.new_ek,
-        },
-    )?;
-    bump_header_epoch(&args.dir, outcome.new_epoch, &outcome.new_ek, ctx.vault_id)?;
+    let outcome = rotate::plan_rotation(&isk, &plan)?;
+    // Every kept wrap must carry the new EK before anything is written.
+    verify_new_wraps(&outcome, &isk, ctx.vault_id, &own_public)?;
+    // The old EK is the one this operator actually unwrapped (`ctx.ek`).
+    // `outcome.old_ek` is re-derived from the operator's ISK, which only
+    // matches for the vault's original symmetric identity.
+    let keys = rotate::EpochKeys {
+        old_epoch: ctx.epoch,
+        old_ek: &ctx.ek,
+        new_epoch: outcome.new_epoch,
+        new_ek: &outcome.new_ek,
+    };
+    let backup = RotateBackup::take(&args.dir, outcome.new_epoch, &rec_text)?;
+    let staged = (|| -> Result<(u64, bool)> {
+        snapshot_old_recipients(&args.dir, ctx.epoch, &rec_text)?;
+        rotate::commit_rotation(&args.dir, ctx.vault_id, &outcome, &generator, generated_at)?;
+        // Without reseal the new epoch starts from the current entries
+        // (old-epoch objects stay readable through the old EK snapshot).
+        let objects = if args.reseal {
+            rotate::reseal(
+                &args.dir,
+                ctx.vault_id,
+                &keys,
+                &rotate::RotationStamp {
+                    generator: &generator,
+                    generated_at,
+                },
+            )?
+        } else {
+            0
+        };
+        let policy_resealed = rotate::reseal_policy(&args.dir, ctx.vault_id, &keys)?;
+        verify_new_epoch(&args.dir, ctx.vault_id, outcome.new_epoch, &outcome.new_ek)?;
+        bump_header_epoch(&args.dir, outcome.new_epoch, &outcome.new_ek, ctx.vault_id)?;
+        // If this operator kept access, the committed vault must load.
+        if operator_kept(&outcome.new_recipients.recipients, ctx.key_id, &own_public) {
+            cmd::load_vault(&args.dir, &isk)?;
+        }
+        Ok((objects, policy_resealed))
+    })();
     drop(isk);
+    let (objects, policy_resealed) = match staged {
+        Ok(v) => v,
+        Err(e) => {
+            backup.restore(&args.dir);
+            return Err(e);
+        }
+    };
 
     let dropped: Vec<String> = args
         .drop_recipient
@@ -418,6 +439,173 @@ fn rotate(args: &RotateArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         &text,
     );
     Ok(())
+}
+
+/// True when `r` is this operator's own recipient entry.
+fn is_own(r: &Recipient, own_key_id: kdf::KeyId, own_public: &[u8; 32]) -> bool {
+    match r {
+        Recipient::Symmetric { key_id, .. } => *key_id == own_key_id,
+        Recipient::X25519 { public, .. } => cmd::x25519_public_matches(public, own_public),
+        Recipient::Hybrid { .. } => false,
+    }
+}
+
+fn operator_kept(keep: &[Recipient], own_key_id: kdf::KeyId, own_public: &[u8; 32]) -> bool {
+    keep.iter().any(|r| is_own(r, own_key_id, own_public))
+}
+
+/// A usable X25519 recipient public: 32 bytes, not a low-order point (a
+/// low-order public makes the wrap's shared secret all-zero).
+fn x25519_public_usable(public_b64: &str) -> bool {
+    let Ok(bytes) = Base64::decode_vec(public_b64) else {
+        return false;
+    };
+    let Ok(pk) = <[u8; 32]>::try_from(bytes.as_slice()) else {
+        return false;
+    };
+    let probe = x25519_dalek::StaticSecret::from([0x42u8; 32]);
+    probe
+        .diffie_hellman(&x25519_dalek::PublicKey::from(pk))
+        .was_contributory()
+}
+
+/// Lockout guard (fail closed, before any write).
+///
+/// - A symmetric recipient is re-wrapped under the rotating key's ISK, so a
+///   symmetric recipient that is NOT this operator would be silently
+///   re-wrapped to a key it cannot derive; refuse and say how to proceed.
+/// - Every kept X25519 public must be a usable curve point.
+/// - At least one kept recipient must be able to open the new epoch.
+fn check_keep_reachable(keep: &[Recipient], own_key_id: kdf::KeyId) -> Result<()> {
+    let mut reachable = 0usize;
+    for r in keep {
+        match r {
+            Recipient::Symmetric { key_id, .. } => {
+                if *key_id != own_key_id {
+                    return Err(Error::Format(format!(
+                        "symmetric recipient {} can only be re-wrapped by its own key; \
+                         rotate with that key or --drop-recipient it (refusing: it would be locked out)",
+                        cmd::hex(&key_id.0)
+                    )));
+                }
+                reachable += 1;
+            }
+            Recipient::X25519 { key_id, public, .. } => {
+                if !x25519_public_usable(public) {
+                    return Err(Error::Format(format!(
+                        "x25519 recipient {} has an unusable public key (refusing rotate)",
+                        cmd::hex(&key_id.0)
+                    )));
+                }
+                reachable += 1;
+            }
+            Recipient::Hybrid { .. } => {}
+        }
+    }
+    if reachable == 0 {
+        return Err(Error::Format(
+            "rotate would leave no recipient able to open the vault (refusing lockout)".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Check the planned wraps before commit: every recipient this operator can
+/// open must unwrap to exactly the new EK; X25519 wraps for other
+/// identities must at least parse for their stored public.
+fn verify_new_wraps(
+    outcome: &rotate::RotateOutcome,
+    isk: &kdf::IdentitySecret,
+    vault_id: kdf::VaultId,
+    own_public: &[u8; 32],
+) -> Result<()> {
+    let own_key_id = kdf::derive_key_id(isk)?;
+    let epoch = outcome.new_epoch;
+    for r in &outcome.new_recipients.recipients {
+        if !is_own(r, own_key_id, own_public) {
+            continue;
+        }
+        let ek = match r {
+            Recipient::Symmetric { .. } => recipients::unwrap_symmetric(r, isk, vault_id, epoch)?,
+            Recipient::X25519 { .. } => {
+                let sk = cmd::key::x25519_secret(isk.as_bytes());
+                recipients::unwrap_x25519(r, &sk, vault_id, epoch)?
+            }
+            Recipient::Hybrid { .. } => return Err(Error::NotImplemented),
+        };
+        if !geode_grotto::zero::ct_eq(ek.as_bytes(), outcome.new_ek.as_bytes()) {
+            return Err(Error::AuthFail);
+        }
+    }
+    Ok(())
+}
+
+/// Before the header bump commits the rotation: the new-epoch manifest must
+/// authenticate under the new EK and every object it names must open.
+fn verify_new_epoch(
+    root: &Path,
+    vault_id: kdf::VaultId,
+    epoch: Epoch,
+    ek: &EpochKey,
+) -> Result<()> {
+    let manifest = cmd::load_manifest(root, ek, vault_id, epoch)?;
+    for e in &manifest.entries {
+        if e.kind == geode_grotto::manifest::EntryKind::Dir {
+            continue;
+        }
+        let raw = geode_grotto::vault::read_object(root, epoch, &e.object_id)?;
+        if raw.len() < geode_grotto::object::HEADER_SIZE {
+            return Err(Error::AuthFail);
+        }
+        let bind: &[u8] = if e.bind { e.path.as_bytes() } else { b"" };
+        let (hs, body) = raw.split_at(geode_grotto::object::HEADER_SIZE);
+        geode_grotto::object::open_object(ek, hs, body, bind)?;
+    }
+    Ok(())
+}
+
+/// What rotate restores if any step fails: the vault stays on the old epoch.
+struct RotateBackup {
+    recipients: String,
+    header: Vec<u8>,
+    policy: Option<Vec<u8>>,
+    new_epoch_dir: Option<PathBuf>,
+}
+
+impl RotateBackup {
+    fn take(root: &Path, new_epoch: Epoch, rec_text: &str) -> Result<Self> {
+        let header = std::fs::read(root.join("header.json")).map_err(Error::Io)?;
+        let pol = geode_grotto::policy::policy_path(root);
+        let policy = if pol.exists() {
+            Some(std::fs::read(&pol).map_err(Error::Io)?)
+        } else {
+            None
+        };
+        let dir = rotate::epoch_recipients_path(root, new_epoch)
+            .parent()
+            .map(Path::to_path_buf);
+        let new_epoch_dir = dir.filter(|d| !d.exists());
+        Ok(Self {
+            recipients: rec_text.to_string(),
+            header,
+            policy,
+            new_epoch_dir,
+        })
+    }
+
+    fn restore(&self, root: &Path) {
+        let _ = geode_grotto::vault::write_atomic(
+            &root.join("recipients.json"),
+            self.recipients.as_bytes(),
+        );
+        let _ = geode_grotto::vault::write_atomic(&root.join("header.json"), &self.header);
+        if let Some(p) = &self.policy {
+            let _ = geode_grotto::vault::write_atomic(&geode_grotto::policy::policy_path(root), p);
+        }
+        if let Some(d) = &self.new_epoch_dir {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
 }
 
 fn now_ms() -> i64 {

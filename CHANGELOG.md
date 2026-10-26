@@ -12,6 +12,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+### Fixed
+
+- An identity added with `vault add-recipient --gpub` (or `vault rotate --add-recipient`) can now open its vault: `verify`, `list`, `cat`, `open` and `rotate` unwrap the epoch key from the identity's X25519 recipient entry. Before, only symmetric recipients were matched and the added key failed with an authentication error.
+- `vault rotate` reseals from the epoch key it actually unwrapped, so a rotation run by an X25519 identity no longer resets the current manifest.
+- `vault rotate` fails closed: it refuses a kept symmetric recipient it cannot re-wrap (that recipient would be locked out), an unusable X25519 public, or a kept set no one can open; it verifies the new wraps, the new manifest and every resealed object before the header commits, and restores the old epoch on any failure.
+
+### Security
+
+- `geode open` writes extracted files owner-only (0600 for a 0644 entry; owner bits kept, group and other cleared), created with that mode so plaintext is never briefly world-readable.
+
 ## [3.0.0] — 2026-10-26
 
 ### BREAKING

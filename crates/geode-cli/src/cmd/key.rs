@@ -271,10 +271,14 @@ fn keychain_store(path: &Path, label: &str, key_id: &KeyId, pass: &str) -> Resul
 }
 
 /// Derive the identity's X25519 static secret from the ISK (BLAKE3-expand
-/// stream, 02-cryptography 6.3) and return the public key bytes.
-fn x25519_public(isk: &[u8; 32]) -> [u8; 32] {
-    let sk_bytes = blake3::derive_key(X25519_IDENTITY_DOMAIN, isk);
-    let sk = x25519_dalek::StaticSecret::from(sk_bytes);
+/// stream, 02-cryptography 6.3). Secret material: never log or print.
+pub(crate) fn x25519_secret(isk: &[u8; 32]) -> zeroize::Zeroizing<[u8; 32]> {
+    zeroize::Zeroizing::new(blake3::derive_key(X25519_IDENTITY_DOMAIN, isk))
+}
+
+/// The identity's X25519 public key (the `.gpub` `x25519_public`).
+pub(crate) fn x25519_public(isk: &[u8; 32]) -> [u8; 32] {
+    let sk = x25519_dalek::StaticSecret::from(*x25519_secret(isk));
     x25519_dalek::PublicKey::from(&sk).to_bytes()
 }
 
