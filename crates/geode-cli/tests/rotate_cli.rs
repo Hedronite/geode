@@ -506,3 +506,75 @@ fn open_writes_plaintext_0600() {
         b"rekey-object\n"
     );
 }
+
+// ---- No-reseal manifest + failed-rotate restore ----
+
+#[test]
+fn rotate_without_reseal_refused_when_vault_has_entries() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_vault(dir);
+    seal_note(dir);
+    let bob_id = add_bob(dir);
+    let before = vault_snapshot(&dir.join("v.geode"));
+    for extra in [vec![], vec!["--drop-recipient", bob_id.as_str()]] {
+        let mut args = vec!["--key", "k.gkey", "vault", "rotate", "v.geode", "--yes"];
+        args.extend(extra);
+        let out = geode(dir, &args);
+        assert_eq!(out.status.code(), Some(1), "refused: {}", combined(&out));
+        assert!(combined(&out).contains("--reseal"), "{}", combined(&out));
+        assert_eq!(
+            vault_snapshot(&dir.join("v.geode")),
+            before,
+            "vault byte-identical after refused no-reseal rotate"
+        );
+    }
+    let list = geode(dir, &["--key", "k.gkey", "list", "v.geode"]);
+    assert_ok(&list, "list after refusal");
+    assert!(String::from_utf8_lossy(&list.stdout).contains("note.txt"));
+    assert_reads(dir, "k.gkey", "entries still open");
+}
+
+#[test]
+fn rotate_failure_restores_vault_and_removes_snapshot() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    setup_vault(dir);
+    seal_note(dir);
+    let root = dir.join("v.geode");
+    assert!(!root.join("epochs/00000001/recipients.json").exists());
+    // Corrupt the sealed object: reseal fails after the snapshot and the
+    // new epoch were already written.
+    let mut stack = vec![root.join("epochs/00000001/objects")];
+    let mut obj = None;
+    while let Some(d) = stack.pop() {
+        for ent in std::fs::read_dir(&d).expect("read_dir") {
+            let p = ent.expect("entry").path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                obj = Some(p);
+            }
+        }
+    }
+    let obj = obj.expect("sealed object");
+    let mut bytes = std::fs::read(&obj).expect("read obj");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0x01;
+    std::fs::write(&obj, &bytes).expect("corrupt");
+    let before = vault_snapshot(&root);
+    let out = geode(
+        dir,
+        &[
+            "--key", "k.gkey", "vault", "rotate", "v.geode", "--yes", "--reseal",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", combined(&out));
+    assert!(
+        !root.join("epochs/00000001/recipients.json").exists(),
+        "snapshot written by the failed rotate was undone"
+    );
+    assert!(!root.join("epochs/00000002").exists(), "new epoch removed");
+    assert_eq!(vault_snapshot(&root), before, "vault byte-identical");
+    assert_eq!(header_epoch(dir), 1);
+}

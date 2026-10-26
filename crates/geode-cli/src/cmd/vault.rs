@@ -42,9 +42,10 @@ pub enum VaultCmd {
     /// `epoch += 1`; remaining recipients wrap the new EK.
     /// `--add-recipient PUB` wraps the new EK for an extra X25519 `.gpub`.
     /// `--drop-recipient ID` + `--reseal` is the complete revocation path.
-    /// Without `--reseal`, a drop is incomplete revocation: the former
-    /// recipient still reads old objects (old EK stays wrapped for remaining
-    /// recipients). Do not fix incomplete revocation in policy — recipient
+    /// A vault that holds entries requires `--reseal` (objects are sealed per
+    /// epoch; a new epoch without them would hide every entry). On an empty
+    /// vault a drop without `--reseal` is incomplete revocation: the former
+    /// recipient keeps its old-epoch wrap. Do not fix incomplete revocation in policy — recipient
     /// possession bypasses policy if the holder runs other software.
     Rotate(RotateArgs),
 }
@@ -81,8 +82,9 @@ pub struct RotateArgs {
     /// Vault directory.
     #[arg(value_name = "DIR")]
     pub dir: PathBuf,
-    /// Rewrite objects under the new EK. Paired with `--drop-recipient`, this
-    /// is the complete revocation path.
+    /// Rewrite objects under the new EK. Required when the vault holds
+    /// entries. Paired with `--drop-recipient`, this is the complete
+    /// revocation path.
     #[arg(long)]
     pub reseal: bool,
     /// Drop a recipient by `key_id` (hex). Without `--reseal` this is
@@ -340,6 +342,18 @@ fn rotate(args: &RotateArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     // Refuse before anything touches disk: a kept recipient this operator
     // cannot re-wrap correctly, or a kept set nobody could open.
     check_keep_reachable(&keep, ctx.key_id)?;
+    // Entries live in epoch-scoped objects sealed under that epoch's key, and
+    // a manifest names objects of its own epoch only. A rotate that does not
+    // reseal would publish an empty new-epoch manifest and hide every entry,
+    // so it is refused while the vault holds anything.
+    if !args.reseal && !ctx.manifest.entries.is_empty() {
+        return Err(Error::Format(format!(
+            "rotate without --reseal would hide the vault's {} entr{} (objects are sealed per epoch); \
+             re-run with --reseal",
+            ctx.manifest.entries.len(),
+            if ctx.manifest.entries.len() == 1 { "y" } else { "ies" }
+        )));
+    }
 
     let generator = format!("geode {}", env!("CARGO_PKG_VERSION"));
     let generated_at = now_ms() / 1000;
@@ -361,12 +375,14 @@ fn rotate(args: &RotateArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         new_epoch: outcome.new_epoch,
         new_ek: &outcome.new_ek,
     };
-    let backup = RotateBackup::take(&args.dir, outcome.new_epoch, &rec_text)?;
+    let backup = RotateBackup::take(&args.dir, ctx.epoch, outcome.new_epoch, &rec_text)?;
     let staged = (|| -> Result<(u64, bool)> {
         snapshot_old_recipients(&args.dir, ctx.epoch, &rec_text)?;
         rotate::commit_rotation(&args.dir, ctx.vault_id, &outcome, &generator, generated_at)?;
-        // Without reseal the new epoch starts from the current entries
-        // (old-epoch objects stay readable through the old EK snapshot).
+        // commit_rotation lays an empty new-epoch manifest. With --reseal it
+        // is replaced by one naming the re-sealed objects; without --reseal
+        // the vault is empty (non-empty vaults were refused above), so the
+        // empty manifest is exact.
         let objects = if args.reseal {
             rotate::reseal(
                 &args.dir,
@@ -390,13 +406,7 @@ fn rotate(args: &RotateArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         Ok((objects, policy_resealed))
     })();
     drop(isk);
-    let (objects, policy_resealed) = match staged {
-        Ok(v) => v,
-        Err(e) => {
-            backup.restore(&args.dir);
-            return Err(e);
-        }
-    };
+    let (objects, policy_resealed) = finish_or_restore(staged, &backup, &args.dir)?;
 
     let dropped: Vec<String> = args
         .drop_recipient
@@ -564,16 +574,34 @@ fn verify_new_epoch(
     Ok(())
 }
 
+/// On a failed rotate, restore the old epoch. A restore that itself fails is
+/// reported together with the original error (never swallowed).
+fn finish_or_restore<T>(staged: Result<T>, backup: &RotateBackup, root: &Path) -> Result<T> {
+    match staged {
+        Ok(v) => Ok(v),
+        Err(e) => match backup.restore(root) {
+            Ok(()) => Err(e),
+            Err(r) => Err(Error::Format(format!(
+                "rotate failed: {e}; restoring the previous epoch ALSO failed: {r} \
+                 (vault may be inconsistent; check header.json, recipients.json and epochs/)"
+            ))),
+        },
+    }
+}
+
 /// What rotate restores if any step fails: the vault stays on the old epoch.
 struct RotateBackup {
     recipients: String,
     header: Vec<u8>,
     policy: Option<Vec<u8>>,
     new_epoch_dir: Option<PathBuf>,
+    /// The old-epoch recipients snapshot rotate is about to create (only
+    /// when it does not exist yet), removed on restore.
+    old_snapshot: Option<PathBuf>,
 }
 
 impl RotateBackup {
-    fn take(root: &Path, new_epoch: Epoch, rec_text: &str) -> Result<Self> {
+    fn take(root: &Path, old_epoch: Epoch, new_epoch: Epoch, rec_text: &str) -> Result<Self> {
         let header = std::fs::read(root.join("header.json")).map_err(Error::Io)?;
         let pol = geode_grotto::policy::policy_path(root);
         let policy = if pol.exists() {
@@ -585,25 +613,52 @@ impl RotateBackup {
             .parent()
             .map(Path::to_path_buf);
         let new_epoch_dir = dir.filter(|d| !d.exists());
+        let snap = rotate::epoch_recipients_path(root, old_epoch);
+        let old_snapshot = (!snap.exists()).then_some(snap);
         Ok(Self {
             recipients: rec_text.to_string(),
             header,
             policy,
             new_epoch_dir,
+            old_snapshot,
         })
     }
 
-    fn restore(&self, root: &Path) {
-        let _ = geode_grotto::vault::write_atomic(
-            &root.join("recipients.json"),
-            self.recipients.as_bytes(),
+    /// Put every file rotate may have written back. All steps are attempted;
+    /// the first error (if any) is returned with the path it hit.
+    fn restore(&self, root: &Path) -> Result<()> {
+        let mut first: Option<String> = None;
+        let mut note = |what: &Path, r: Result<()>| {
+            if let Err(e) = r {
+                if first.is_none() {
+                    first = Some(format!("{}: {e}", what.display()));
+                }
+            }
+        };
+        let rec = root.join("recipients.json");
+        note(
+            &rec,
+            geode_grotto::vault::write_atomic(&rec, self.recipients.as_bytes()),
         );
-        let _ = geode_grotto::vault::write_atomic(&root.join("header.json"), &self.header);
+        let hdr = root.join("header.json");
+        note(&hdr, geode_grotto::vault::write_atomic(&hdr, &self.header));
         if let Some(p) = &self.policy {
-            let _ = geode_grotto::vault::write_atomic(&geode_grotto::policy::policy_path(root), p);
+            let pol = geode_grotto::policy::policy_path(root);
+            note(&pol, geode_grotto::vault::write_atomic(&pol, p));
         }
         if let Some(d) = &self.new_epoch_dir {
-            let _ = std::fs::remove_dir_all(d);
+            if d.exists() {
+                note(d, std::fs::remove_dir_all(d).map_err(Error::Io));
+            }
+        }
+        if let Some(s) = &self.old_snapshot {
+            if s.exists() {
+                note(s, std::fs::remove_file(s).map_err(Error::Io));
+            }
+        }
+        match first {
+            None => Ok(()),
+            Some(msg) => Err(Error::Format(format!("restore: {msg}"))),
         }
     }
 }
@@ -700,4 +755,83 @@ fn init(args: &InitArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
         ),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod rotate_restore_tests {
+    use super::*;
+
+    fn vault_like(root: &Path) {
+        std::fs::create_dir_all(root.join("epochs/00000001")).unwrap();
+        std::fs::write(root.join("recipients.json"), b"OLD-RECS").unwrap();
+        std::fs::write(root.join("header.json"), b"OLD-HEADER").unwrap();
+    }
+
+    #[test]
+    fn restore_undoes_snapshot_and_new_epoch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        vault_like(root);
+        let b = RotateBackup::take(root, Epoch(1), Epoch(2), "OLD-RECS").unwrap();
+        snapshot_old_recipients(root, Epoch(1), "OLD-RECS").unwrap();
+        std::fs::create_dir_all(root.join("epochs/00000002/objects")).unwrap();
+        std::fs::write(root.join("recipients.json"), b"NEW").unwrap();
+        std::fs::write(root.join("header.json"), b"NEW").unwrap();
+        b.restore(root).unwrap();
+        assert!(!rotate::epoch_recipients_path(root, Epoch(1)).exists());
+        assert!(!root.join("epochs/00000002").exists());
+        assert_eq!(
+            std::fs::read(root.join("recipients.json")).unwrap(),
+            b"OLD-RECS"
+        );
+        assert_eq!(
+            std::fs::read(root.join("header.json")).unwrap(),
+            b"OLD-HEADER"
+        );
+    }
+
+    #[test]
+    fn restore_keeps_preexisting_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        vault_like(root);
+        snapshot_old_recipients(root, Epoch(1), "EARLIER").unwrap();
+        let b = RotateBackup::take(root, Epoch(1), Epoch(2), "OLD-RECS").unwrap();
+        b.restore(root).unwrap();
+        let snap = rotate::epoch_recipients_path(root, Epoch(1));
+        assert_eq!(std::fs::read(snap).unwrap(), b"EARLIER");
+    }
+
+    #[test]
+    fn restore_error_is_reported_with_original() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        vault_like(root);
+        let b = RotateBackup::take(root, Epoch(1), Epoch(2), "OLD-RECS").unwrap();
+        // A non-empty directory where header.json was: the restore rename
+        // fails even with elevated privileges.
+        std::fs::remove_file(root.join("header.json")).unwrap();
+        std::fs::create_dir_all(root.join("header.json/blocker")).unwrap();
+        let err = finish_or_restore::<()>(Err(Error::AuthFail), &b, root).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("rotate failed"), "{msg}");
+        assert!(msg.contains("ALSO failed"), "{msg}");
+        assert!(msg.contains("header.json"), "{msg}");
+        // The other restore steps still ran.
+        assert_eq!(
+            std::fs::read(root.join("recipients.json")).unwrap(),
+            b"OLD-RECS"
+        );
+        assert_ne!(crate::output::exit_family(&err).1, 0);
+    }
+
+    #[test]
+    fn restore_ok_returns_original_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        vault_like(root);
+        let b = RotateBackup::take(root, Epoch(1), Epoch(2), "OLD-RECS").unwrap();
+        let err = finish_or_restore::<()>(Err(Error::AuthFail), &b, root).unwrap_err();
+        assert!(matches!(err, Error::AuthFail));
+    }
 }
