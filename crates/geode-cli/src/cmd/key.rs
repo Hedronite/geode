@@ -19,11 +19,6 @@ use zeroize::Zeroizing;
 
 use crate::{cmd, OutMode};
 
-/// BLAKE3 domain for the identity's X25519 static secret (02-cryptography
-/// 6.3: "derived from BLAKE3-expand(ISK) streams"). CLI-local until the
-/// spec pins the exact string; changing it changes every `.gpub`.
-use geode_grotto::recipients::X25519_IDENTITY_DOMAIN;
-
 #[derive(Args, Debug)]
 pub struct KeygenArgs {
     /// Destination key file (default ./secret.gkey, with a warning).
@@ -270,18 +265,6 @@ fn keychain_store(path: &Path, label: &str, key_id: &KeyId, pass: &str) -> Resul
     }
 }
 
-/// Derive the identity's X25519 static secret from the ISK (BLAKE3-expand
-/// stream, 02-cryptography 6.3). Secret material: never log or print.
-pub(crate) fn x25519_secret(isk: &[u8; 32]) -> zeroize::Zeroizing<[u8; 32]> {
-    zeroize::Zeroizing::new(blake3::derive_key(X25519_IDENTITY_DOMAIN, isk))
-}
-
-/// The identity's X25519 public key (the `.gpub` `x25519_public`).
-pub(crate) fn x25519_public(isk: &[u8; 32]) -> [u8; 32] {
-    let sk = x25519_dalek::StaticSecret::from(*x25519_secret(isk));
-    x25519_dalek::PublicKey::from(&sk).to_bytes()
-}
-
 /// Write `<keyfile stem>.gpub` (02-cryptography 6.3): a public JSON
 /// document — version, `key_id`, X25519 public (base64). Contains no secret
 /// material; written 0644. Refuses to overwrite (same as the `.gkey`).
@@ -290,7 +273,9 @@ fn write_gpub(gkey_path: &std::path::Path, isk: &[u8; 32], key_id: &KeyId) -> Re
     let doc = serde_json::json!({
         "version": 1,
         "key_id": cmd::hex(&key_id.0),
-        "x25519_public": Base64::encode_string(&x25519_public(isk)),
+        "x25519_public": Base64::encode_string(&geode_grotto::recipients::x25519_identity_public(
+            &geode_grotto::kdf::IdentitySecret::from_bytes(*isk),
+        )),
     });
     let text = serde_json::to_string_pretty(&doc)
         .map_err(|e| Error::Format(format!("gpub serialize: {e}")))?;

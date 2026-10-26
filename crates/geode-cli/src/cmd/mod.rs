@@ -299,7 +299,10 @@ fn load_recipients_for(
     // Symmetric recipient by key_id, or the X25519 recipient (added with
     // `vault add-recipient --gpub` / `rotate --add-recipient`) whose public
     // is this identity's. Shared with the TUI unlock (geode-grotto).
-    debug_assert_eq!(kdf::derive_key_id(isk)?.0, key_id);
+    // The caller's key_id must be this identity's (checked in every build).
+    if !geode_grotto::zero::ct_eq(&kdf::derive_key_id(isk)?.0, &key_id) {
+        return Err(Error::AuthFail);
+    }
     recipients::unwrap_for_identity(&recs, isk, vault_id, epoch)
 }
 

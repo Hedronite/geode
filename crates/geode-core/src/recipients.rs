@@ -5,6 +5,9 @@
 use crate::kdf::{Epoch, EpochKey, IdentitySecret, KeyId, VaultId};
 use crate::{Error, Result};
 
+use aegis::aegis256x2::{Aegis256X2, Nonce};
+use base64ct::{Base64, Encoding};
+
 /// BLAKE3 derive-key context for an identity's X25519 static secret
 /// (02-cryptography 6.3). The `.gpub` public is derived the same way.
 pub const X25519_IDENTITY_DOMAIN: &str = "geode/v1/x25519-identity";
@@ -19,7 +22,10 @@ pub fn x25519_identity_secret(isk: &IdentitySecret) -> zeroize::Zeroizing<[u8; 3
 /// The identity's X25519 public key (the `.gpub` `x25519_public`).
 #[must_use]
 pub fn x25519_identity_public(isk: &IdentitySecret) -> [u8; 32] {
-    let sk = x25519_dalek::StaticSecret::from(*x25519_identity_secret(isk));
+    let mut raw: [u8; 32] = *x25519_identity_secret(isk);
+    // StaticSecret zeroizes itself on drop; clear the by-value copy too.
+    let sk = x25519_dalek::StaticSecret::from(raw);
+    zeroize::Zeroize::zeroize(&mut raw);
     x25519_dalek::PublicKey::from(&sk).to_bytes()
 }
 
@@ -60,8 +66,6 @@ pub fn unwrap_for_identity(
     }
     Err(Error::AuthFail)
 }
-use aegis::aegis256x2::{Aegis256X2, Nonce};
-use base64ct::{Base64, Encoding};
 
 /// Recipient kind (03-format 6).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -759,7 +763,10 @@ mod identity_unwrap_tests {
             unwrap_for_identity(&recs, &isk(3), VID, Epoch(1)),
             Err(Error::AuthFail)
         ));
-        assert!(unwrap_for_identity(&recs, &added, VID, Epoch(2)).is_err());
+        assert!(matches!(
+            unwrap_for_identity(&recs, &added, VID, Epoch(2)),
+            Err(Error::AuthFail)
+        ));
     }
 
     #[test]
