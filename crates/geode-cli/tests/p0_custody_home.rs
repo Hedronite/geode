@@ -67,7 +67,6 @@ fn has_secret_bytes(text: &str) -> bool {
     MARKERS.iter().any(|m| text.contains(m))
 }
 
-/// Every SPEC rule `text` breaks. Empty means the argv is valid.
 /// The pinned command must be a file directly in the libexec dir. Compares
 /// path components, not text. `Path::components` drops `//`, a trailing
 /// `/`, and inner `.`, so the raw string is checked for those too.
@@ -87,6 +86,7 @@ fn pinned_cmd_path(path: &str) -> bool {
     p.parent() == Some(Path::new(DIR)) && p.file_name().is_some_and(|n| !n.is_empty())
 }
 
+/// Every SPEC rule `text` breaks. Empty means the argv is valid.
 fn broken_rules(text: &str) -> BTreeSet<&'static str> {
     let mut bad = BTreeSet::new();
     if text.contains('\0') {
