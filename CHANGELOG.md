@@ -12,6 +12,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-10-26
+
 ### BREAKING
 
 - Linux custody and local `geode run` refuse a secret binding whose `allow_hosts` is empty or unusable (`policy_deny`, nothing spawned). Tokens issued with an empty list no longer run and must be reissued with the hosts they may contact.
@@ -290,7 +292,8 @@ First release. Conformance profile **`core`** (§2): format, crypto, vault init,
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/Hedronite/geode/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/Hedronite/geode/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/Hedronite/geode/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/Hedronite/geode/compare/v1.2.1...v2.0.0
 [1.2.1]: https://github.com/Hedronite/geode/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/Hedronite/geode/compare/v1.1.0...v1.2.0

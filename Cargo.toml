@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/geode-core", "crates/geode-cli", "crates/geode-tui", "crates/geode-os", "crates/geode-redact"]
 
 [workspace.package]
-version = "2.0.0"
+version = "3.0.0"
 edition = "2021"
 rust-version = "1.89"
 license = "Apache-2.0"
