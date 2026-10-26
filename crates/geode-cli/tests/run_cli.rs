@@ -19,6 +19,12 @@
 //! `test-trusted-root`). That feature is also what builds the helper, so
 //! the helper tests are compiled only when it is on. A root-owned install
 //! is `#[ignore]` and is not part of the default run.
+//!
+//! Tests that spawn a child with a secret need `--test-unconfined-hosts`,
+//! which exists only with `test-trusted-root`, because a secret run with no
+//! allowed hosts is refused before spawn. They are compiled only with that
+//! feature, so a default-feature run stays green and still runs the no-host
+//! refusal tests. CI runs this file with the feature.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -161,6 +167,7 @@ fn canonical_on_path(name: &str) -> String {
         .to_owned()
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn on_path(name: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
@@ -191,6 +198,7 @@ fn assert_no_dummy(o: &Output, what: &str) {
     );
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn echo_base64_xxd_redact_and_row_is_local() {
     let fx = Fx::new();
@@ -247,6 +255,7 @@ fn echo_base64_xxd_redact_and_row_is_local() {
     );
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn child_env_is_built_from_scratch() {
     let fx = Fx::new();
@@ -271,6 +280,7 @@ fn child_env_is_built_from_scratch() {
     assert!(!env.contains("XDG_STATE_HOME"));
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn child_exit_3_is_spawned_and_passed_through() {
     let fx = Fx::new();
@@ -300,6 +310,7 @@ fn child_exit_3_is_spawned_and_passed_through() {
     assert_no_dummy(&j, "json");
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn timeout_terms_the_child() {
     let fx = Fx::new();
@@ -429,6 +440,7 @@ fn local_allow_hosts_outcome_is_per_os() {
     }
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn refusals_do_not_spawn() {
     let fx = Fx::new();
@@ -497,6 +509,7 @@ fn refusals_do_not_spawn() {
     assert!(!fx.marker().exists(), "a refused run spawned a child");
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn policy_deny_is_exit_3_and_does_not_spawn() {
     let fx = Fx::new();
@@ -535,6 +548,7 @@ fn policy_deny_is_exit_3_and_does_not_spawn() {
     assert_eq!((*custody, argv0.as_str(), *exit_code), (0, "", None));
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn needle_in_argv_is_argv_rejected_without_hashing_argv() {
     let fx = Fx::new();
@@ -651,6 +665,7 @@ fn allow_cmd_must_be_canonical() {
     }
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn audit_verify_good_then_tampered() {
     let fx = Fx::new();
@@ -733,6 +748,7 @@ fn fix3_audit_failure_before_spawn_releases_nothing() {
     assert_eq!(fx.rows().len(), before, "no row was written");
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn fix3_success_writes_one_intent_row_without_the_value() {
     let fx = Fx::new();
@@ -757,6 +773,7 @@ fn fix3_success_writes_one_intent_row_without_the_value() {
     assert_eq!(code(&v), Some(0), "{}", err(&v));
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn fix3_close_row_failure_is_non_zero_but_output_still_redacted() {
     let fx = Fx::new();
@@ -773,6 +790,7 @@ fn fix3_close_row_failure_is_non_zero_but_output_still_redacted() {
     assert_eq!(fx.rows().last().unwrap().0, "started", "intent row stays");
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn fix3_deny_path_writes_row_or_fails_closed() {
     let fx = Fx::new();
@@ -795,6 +813,7 @@ fn fix3_deny_path_writes_row_or_fails_closed() {
     assert!(!fx.marker().exists());
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn sha256_hex(path: &Path) -> String {
     use sha2::{Digest, Sha256};
     Sha256::digest(std::fs::read(path).expect("read pin target"))
@@ -805,6 +824,7 @@ fn sha256_hex(path: &Path) -> String {
 
 /// Copy `src` to `dir/bin/name` as a 0755 file. The pin path is this absolute
 /// path. A `#!` file cannot be pinned on Linux.
+#[cfg(feature = "test-trusted-root")]
 fn copy_exec(dir: &Path, name: &str, src: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let bin = dir.join("bin");
@@ -821,6 +841,7 @@ fn copy_exec(dir: &Path, name: &str, src: &Path) -> PathBuf {
     dest
 }
 
+#[cfg(feature = "test-trusted-root")]
 fn write_pins(dir: &Path, rules: &serde_json::Value) {
     std::fs::write(dir.join("pins.json"), serde_json::to_vec(rules).unwrap()).unwrap();
 }
@@ -1266,6 +1287,7 @@ fn pinned_user_tmp_writable_and_symlink_are_refused() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn pinned_wrong_digest_refused() {
     let fx = Fx::new();
@@ -1298,6 +1320,7 @@ fn pinned_wrong_digest_refused() {
     assert_eq!(fx.rows().last().unwrap().0, "policy_deny");
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn unpinned_path_refused() {
     let fx = Fx::new();
@@ -1328,6 +1351,7 @@ fn unpinned_path_refused() {
     assert_eq!(fx.rows().last().unwrap().0, "policy_deny");
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn args_prefix_mismatch_refused() {
     let fx = Fx::new();
@@ -1359,6 +1383,7 @@ fn args_prefix_mismatch_refused() {
     assert!(!fx.marker().exists(), "args_prefix mismatch spawned");
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn relative_pin_refused() {
     let fx = Fx::new();
@@ -1422,6 +1447,7 @@ fn relative_pin_refused() {
     assert!(!fx.marker().exists());
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn symlink_swap_refused() {
     use std::os::unix::fs::PermissionsExt;
@@ -1478,6 +1504,7 @@ fn symlink_swap_refused() {
     assert!(!marker.exists(), "symlink swap spawned");
 }
 
+#[cfg(feature = "test-trusted-root")]
 #[test]
 fn require_pin_refuses_unpinned_rules_and_off_allows_them() {
     let fx = Fx::new();
