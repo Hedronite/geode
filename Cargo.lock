@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "geode-cli"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "base64ct",
  "blake3",
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "geode-grotto"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "aegis",
  "aes 0.8.4",
@@ -1067,14 +1067,14 @@ dependencies = [
 
 [[package]]
 name = "geode-os"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "geode-redact"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "aho-corasick",
  "base64",
@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "geode-tui"
-version = "2.0.0"
+version = "3.0.0"
 dependencies = [
  "blake3",
  "crossterm",

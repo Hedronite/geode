@@ -47,7 +47,7 @@ The on-disk format is **GDE1**, cipher suite **`0x01`**: AEGIS-256-X2, BLAKE3, A
 | Format | GDE1, suite `0x01` |
 | Binary | `geode` ([`geode-cli`](crates/geode-cli)) |
 | Library | [`geode-grotto`](crates/geode-core) (Rust import `geode_grotto`) |
-| Version | **2.0.0** · [release](https://github.com/Hedronite/geode/releases/tag/v2.0.0) · [changelog](CHANGELOG.md) |
+| Version | **3.0.0** · [release](https://github.com/Hedronite/geode/releases/tag/v3.0.0) · [changelog](CHANGELOG.md) |
 | Platforms | Linux and macOS |
 | Rust | 1.89 |
 | License | [Apache-2.0](LICENSE) |
@@ -274,7 +274,7 @@ The Cargo feature `test-trusted-root` is test-only and insecure. It compiles a h
 
 ## Status
 
-Version **2.0.0**, git tag [`v2.0.0`](https://github.com/Hedronite/geode/releases/tag/v2.0.0). The crates `geode-cli`, `geode-grotto`, `geode-tui`, `geode-redact`, and `geode-os` are published at the same version.
+Version **3.0.0**, git tag [`v3.0.0`](https://github.com/Hedronite/geode/releases/tag/v3.0.0). The crates `geode-cli`, `geode-grotto`, `geode-tui`, `geode-redact`, and `geode-os` are published at the same version.
 
 - The format is GDE1, suite `0x01`. Objects written by 1.0.0 are still readable.
 - 1.2 added keyring custody and secret injection: `geode run`, the custody daemon, `geode custody`, `geode audit verify`, and the `inject` token operation.
