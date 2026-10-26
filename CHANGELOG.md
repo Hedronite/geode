@@ -20,6 +20,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 - `geode tui` unlocks a vault with an X25519 identity added with `vault add-recipient` (and after the original key was dropped by a rotate): it unwraps the epoch key from the identity's recipient entry, the same path the CLI uses, instead of re-deriving it from the ISK. A key with no recipient entry is refused (exit 2).
 - `vault rotate` without `--reseal` on a vault that holds entries is now refused (exit 1, vault unchanged) with a hint to re-run with `--reseal`. It used to publish an empty new-epoch manifest, so every entry vanished from `list`/`cat`/`open`. Rotating an empty vault without `--reseal` still works.
 - A failed `vault rotate` now also removes the old-epoch recipients snapshot it wrote, and a failure while restoring is reported together with the original error (nonzero exit) instead of being ignored.
+- `vault rotate` help and messages no longer say a dropped recipient keeps reading old objects without `--reseal`: a vault that holds entries requires `--reseal`, so that incomplete-revocation case now only applies to empty vaults.
 
 ### Security
 
