@@ -14,6 +14,9 @@
 //! and open old-epoch objects (04 6). Dropping a recipient without reseal is
 //! a **documented incomplete revocation**: the dropped recipient retains
 //! their old-epoch wrap and can still read old objects (10-policy; SPEC).
+//! Callers must reseal when the vault holds entries: `commit_rotation` lays
+//! down an empty new-epoch manifest, so without a reseal the entries vanish
+//! from the current epoch.
 //!
 //! ## Reseal
 //!
@@ -161,6 +164,10 @@ pub fn plan_rotation(isk: &IdentitySecret, plan: &RotatePlan<'_>) -> Result<Rota
 /// objects remain), so a remaining recipient can still open old-epoch
 /// objects via the old EK without reseal (04 6). `generator` is the
 /// `generator` string for the new manifest header.
+///
+/// The new-epoch manifest is empty, so callers must reseal (or refuse the
+/// rotation) when the vault holds entries; otherwise they drop out of the
+/// current epoch.
 pub fn commit_rotation(
     vault_root: &Path,
     vault_id: VaultId,

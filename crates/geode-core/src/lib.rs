@@ -97,7 +97,9 @@
 //! public key -- the operator never needs a recipient secret). The old epoch
 //! `recipients.json` is left untouched so a remaining recipient can still
 //! unwrap the **old** EK and open old-epoch objects without reseal; dropping a
-//! recipient without reseal is a documented **incomplete revocation**.
+//! recipient without reseal is a documented **incomplete revocation**. Callers
+//! must reseal when the vault holds entries, since the new-epoch manifest
+//! starts empty.
 //! `reseal` rewrites every old-epoch object under the new EK at the new epoch
 //! (fresh `object_id` per object) and writes a new-epoch manifest; a dropped
 //! recipient has no wrap of the new EK and cannot read the rewritten objects.
