@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 const FIXTURE: &str = "tests/fixtures/p0-facet-secret-key.args";
-const PREFIX: [&str; 3] = ["request", "run", "--no-record"];
+const PREFIX: [&str; 4] = ["request", "run", "--no-record", "--no-subprocess"];
 
 fn raw() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
@@ -206,7 +206,7 @@ fn each_broken_rule_fails() {
         ("allow-host", "--allow-host\napi.example.test\n", ""),
         (
             "allow-cmd-json",
-            "{\"path\":\"/usr/local/libexec/hedronite/facet\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"args_prefix\":[\"request\",\"run\",\"--no-record\"]}",
+            "{\"path\":\"/usr/local/libexec/hedronite/facet\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"args_prefix\":[\"request\",\"run\",\"--no-record\",\"--no-subprocess\"]}",
             "/usr/local/libexec/hedronite/facet",
         ),
         (
@@ -216,7 +216,17 @@ fn each_broken_rule_fails() {
         ),
         (
             "allow-cmd-prefix",
+            "\"args_prefix\":[\"request\",\"run\",\"--no-record\",\"--no-subprocess\"]",
             "\"args_prefix\":[\"request\",\"run\",\"--no-record\"]",
+        ),
+        (
+            "allow-cmd-prefix",
+            "\"args_prefix\":[\"request\",\"run\",\"--no-record\",\"--no-subprocess\"]",
+            "\"args_prefix\":[\"request\",\"run\",\"--no-subprocess\"]",
+        ),
+        (
+            "allow-cmd-prefix",
+            "\"args_prefix\":[\"request\",\"run\",\"--no-record\",\"--no-subprocess\"]",
             "\"args_prefix\":[\"request\",\"run\"]",
         ),
         (

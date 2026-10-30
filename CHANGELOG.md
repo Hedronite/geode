@@ -12,6 +12,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+### Changed
+
+- The P0 `FACET_SECRET_KEY` custody argv pins Facet 0.8.0 with `args_prefix` `["request","run","--no-record","--no-subprocess"]`, so a pinned `facet` run cannot start `gh` or `git`. The fixture lint fails when `--no-subprocess` is missing.
+
 ### Fixed
 
 - An identity added with `vault add-recipient --gpub` (or `vault rotate --add-recipient`) can now open its vault: `verify`, `list`, `cat`, `open` and `rotate` unwrap the epoch key from the identity's X25519 recipient entry. Before, only symmetric recipients were matched and the added key failed with an authentication error.
