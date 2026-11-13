@@ -3,7 +3,7 @@ title: Geode changelog
 type: repo-changelog
 status: current
 created: "2026-09-15"
-updated: "2026-10-25"
+updated: "2026-11-13"
 ---
 
 # Changelog
@@ -12,11 +12,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
-### Security
-
-- `rusqlite` 0.40.2 → 0.42.0 (bundled `libsqlite3-sys` 0.38.2 → 0.40.0) to clear RUSTSEC-2026-0459 (CVE-2026-119375). MSRV stays **1.89**; `rusqlite` 0.42 declares the same floor already in the workspace.
-- `async-executor` 1.14.0 → 1.14.1 to replace a yanked crate.
-- `rustix` 1.1.4 → 1.1.6 to clear RUSTSEC-2026-0486 (unsound zero-length xattr buffer).
+## [3.0.1] — 2026-11-13
 
 ### Changed
 
@@ -35,6 +31,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ### Security
 
+- `rusqlite` 0.40.2 → 0.42.0 (bundled `libsqlite3-sys` 0.38.2 → 0.40.0) to clear RUSTSEC-2026-0459 (CVE-2026-119375). MSRV stays **1.89**; `rusqlite` 0.42 declares the same floor already in the workspace.
+- `async-executor` 1.14.0 → 1.14.1 to replace a yanked crate.
+- `rustix` 1.1.4 → 1.1.6 to clear RUSTSEC-2026-0486 (unsound zero-length xattr buffer).
 - `geode open` writes extracted files owner-only (0600 for a 0644 entry; owner bits kept, group and other cleared), created with that mode so plaintext is never briefly world-readable.
 
 ## [3.0.0] — 2026-10-26
@@ -317,7 +316,8 @@ First release. Conformance profile **`core`** (§2): format, crypto, vault init,
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/Hedronite/geode/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/Hedronite/geode/compare/v3.0.1...HEAD
+[3.0.1]: https://github.com/Hedronite/geode/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/Hedronite/geode/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/Hedronite/geode/compare/v1.2.1...v2.0.0
 [1.2.1]: https://github.com/Hedronite/geode/compare/v1.2.0...v1.2.1
