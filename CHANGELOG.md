@@ -12,8 +12,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+### Security
+
+- `rusqlite` 0.40.2 → 0.42.0 (bundled `libsqlite3-sys` 0.38.2 → 0.40.0) to clear RUSTSEC-2026-0459 (CVE-2026-119375). MSRV stays **1.89**; `rusqlite` 0.42 declares the same floor already in the workspace.
+- `async-executor` 1.14.0 → 1.14.1 to replace a yanked crate.
+- `rustix` 1.1.4 → 1.1.6 to clear RUSTSEC-2026-0486 (unsound zero-length xattr buffer).
+
 ### Changed
 
+- Each crate's `rust-tops.yaml` `spec_uri` now points at the public Rust-TOPS specification on GitHub, so the published crates no longer embed an internal vault URI.
 - The P0 `FACET_SECRET_KEY` custody argv pins Facet 0.8.0 with `args_prefix` `["request","run","--no-record","--no-subprocess"]`, so a pinned `facet` run cannot start `gh` or `git`. The fixture lint fails when `--no-subprocess` is missing.
 
 ### Fixed

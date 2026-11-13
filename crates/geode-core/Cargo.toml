@@ -60,7 +60,7 @@ ed25519-dalek = { version = "2", features = ["zeroize"] }
 # at runtime (e.g. CI without a D-Bus secret service) callers fall back to
 # a 0600 file via keyring::store_secret_file.
 keyring = "4"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 # G6 (v034): named redaction for `inject::plan` and its output collector.
 geode-redact = { version = "3.0.0", path = "../geode-redact" }
 # Fix 4: `O_NOFOLLOW` for the pinned `allow_cmds` open in `inject.rs`.

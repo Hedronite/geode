@@ -2,7 +2,7 @@
 protocol:
   id: rust-tops
   version: "1.1.0"
-  spec_uri: "vault:agents/mail_room/Ali.Evan/rust-tops/RUST_TOPS.md"
+  spec_uri: "https://github.com/Hedronite/rust-tops/blob/main/RUST_TOPS.md"
   adopted: "2026-10-25"
 
 crate:
