@@ -88,7 +88,11 @@ pub fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
         data,
         |file| file.sync_all(),
         |from, to| std::fs::rename(from, to),
-        |dir| std::fs::File::open(dir)?.sync_all(),
+        |dir| {
+            #[cfg(test)]
+            record_dir_sync(dir);
+            std::fs::File::open(dir)?.sync_all()
+        },
     )
 }
 
@@ -189,14 +193,16 @@ pub fn init_vault_dir(root: &Path, _vault_id: VaultId, epoch: Epoch) -> Result<(
 }
 
 /// Path for an object file inside a vault epoch (03-format 2).
+///
+/// Pure: it never creates the shard directory. Writers reach
+/// [`write_atomic`], which creates and syncs every missing directory on the
+/// path; reads must not have a directory side effect.
 pub fn object_path(vault_root: &Path, epoch: Epoch, object_id: &ObjectId) -> Result<PathBuf> {
     let objects = vault_root
         .join("epochs")
         .join(format!("{:08}", epoch.0))
         .join("objects");
-    let dir = shard_dir(&objects, object_id);
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir.join(format!("{}.gobj", hex_encode(&object_id.0))))
+    Ok(shard_dir(&objects, object_id).join(format!("{}.gobj", hex_encode(&object_id.0))))
 }
 
 /// Write a sealed object (header bytes + chunk bytes) atomically to the
@@ -221,6 +227,18 @@ pub fn write_object(
 pub fn read_object(vault_root: &Path, epoch: Epoch, object_id: &ObjectId) -> Result<Vec<u8>> {
     let p = object_path(vault_root, epoch, object_id)?;
     Ok(std::fs::read(&p)?)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Directory paths whose fsync the current test thread observed.
+    static DIR_SYNCS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn record_dir_sync(dir: &Path) {
+    DIR_SYNCS.with(|log| log.borrow_mut().push(dir.to_path_buf()));
 }
 
 #[cfg(test)]
@@ -257,6 +275,61 @@ mod tests {
         let read = read_object(&root, Epoch(1), &oid).unwrap();
         assert_eq!(&read[..hdr.len()], hdr);
         assert_eq!(&read[hdr.len()..], chunks);
+    }
+
+    #[test]
+    fn write_object_syncs_new_shard_and_objects_dir() {
+        let d = tempdir().unwrap();
+        let root = d.path().join("v.geode");
+        init_vault_dir(&root, VaultId([1; 16]), Epoch(1)).unwrap();
+        let objects = root.join("epochs").join("00000001").join("objects");
+        let oid = ObjectId([0xab; 16]);
+        let shard = objects.join("ab");
+        assert!(!shard.exists(), "fixture: shard must start missing");
+        DIR_SYNCS.with(|log| log.borrow_mut().clear());
+
+        let path = write_object(&root, Epoch(1), &oid, b"header", b"chunks").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"headerchunks");
+        assert!(shard.is_dir(), "write_object must create the shard");
+
+        let synced = DIR_SYNCS.with(|log| log.borrow().clone());
+        assert!(
+            synced.iter().any(|dir| dir == &shard),
+            "shard dir was not synced: {synced:?}"
+        );
+        assert!(
+            synced.iter().any(|dir| dir == &objects),
+            "objects/ parent was not synced for a new shard: {synced:?}"
+        );
+    }
+
+    #[test]
+    fn object_path_is_pure_and_missing_read_creates_nothing() {
+        let d = tempdir().unwrap();
+        let root = d.path().join("v.geode");
+        init_vault_dir(&root, VaultId([1; 16]), Epoch(1)).unwrap();
+        let oid = ObjectId([0xcd; 16]);
+        let objects = root.join("epochs").join("00000001").join("objects");
+        let shard = objects.join("cd");
+        assert!(!shard.exists());
+
+        let path = object_path(&root, Epoch(1), &oid).unwrap();
+        assert_eq!(path, shard.join("cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd.gobj"));
+        assert!(!shard.exists(), "object_path must not create the shard");
+        assert!(!path.exists());
+
+        assert!(matches!(
+            read_object(&root, Epoch(1), &oid),
+            Err(Error::Io(_))
+        ));
+        assert!(
+            !shard.exists(),
+            "a failed read must not leave an empty shard directory"
+        );
+
+        // Nor a whole epoch directory.
+        let _ = object_path(&root, Epoch(2), &oid).unwrap();
+        assert!(!root.join("epochs").join("00000002").exists());
     }
 
     #[test]
