@@ -224,8 +224,9 @@ pub fn open_name(
 ///
 /// The root component uses `0x00*16`. Directory objects do not exist, so a
 /// deeper component's parent id is `BLAKE3(sealed parent path)[0..16]`.
-/// INTERIM (v310): `vectors/v1/name.json` pins this derivation; change it
-/// only together with the vectors and `rotate::reseal`.
+/// The golden vectors under `vectors/v1/name.json` carry raw `parent_id`
+/// bytes for their fixed inputs; they do not derive them. The unit test
+/// `parent_id_golden` pins this function's exact output bytes.
 #[must_use]
 pub fn parent_id(sealed_parent: Option<&str>) -> [u8; 16] {
     match sealed_parent {
@@ -319,6 +320,29 @@ mod tests {
     /// zero-byte tail pad. The opener still accepts it deterministically; the
     /// MACd manifest is the primary integrity anchor for that case. This test
     /// pins the exact boundary rather than guessing with random tweaks.
+    /// Exact output bytes for the parent-id chain. `vectors/v1/name.json`
+    /// carries raw parent ids; this test pins how they are derived.
+    #[test]
+    fn parent_id_golden() {
+        assert_eq!(parent_id(None), [0u8; 16]);
+        assert_eq!(
+            parent_id(Some("docs")),
+            [
+                0xc2, 0x82, 0x4b, 0x75, 0x61, 0x4d, 0x9c, 0x2b, 0xb4, 0xc0, 0xb7, 0xf9, 0x83, 0xac,
+                0x07, 0x53,
+            ]
+        );
+    }
+
+    /// Exact sealed ciphertext for `a/b` under the test key, vault, and epoch.
+    #[test]
+    fn seal_rel_path_golden() {
+        assert_eq!(
+            seal_rel_path(&nk(), &vid(), EP, "a/b").unwrap(),
+            "ao3vd8s5ni6jbvqefjdo1e8occ10/c10u6umh8d0gi3h71luskcphj780"
+        );
+    }
+
     #[test]
     fn exact_bucket_zero_pad_opens_deterministically() {
         let component = b"0123456789abcdef"; // 16 bytes == the 16 bucket

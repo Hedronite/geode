@@ -354,6 +354,9 @@ pub fn reseal(
         count += 1;
     }
 
+    // Newly sealed base32hex names change the lexical order across epochs;
+    // sort before hashing so the manifest stays in canonical path order.
+    new_entries.sort_by(|a, b| a.path.cmp(&b.path));
     let new_mk = derive_manifest_key(keys.new_ek, vault_id, keys.new_epoch);
     let manifest = Manifest {
         vault_id,
@@ -865,7 +868,19 @@ mod tests {
             bind: false,
         };
         let plain_dir_entry = Entry {
-            path: "plain-dir".to_string(),
+            path: "zzz-dir".to_string(),
+            path_sealed: false,
+            object_id: new_object_id().unwrap(),
+            kind: EntryKind::Dir,
+            plain_len: 0,
+            chunk_count: 0,
+            mode: 0o755,
+            mtime_ms: 0,
+            content_root: [0u8; 32],
+            bind: false,
+        };
+        let aaa_dir_entry = Entry {
+            path: "aaa-dir".to_string(),
             path_sealed: false,
             object_id: new_object_id().unwrap(),
             kind: EntryKind::Dir,
@@ -879,20 +894,31 @@ mod tests {
         let mut entries = old.entries;
         entries.push(sealed_dir_entry);
         entries.push(plain_dir_entry);
+        // Inserted after a later-sorting row: only an explicit sort makes the
+        // manifest canonical again once the sealed names change.
+        entries.push(aaa_dir_entry);
         write_manifest_with(&root, entries);
 
         let (new_epoch, _old_ek, new_ek) = reseal_once(&root, load_recs(&root));
         let new_mk = derive_manifest_key(&new_ek, vid, new_epoch);
         let manifest = read_manifest_file(&root, new_epoch, &new_mk).unwrap();
-        assert_eq!(manifest.entries.len(), 3);
+        assert_eq!(manifest.entries.len(), 4);
+        assert!(
+            manifest.entries.windows(2).all(|w| w[0].path <= w[1].path),
+            "resealed manifest must keep the canonical path order"
+        );
         let dirs: Vec<&Entry> = manifest
             .entries
             .iter()
             .filter(|e| e.kind == EntryKind::Dir)
             .collect();
-        assert_eq!(dirs.len(), 2);
-        let plain = dirs.iter().find(|e| !e.path_sealed).unwrap();
-        assert_eq!(plain.path, "plain-dir");
+        assert_eq!(dirs.len(), 3);
+        for want in ["aaa-dir", "zzz-dir"] {
+            assert!(
+                dirs.iter().any(|e| !e.path_sealed && e.path == want),
+                "plaintext dir {want} was not preserved"
+            );
+        }
         let sealed = dirs.iter().find(|e| e.path_sealed).unwrap();
         assert_ne!(sealed.path, sealed_dir);
         let new_nk = crate::kdf::derive_name_key(&new_ek, vid, new_epoch);
