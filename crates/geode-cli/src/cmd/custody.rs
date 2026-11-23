@@ -1887,6 +1887,16 @@ mod tests {
         )
     }
 
+    fn read_call(a: &mut Raw, fx: &Fx, mode: &str) -> serde_json::Value {
+        let vault = fx.vault().to_str().unwrap().to_owned();
+        a.call(
+            "tools/call",
+            serde_json::json!({"name": "geode_read", "arguments": {
+                "vault": vault, "path": "cfg/note", "mode": mode,
+            }}),
+        )
+    }
+
     fn write_call(a: &mut Raw, fx: &Fx, path: &str, body: &str) -> serde_json::Value {
         let vault = fx.vault().to_str().unwrap().to_owned();
         a.call(
@@ -1899,6 +1909,21 @@ mod tests {
 
     fn limited(resp: &serde_json::Value) -> bool {
         resp["result"]["isError"] == true && tool_err(resp) == "rate_limited"
+    }
+
+    /// The call must be refused by one of `allowed` and must not carry the
+    /// vault secret anywhere in the response.
+    fn assert_closed(resp: &serde_json::Value, allowed: &[&str]) {
+        assert_eq!(resp["result"]["isError"], true, "call was served: {resp}");
+        let code = tool_err(resp);
+        assert!(
+            allowed.contains(&code.as_str()),
+            "unexpected refusal {code}: {resp}"
+        );
+        assert!(
+            !resp.to_string().contains(DUMMY),
+            "secret leaked after rotation: {resp}"
+        );
     }
 
     fn set_grant_rate(fx: &Fx, limit: Option<u32>) {
@@ -1979,6 +2004,64 @@ mod tests {
         let r = run_call(&mut runner, &fx, &RUN_COUNT);
         assert_eq!(tool_err(&r), "vault_epoch_changed", "{r}");
         assert!(!r.to_string().contains(DUMMY));
+    }
+
+    /// Rotate while unlocked, then prove the agent tools (not just
+    /// `geode_run`) fail closed with no secret in the response. Default and
+    /// sealed policy are both covered: a sealed policy may fail earlier while
+    /// the daemon still holds the old epoch's keys, which is equally closed.
+    fn rotated_agent_tools_are_closed(sealed_policy: bool) {
+        let fx = start(Agents::Uids(Vec::new()));
+        if sealed_policy {
+            set_grant_rate(&fx, None);
+        }
+        let tok = token_hex(&fx, Some(ident::euid()));
+        unlock_once(&fx);
+        let mut a = conn(&fx, &tok);
+        let list_before = list_call(&mut a, &fx);
+        assert!(list_before["result"]["isError"].is_null(), "{list_before}");
+        let read_before = read_call(&mut a, &fx, "text");
+        assert!(
+            read_before.to_string().contains(DUMMY),
+            "fixture did not read before rotation: {read_before}"
+        );
+
+        let p = |s: &str| fx.dir.join(s).to_str().unwrap().to_owned();
+        geode(&[
+            "--key",
+            &p("k.gkey"),
+            "vault",
+            "rotate",
+            &p("v.geode"),
+            "--yes",
+            "--reseal",
+        ]);
+
+        let allowed: &[&str] = if sealed_policy {
+            &["vault_epoch_changed", "auth_fail"]
+        } else {
+            &["vault_epoch_changed"]
+        };
+        let mut fresh = conn(&fx, &tok);
+        for (label, resp) in [
+            ("list", list_call(&mut a, &fx)),
+            ("read", read_call(&mut a, &fx, "text")),
+            ("list_fresh_conn", list_call(&mut fresh, &fx)),
+            ("read_fresh_conn", read_call(&mut fresh, &fx, "text")),
+        ] {
+            println!("{label}: {resp}");
+            assert_closed(&resp, allowed);
+        }
+    }
+
+    #[test]
+    fn rotated_vault_refuses_agent_tools_default_policy() {
+        rotated_agent_tools_are_closed(false);
+    }
+
+    #[test]
+    fn rotated_vault_refuses_agent_tools_sealed_policy() {
+        rotated_agent_tools_are_closed(true);
     }
 
     #[test]
