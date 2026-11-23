@@ -405,3 +405,86 @@ fn mount_verbs_in_help() {
     assert!(text.contains("mount"), "help lists mount: {text}");
     assert!(text.contains("unmount"), "help lists unmount: {text}");
 }
+
+// ---- v310 G2: a persisted `Dir` row must not break verify ----
+
+fn g2_ok(dir: &Path, args: &[&str]) -> Output {
+    let out = geode(dir, args);
+    assert!(
+        out.status.success(),
+        "geode {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out
+}
+
+fn g2_unhex(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+        .collect()
+}
+
+/// Manifest key for the throwaway fixture vault (tests only).
+fn g2_manifest_key(
+    dir: &Path,
+) -> (
+    geode_grotto::kdf::VaultId,
+    geode_grotto::kdf::Epoch,
+    [u8; 32],
+) {
+    let root = dir.join("v.geode");
+    let raw = std::fs::read(dir.join("k.gkey")).expect("gkey");
+    let isk =
+        geode_grotto::kdf::IdentitySecret::from_bytes(raw[6..38].try_into().expect("isk bytes"));
+    let header: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("header.json")).expect("header")).unwrap();
+    let vault_id = geode_grotto::kdf::VaultId(
+        g2_unhex(header["vault_id"].as_str().unwrap())
+            .try_into()
+            .unwrap(),
+    );
+    let epoch = geode_grotto::kdf::Epoch(u32::try_from(header["epoch"].as_u64().unwrap()).unwrap());
+    let recipients: geode_grotto::recipients::Recipients =
+        serde_json::from_slice(&std::fs::read(root.join("recipients.json")).expect("recipients"))
+            .unwrap();
+    let ek = geode_grotto::recipients::unwrap_for_identity(&recipients, &isk, vault_id, epoch)
+        .expect("epoch key");
+    (
+        vault_id,
+        epoch,
+        geode_grotto::kdf::derive_manifest_key(&ek, vault_id, epoch),
+    )
+}
+
+#[test]
+fn persisted_dir_row_verifies_full_and_cheap() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    g2_ok(dir, &["keygen", "--insecure-plaintext", "k.gkey"]);
+    g2_ok(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]);
+    std::fs::write(dir.join("note.txt"), b"dir row\n").expect("write");
+    g2_ok(dir, &["--key", "k.gkey", "seal", "note.txt", "v.geode"]);
+    let (_vault_id, epoch, manifest_key) = g2_manifest_key(dir);
+    let root = dir.join("v.geode");
+    let mut manifest =
+        geode_grotto::snapshot::read_manifest_file(&root, epoch, &manifest_key).unwrap();
+    manifest.entries.push(geode_grotto::manifest::Entry {
+        path: "mountdir".into(),
+        path_sealed: false,
+        object_id: geode_grotto::kdf::ObjectId([0x33; 16]),
+        kind: geode_grotto::manifest::EntryKind::Dir,
+        plain_len: 0,
+        chunk_count: 0,
+        mode: 0o755,
+        mtime_ms: 0,
+        content_root: [0u8; 32],
+        bind: false,
+    });
+    manifest.entries.sort_by(|a, b| a.path.cmp(&b.path));
+    manifest.entry_count = u32::try_from(manifest.entries.len()).unwrap();
+    manifest.root = geode_grotto::manifest::entries_root(&manifest.entries).unwrap();
+    geode_grotto::snapshot::write_manifest_file(&root, epoch, &manifest, &manifest_key).unwrap();
+    g2_ok(dir, &["--key", "k.gkey", "verify", "v.geode"]);
+    g2_ok(dir, &["--key", "k.gkey", "verify", "v.geode", "--cheap"]);
+}

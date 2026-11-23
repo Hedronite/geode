@@ -108,13 +108,55 @@ impl From<rusqlite::Error> for AuditError {
     }
 }
 
+#[cfg(unix)]
+fn ensure_private_file(path: &Path) -> Result<(), AuditError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Tighten an existing audit file (or a WAL sidecar) to `0600`, ignoring a
+/// file SQLite has not created yet.
+#[cfg(unix)]
+fn tighten_private_file(path: &Path) -> Result<(), AuditError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    match std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn ensure_private_file(_path: &Path) -> Result<(), AuditError> {
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn tighten_private_file(_path: &Path) -> Result<(), AuditError> {
+    Ok(())
+}
+
 /// Open or create an append-only WAL database at `path`.
+///
+/// The database file is created/opened at mode `0600` on Unix so audit rows
+/// (paths, principals, hosts) are not world-readable regardless of umask.
 pub fn open(path: &Path) -> Result<Chain, AuditError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
         }
     }
+    ensure_private_file(path)?;
+    tighten_private_file(path)?;
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.execute_batch(
@@ -151,6 +193,12 @@ pub fn open(path: &Path) -> Result<Chain, AuditError> {
         END;
         ",
     )?;
+    tighten_private_file(path)?;
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_owned();
+        sidecar.push(suffix);
+        tighten_private_file(Path::new(&sidecar))?;
+    }
     Ok(Chain { conn })
 }
 
@@ -736,5 +784,34 @@ mod tests {
             .conn
             .execute("UPDATE audit SET outcome = 'nope' WHERE seq = 1", []);
         assert!(blocked.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_db_is_private_0600() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state/audit.db");
+        let _chain = open(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "audit.db must be 0600");
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = path.as_os_str().to_owned();
+            sidecar.push(suffix);
+            let sidecar = std::path::Path::new(&sidecar);
+            if sidecar.exists() {
+                let mode = std::fs::metadata(sidecar).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "audit sidecar must be 0600");
+            }
+        }
+
+        // A pre-existing permissive file is tightened on open.
+        let loose = dir.path().join("loose/audit.db");
+        std::fs::create_dir_all(loose.parent().unwrap()).unwrap();
+        std::fs::write(&loose, b"").unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let _chain = open(&loose).unwrap();
+        let mode = std::fs::metadata(&loose).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "an existing audit.db must be tightened");
     }
 }

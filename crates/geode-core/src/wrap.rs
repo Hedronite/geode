@@ -14,6 +14,7 @@ use crate::kdf::domains;
 use crate::kdf::IdentitySecret;
 use crate::{Error, Result};
 use aegis::aegis256x2::{Aegis256X2, Key, Nonce};
+use zeroize::Zeroizing;
 
 /// Argon2id parameters stored in the `GKEY` file (02-cryptography 6.2).
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -130,11 +131,11 @@ pub fn wrap_identity_passphrase_with(
     wrap_nonce: [u8; 32],
     params: Argon2Params,
 ) -> Result<WrappedKey> {
-    let wk = derive_wrap_key(passphrase, &salt, params)?;
+    let wk = Zeroizing::new(derive_wrap_key(passphrase, &salt, params)?);
     let ad = wrap_ad(&salt, params);
     let ctx = Aegis256X2::<16>::new(&wk, &wrap_nonce);
-    let mut wrapped = *isk.as_bytes();
-    let tag = ctx.encrypt_in_place(&mut wrapped, &ad);
+    let mut wrapped = Zeroizing::new(*isk.as_bytes());
+    let tag = ctx.encrypt_in_place(&mut wrapped[..], &ad);
     Ok(WrappedKey {
         salt,
         argon2_m_kib: params.m_kib,
@@ -142,7 +143,7 @@ pub fn wrap_identity_passphrase_with(
         argon2_p: params.p,
         wrap_nonce,
         wrap_tag: tag,
-        wrapped_isk: wrapped,
+        wrapped_isk: *wrapped,
     })
 }
 
@@ -159,13 +160,13 @@ pub fn unwrap_identity_passphrase(
         t: wrapped.argon2_t,
         p: wrapped.argon2_p,
     };
-    let wk = derive_wrap_key(passphrase, &wrapped.salt, params)?;
+    let wk = Zeroizing::new(derive_wrap_key(passphrase, &wrapped.salt, params)?);
     let ad = wrap_ad(&wrapped.salt, params);
     let ctx = Aegis256X2::<16>::new(&wk, &wrapped.wrap_nonce);
-    let mut buf = wrapped.wrapped_isk;
-    ctx.decrypt_in_place(&mut buf, &wrapped.wrap_tag, &ad)
+    let mut buf = Zeroizing::new(wrapped.wrapped_isk);
+    ctx.decrypt_in_place(&mut buf[..], &wrapped.wrap_tag, &ad)
         .map_err(|_| Error::AuthFail)?;
-    Ok(IdentitySecret::from_bytes(buf))
+    Ok(IdentitySecret::from_bytes(*buf))
 }
 
 #[cfg(test)]

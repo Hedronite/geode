@@ -41,8 +41,8 @@
 
 use crate::chunk::DEFAULT_CHUNK_SIZE;
 use crate::kdf::{
-    derive_epoch_key, derive_manifest_key, derive_meta_key, Epoch, EpochKey, IdentitySecret,
-    VaultId,
+    derive_epoch_key, derive_manifest_key, derive_meta_key, derive_name_key, Epoch, EpochKey,
+    IdentitySecret, VaultId,
 };
 use crate::manifest::{entries_root, Manifest};
 use crate::object::{open_object, seal_object, ObjectSpec, HEADER_SIZE};
@@ -272,19 +272,54 @@ pub fn reseal(
     let mut new_entries: Vec<crate::manifest::Entry> =
         Vec::with_capacity(old_manifest.entries.len());
     let mut count = 0u64;
+    let old_name_key = derive_name_key(keys.old_ek, vault_id, keys.old_epoch);
+    let new_name_key = derive_name_key(keys.new_ek, vault_id, keys.new_epoch);
     for old_entry in &old_manifest.entries {
-        let raw = vault::read_object(vault_root, keys.old_epoch, &old_entry.object_id)?;
-        if raw.len() < HEADER_SIZE {
-            return Err(Error::AuthFail);
+        // Sealed names are bound to (NameKey, epoch), so every component is
+        // opened under the old epoch and re-sealed under the new one.
+        let new_path = if old_entry.path_sealed {
+            let plain = crate::name::open_rel_path(
+                &old_name_key,
+                &vault_id,
+                keys.old_epoch,
+                &old_entry.path,
+            )?;
+            crate::name::seal_rel_path(&new_name_key, &vault_id, keys.new_epoch, &plain)?
+        } else {
+            old_entry.path.clone()
+        };
+        if old_entry.kind == crate::manifest::EntryKind::Dir {
+            // A `kind: dir` row names no `.gobj` (03-format 5); reseal its
+            // name (above) but never read or rewrite an object for it.
+            new_entries.push(crate::manifest::Entry {
+                path: new_path,
+                ..old_entry.clone()
+            });
+            continue;
         }
-        let bind: &[u8] = if old_entry.bind {
+        let old_bind: &[u8] = if old_entry.bind {
             old_entry.path.as_bytes()
         } else {
             b""
         };
-        let (_old_hdr, plaintext) =
-            open_object(keys.old_ek, &raw[..HEADER_SIZE], &raw[HEADER_SIZE..], bind)?;
+        let raw = vault::read_object(vault_root, keys.old_epoch, &old_entry.object_id)?;
+        if raw.len() < HEADER_SIZE {
+            return Err(Error::AuthFail);
+        }
+        let (_old_hdr, plaintext) = open_object(
+            keys.old_ek,
+            &raw[..HEADER_SIZE],
+            &raw[HEADER_SIZE..],
+            old_bind,
+        )?;
         let new_oid = vault::new_object_id()?;
+        // A re-sealed path changes the bind string; bind the NEW stored path
+        // so the new-epoch `open_object` check passes.
+        let new_bind: &[u8] = if old_entry.bind {
+            new_path.as_bytes()
+        } else {
+            b""
+        };
         let sealed = seal_object(
             keys.new_ek,
             &ObjectSpec {
@@ -292,7 +327,7 @@ pub fn reseal(
                 epoch: keys.new_epoch,
                 object_id: new_oid,
                 chunk_size: DEFAULT_CHUNK_SIZE,
-                path_bind: bind,
+                path_bind: new_bind,
             },
             &plaintext,
         )?;
@@ -304,7 +339,7 @@ pub fn reseal(
             &sealed.chunks,
         )?;
         let new_entry = crate::manifest::Entry {
-            path: old_entry.path.clone(),
+            path: new_path,
             path_sealed: old_entry.path_sealed,
             object_id: new_oid,
             kind: old_entry.kind,
@@ -319,6 +354,9 @@ pub fn reseal(
         count += 1;
     }
 
+    // Newly sealed base32hex names change the lexical order across epochs;
+    // sort before hashing so the manifest stays in canonical path order.
+    new_entries.sort_by(|a, b| a.path.cmp(&b.path));
     let new_mk = derive_manifest_key(keys.new_ek, vault_id, keys.new_epoch);
     let manifest = Manifest {
         vault_id,
@@ -675,6 +713,220 @@ mod tests {
     // block. They cover reseal, dropped-sk-reads, policy re-seal, and the hybrid
     // stub. Helpers (isk/vault_id/key_id/build_vault/load_recs) are defined in
     // rotate_c.rs and visible here because both files are pasted into one module.
+
+    fn reseal_once(
+        root: &std::path::Path,
+        keep: Vec<Recipient>,
+    ) -> (Epoch, crate::kdf::EpochKey, crate::kdf::EpochKey) {
+        let plan = RotatePlan {
+            vault_id: vault_id(),
+            old_epoch: Epoch(1),
+            context_label: "test",
+            keep,
+        };
+        let out = rotate_epoch(&isk(), root, &plan, GEN, GEN_AT).unwrap();
+        reseal(
+            root,
+            vault_id(),
+            &EpochKeys {
+                old_epoch: Epoch(1),
+                old_ek: &out.old_ek,
+                new_epoch: out.new_epoch,
+                new_ek: &out.new_ek,
+            },
+            &RotationStamp {
+                generator: GEN,
+                generated_at: GEN_AT + 1,
+            },
+        )
+        .unwrap();
+        let old = crate::kdf::EpochKey::from_bytes(*out.old_ek.as_bytes());
+        let new = crate::kdf::EpochKey::from_bytes(*out.new_ek.as_bytes());
+        (out.new_epoch, old, new)
+    }
+
+    fn write_manifest_with(root: &std::path::Path, entries: Vec<Entry>) {
+        let vid = vault_id();
+        let mk = derive_manifest_key(
+            &crate::kdf::derive_epoch_key(&isk(), vid, Epoch(1), "test").unwrap(),
+            vid,
+            Epoch(1),
+        );
+        let manifest = Manifest {
+            vault_id: vid,
+            epoch: Epoch(1),
+            suite: crate::SUITE_0X01,
+            flags: 0,
+            generated_at: GEN_AT,
+            generator: GEN.to_string(),
+            root: crate::manifest::entries_root(&entries).unwrap(),
+            entry_count: u32::try_from(entries.len()).unwrap(),
+            total_plain_bytes: entries.iter().map(|e| e.plain_len).sum(),
+            total_cipher_bytes: entries.iter().map(|e| e.plain_len).sum(),
+            entries,
+        };
+        write_manifest_file(root, Epoch(1), &manifest, &mk).unwrap();
+    }
+
+    #[test]
+    fn reseal_reseals_sealed_names_and_rebinds_the_new_path() {
+        let (_d, root, _oid, _rsk) = build_vault();
+        let vid = vault_id();
+        let ek = crate::kdf::derive_epoch_key(&isk(), vid, Epoch(1), "test").unwrap();
+        let nk = crate::kdf::derive_name_key(&ek, vid, Epoch(1));
+        let sealed_path = crate::name::seal_rel_path(&nk, &vid, Epoch(1), "docs/a.txt").unwrap();
+        let body = b"bind-secret";
+        let oid = new_object_id().unwrap();
+        let sealed = seal_object(
+            &ek,
+            &ObjectSpec {
+                vault_id: vid,
+                epoch: Epoch(1),
+                object_id: oid,
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: sealed_path.as_bytes(),
+            },
+            body,
+        )
+        .unwrap();
+        write_object(
+            &root,
+            Epoch(1),
+            &oid,
+            &sealed.header.to_bytes(),
+            &sealed.chunks,
+        )
+        .unwrap();
+        write_manifest_with(
+            &root,
+            vec![Entry {
+                path: sealed_path.clone(),
+                path_sealed: true,
+                object_id: oid,
+                kind: EntryKind::File,
+                plain_len: body.len() as u64,
+                chunk_count: sealed.header.chunk_count,
+                mode: 0o644,
+                mtime_ms: 0,
+                content_root: sealed.content_root,
+                bind: true,
+            }],
+        );
+
+        let (new_epoch, _old_ek, new_ek) = reseal_once(&root, load_recs(&root));
+        let new_mk = derive_manifest_key(&new_ek, vid, new_epoch);
+        let manifest = read_manifest_file(&root, new_epoch, &new_mk).unwrap();
+        let entry = &manifest.entries[0];
+        assert!(entry.path_sealed && entry.bind);
+        assert_ne!(
+            entry.path, sealed_path,
+            "sealed name must change with the epoch"
+        );
+        let new_nk = crate::kdf::derive_name_key(&new_ek, vid, new_epoch);
+        assert_eq!(
+            crate::name::open_rel_path(&new_nk, &vid, new_epoch, &entry.path).unwrap(),
+            "docs/a.txt"
+        );
+        let raw = crate::vault::read_object(&root, new_epoch, &entry.object_id).unwrap();
+        let (_h, plain) = open_object(
+            &new_ek,
+            &raw[..HEADER_SIZE],
+            &raw[HEADER_SIZE..],
+            entry.path.as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(plain, body);
+        // The old bind string no longer authenticates the new object.
+        assert!(open_object(
+            &new_ek,
+            &raw[..HEADER_SIZE],
+            &raw[HEADER_SIZE..],
+            sealed_path.as_bytes()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn reseal_skips_dir_objects_and_reseals_sealed_dir_names() {
+        let (_d, root, _oid, _rsk) = build_vault();
+        let vid = vault_id();
+        let ek = crate::kdf::derive_epoch_key(&isk(), vid, Epoch(1), "test").unwrap();
+        let nk = crate::kdf::derive_name_key(&ek, vid, Epoch(1));
+        let sealed_dir = crate::name::seal_rel_path(&nk, &vid, Epoch(1), "sealed-dir").unwrap();
+        let mk = derive_manifest_key(&ek, vid, Epoch(1));
+        let old = read_manifest_file(&root, Epoch(1), &mk).unwrap();
+        let sealed_dir_entry = Entry {
+            path: sealed_dir.clone(),
+            path_sealed: true,
+            object_id: new_object_id().unwrap(),
+            kind: EntryKind::Dir,
+            plain_len: 0,
+            chunk_count: 0,
+            mode: 0o755,
+            mtime_ms: 0,
+            content_root: [0u8; 32],
+            bind: false,
+        };
+        let plain_dir_entry = Entry {
+            path: "zzz-dir".to_string(),
+            path_sealed: false,
+            object_id: new_object_id().unwrap(),
+            kind: EntryKind::Dir,
+            plain_len: 0,
+            chunk_count: 0,
+            mode: 0o755,
+            mtime_ms: 0,
+            content_root: [0u8; 32],
+            bind: false,
+        };
+        let aaa_dir_entry = Entry {
+            path: "aaa-dir".to_string(),
+            path_sealed: false,
+            object_id: new_object_id().unwrap(),
+            kind: EntryKind::Dir,
+            plain_len: 0,
+            chunk_count: 0,
+            mode: 0o755,
+            mtime_ms: 0,
+            content_root: [0u8; 32],
+            bind: false,
+        };
+        let mut entries = old.entries;
+        entries.push(sealed_dir_entry);
+        entries.push(plain_dir_entry);
+        // Inserted after a later-sorting row: only an explicit sort makes the
+        // manifest canonical again once the sealed names change.
+        entries.push(aaa_dir_entry);
+        write_manifest_with(&root, entries);
+
+        let (new_epoch, _old_ek, new_ek) = reseal_once(&root, load_recs(&root));
+        let new_mk = derive_manifest_key(&new_ek, vid, new_epoch);
+        let manifest = read_manifest_file(&root, new_epoch, &new_mk).unwrap();
+        assert_eq!(manifest.entries.len(), 4);
+        assert!(
+            manifest.entries.windows(2).all(|w| w[0].path <= w[1].path),
+            "resealed manifest must keep the canonical path order"
+        );
+        let dirs: Vec<&Entry> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.kind == EntryKind::Dir)
+            .collect();
+        assert_eq!(dirs.len(), 3);
+        for want in ["aaa-dir", "zzz-dir"] {
+            assert!(
+                dirs.iter().any(|e| !e.path_sealed && e.path == want),
+                "plaintext dir {want} was not preserved"
+            );
+        }
+        let sealed = dirs.iter().find(|e| e.path_sealed).unwrap();
+        assert_ne!(sealed.path, sealed_dir);
+        let new_nk = crate::kdf::derive_name_key(&new_ek, vid, new_epoch);
+        assert_eq!(
+            crate::name::open_rel_path(&new_nk, &vid, new_epoch, &sealed.path).unwrap(),
+            "sealed-dir"
+        );
+    }
 
     #[test]
     fn reseal_rewrites_objects_under_new_ek() {

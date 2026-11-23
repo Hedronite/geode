@@ -918,13 +918,27 @@ mod tests {
         PinnedExe { fd: f.into(), meta }
     }
 
-    /// A temp dir with a copy of `src` at `prog` (mode 0755). Returns the
-    /// canonical `prog`.
-    fn copy_exe(dir: &Path, src: &str) -> PathBuf {
+    /// A rustc-compiled echo (args joined by a space + newline). Ubuntu 26.04
+    /// ships `/bin/echo` as a uutils multicall symlink, so copying or
+    /// canonicalizing it runs coreutils under the wrong argv[0]; a small rust
+    /// binary behaves identically on Linux and macOS.
+    fn echo_helper(dir: &Path, tag: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::fs::canonicalize(dir).unwrap();
-        let prog = dir.join("prog");
-        std::fs::copy(std::fs::canonicalize(src).unwrap(), &prog).unwrap();
+        let src = dir.join(format!("{tag}.rs"));
+        std::fs::write(
+            &src,
+            "fn main() { let args: Vec<String> = std::env::args().skip(1).collect(); println!(\"{}\", args.join(\" \")); }\n",
+        )
+        .unwrap();
+        let prog = dir.join(tag);
+        let built = std::process::Command::new("rustc")
+            .arg(&src)
+            .arg("-o")
+            .arg(&prog)
+            .status()
+            .expect("rustc echo helper");
+        assert!(built.success(), "rustc echo helper");
         std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o755)).unwrap();
         prog
     }
@@ -940,7 +954,7 @@ mod tests {
     /// pinned, and a hook that renames a copy of `/bin/sh` over `prog`
     /// before exec.
     fn swapped_spec(dir: &Path) -> (SpawnSpec, PinnedExe) {
-        let prog = copy_exe(dir, "/bin/echo");
+        let prog = echo_helper(dir, "echo-helper");
         let pinned = pin(&prog);
         let evil = dir.join("evil");
         std::fs::copy(sh(), &evil).unwrap();
@@ -994,14 +1008,16 @@ mod tests {
 
     #[test]
     fn pinned_program_runs_from_its_fd() {
-        // Not a copy: macOS kills a relocated copy of a platform binary.
-        let prog = std::fs::canonicalize("/bin/echo").unwrap();
+        // A rustc binary, not a relocated platform image.
+        let dir = tmpdir("pin-fd");
+        let prog = echo_helper(&dir, "echo-fd");
         let pinned = pin(&prog);
         let mut s = spec("", Duration::from_secs(10));
         s.program = prog;
         s.args = vec!["pinned-ok".into()];
         let (o, out) = run(s, pinned).unwrap();
         assert_eq!((o.exit_code, out.as_str()), (Some(0), "pinned-ok\n"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(target_os = "linux")]
@@ -1033,7 +1049,7 @@ mod tests {
     fn write_in_place_after_verify_is_refused() {
         use std::io::Write as _;
         let dir = tmpdir("pin-write");
-        let prog = copy_exe(&dir, "/bin/echo");
+        let prog = echo_helper(&dir, "echo-helper");
         let pinned = pin(&prog);
         let mut s = spec("", Duration::from_secs(10));
         s.program = prog.clone();
@@ -1078,7 +1094,7 @@ mod tests {
     fn group_writable_pin_is_refused_on_macos() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tmpdir("pin-mode");
-        let prog = copy_exe(&dir, "/bin/echo");
+        let prog = echo_helper(&dir, "echo-helper");
         std::fs::set_permissions(&prog, std::fs::Permissions::from_mode(0o775)).unwrap();
         let pinned = pin(&prog);
         let mut s = spec("", Duration::from_secs(10));

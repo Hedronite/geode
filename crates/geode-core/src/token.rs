@@ -2,7 +2,10 @@
 //!
 //! A token is **not the ISK**. `TokenKey = BLAKE3-KDF(EK, "geode/v1/token",
 //! token_id)`. Tokens only narrow policy (10-policy 2). TTL 15m default /
-//! 12h max. Killing the daemon destroys tokens.
+//! 12h max. A `GTOK` is stateless: it derives from the vault `EK`, so it
+//! stays valid across custody-daemon restarts while the vault epoch is
+//! unchanged, until `not_after`. Revocation requires rotating the epoch;
+//! killing the daemon does not revoke issued tokens.
 //!
 //! G2a: real issue/inspect. The sealed wire format is
 //! `GTOK(4) || suite(1) || token_id(16) || tag(16) || ciphertext`, where the
@@ -20,6 +23,7 @@ use crate::policy::{Op, PrincipalId};
 use crate::{assert_magic, assert_suite, Error, Result, MAGIC_GTOK, SUITE_0X01};
 use aegis::aegis256x2::{Aegis256X2, Key, Nonce};
 use secrecy::{ExposeSecret, SecretBox};
+use zeroize::Zeroizing;
 
 /// Default token TTL: 15 minutes (02-cryptography 9).
 pub const DEFAULT_TTL_SECS: u64 = 15 * 60;
@@ -114,10 +118,10 @@ impl Token {
 /// Distinct from `NameKey` / `ManifestKey` by domain string, so a token key
 /// cannot be replayed as a manifest or name key.
 fn derive_token_key(ek: &EpochKey, token_id: &TokenId) -> [u8; 32] {
-    let mut km = Vec::with_capacity(32 + 16);
+    let mut km = Zeroizing::new(Vec::with_capacity(32 + 16));
     km.extend_from_slice(ek.as_bytes());
     km.extend_from_slice(&token_id.0);
-    blake3::derive_key(domains::TOKEN, &km)
+    blake3::derive_key(domains::TOKEN, &km[..])
 }
 
 /// Per-token AEGIS-256-X2 nonce, derived from `TokenKey` + `token_id`.

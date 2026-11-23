@@ -21,6 +21,7 @@
 //! `unlock` and `lock` are refused for a peer in `geode-agents`. `status`
 //! prints no key bytes. Identity decisions live in `geode_os::ident`.
 
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead as _, BufReader, IsTerminal as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -45,8 +46,17 @@ use geode_grotto::policy::Op;
 const IDLE_LOCK: Duration = geode_grotto::session::DEFAULT_IDLE_LOCK;
 /// JSON-RPC error code for every custody refusal; `data.code` names it.
 const CUSTODY_ERROR: i64 = -32000;
-const RATE_MAX: u32 = 128;
+/// Default per-token call budget when a grant omits `max_calls_per_10s`.
+const RATE_DEFAULT: u32 = 128;
+/// Largest grant value honoured; policy validation does not bound it.
+const RATE_MAX_GRANT: u32 = 10_000;
+/// Sliding window for every budget.
 const RATE_WINDOW: Duration = Duration::from_secs(10);
+/// Bounded budget for failed authentication, per peer uid. A valid token
+/// never consumes it, so unauthenticated spam cannot starve real callers.
+const PREAUTH_MAX: usize = 512;
+/// How often expired queue entries are swept from the maps.
+const RATE_EVICT_EVERY: Duration = Duration::from_secs(60);
 const AGENT_TOOLS: [&str; 3] = ["geode_list", "geode_read", "geode_write"];
 const RUN_TOOL: &str = "geode_run";
 /// `geode_run` default and ceiling, in seconds (design §3).
@@ -486,6 +496,8 @@ pub(crate) struct Daemon {
     agents: Agents,
     idle: Duration,
     session: Mutex<Option<Unlocked>>,
+    /// Daemon-wide sliding-window budgets; survives reconnects.
+    rate: Mutex<RateLimiter>,
     audit_db: PathBuf,
     child: ChildRule,
     /// Unit tests that need a child without a network namespace. Release
@@ -536,12 +548,76 @@ impl From<Error> for Refusal {
     }
 }
 
+/// Daemon-wide sliding-window rate state. Keyed by `(token_id, peer_uid)` so
+/// a reconnect cannot reset a budget, and by peer uid for unauthenticated
+/// attempts. Queues hold only timestamps inside `RATE_WINDOW`; entries are
+/// swept periodically so the maps cannot grow without bound.
+#[derive(Default)]
+struct RateLimiter {
+    tokens: HashMap<([u8; 16], u32), VecDeque<Instant>>,
+    failed_auth: HashMap<u32, VecDeque<Instant>>,
+    last_evict: Option<Instant>,
+}
+
+impl RateLimiter {
+    fn prune(queue: &mut VecDeque<Instant>, now: Instant) {
+        while queue
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) >= RATE_WINDOW)
+        {
+            queue.pop_front();
+        }
+    }
+
+    fn allow(queue: &mut VecDeque<Instant>, limit: usize, now: Instant) -> bool {
+        Self::prune(queue, now);
+        if queue.len() >= limit {
+            false
+        } else {
+            queue.push_back(now);
+            true
+        }
+    }
+
+    fn maybe_evict(&mut self, now: Instant) {
+        if self
+            .last_evict
+            .is_some_and(|t| now.saturating_duration_since(t) < RATE_EVICT_EVERY)
+        {
+            return;
+        }
+        for queue in self
+            .tokens
+            .values_mut()
+            .chain(self.failed_auth.values_mut())
+        {
+            Self::prune(queue, now);
+        }
+        self.tokens.retain(|_, q| !q.is_empty());
+        self.failed_auth.retain(|_, q| !q.is_empty());
+        self.last_evict = Some(now);
+    }
+
+    /// Count one authenticated call against `(token_id, peer_uid)`.
+    fn allow_token(&mut self, token_id: [u8; 16], peer_uid: u32, limit: u32, now: Instant) -> bool {
+        self.maybe_evict(now);
+        let queue = self.tokens.entry((token_id, peer_uid)).or_default();
+        Self::allow(queue, usize::try_from(limit).unwrap_or(usize::MAX), now)
+    }
+
+    /// Count one failed authentication against the peer. Valid tokens never
+    /// touch this map.
+    fn allow_failed_auth(&mut self, peer_uid: u32, now: Instant) -> bool {
+        self.maybe_evict(now);
+        let queue = self.failed_auth.entry(peer_uid).or_default();
+        Self::allow(queue, PREAUTH_MAX, now)
+    }
+}
+
 /// Per-connection state: the kernel's peer and the bound token.
 struct Conn {
     peer: PeerCred,
     sealed: Option<Vec<u8>>,
-    calls: u32,
-    window: Instant,
 }
 
 impl Daemon {
@@ -559,6 +635,7 @@ impl Daemon {
             agents,
             idle: IDLE_LOCK,
             session: Mutex::new(None),
+            rate: Mutex::new(RateLimiter::default()),
             audit_db: paths.audit_db,
             child,
             #[cfg(test)]
@@ -592,12 +669,7 @@ impl Daemon {
 
     fn handle(&self, stream: UnixStream) -> Result<()> {
         let peer = ident::peer_cred(&stream).map_err(Error::Io)?;
-        let mut conn = Conn {
-            peer,
-            sealed: None,
-            calls: 0,
-            window: Instant::now(),
-        };
+        let mut conn = Conn { peer, sealed: None };
         let reader = BufReader::new(stream.try_clone().map_err(Error::Io)?);
         let mut writer = stream;
         for line in reader.lines() {
@@ -667,7 +739,10 @@ impl Daemon {
     ) -> std::result::Result<serde_json::Value, Refusal> {
         if let Some(tok) = params["_meta"]["geode_token"].as_str() {
             let sealed = normalize_sealed(tok.as_bytes())?;
-            self.verify_token(conn.peer, &sealed)?;
+            if let Err(err) = self.verify_token(conn.peer, &sealed) {
+                self.note_failed_auth(conn.peer.uid)?;
+                return Err(err);
+            }
             conn.sealed = Some(sealed);
         }
         Ok(serde_json::json!({
@@ -718,6 +793,78 @@ impl Daemon {
             .ok_or_else(|| refusal("locked", "custody is locked"))
     }
 
+    /// Count one failed authentication against this peer. A valid token never
+    /// touches this budget, so unauthenticated spam cannot starve it.
+    fn note_failed_auth(&self, peer_uid: u32) -> std::result::Result<(), Refusal> {
+        let mut rate = self
+            .rate
+            .lock()
+            .map_err(|_| refusal("io", "rate map poisoned"))?;
+        if rate.allow_failed_auth(peer_uid, Instant::now()) {
+            Ok(())
+        } else {
+            Err(refusal(
+                "rate_limited",
+                "too many unauthenticated calls; retry later",
+            ))
+        }
+    }
+
+    /// The session context must still match the epoch on disk. Called inside
+    /// the same lock acquisition that reads the state it guards, so a rotation
+    /// cannot slip between the check and the read.
+    fn disk_epoch_matches(&self, ctx: &cmd::VaultCtx) -> std::result::Result<(), Refusal> {
+        let (vault_id, epoch) = disk_header_identity(&self.vault)?;
+        if vault_id != cmd::hex(&ctx.vault_id.0) || epoch != ctx.epoch.0 {
+            return Err(refusal(
+                "vault_epoch_changed",
+                "vault rotated while custody was unlocked; relock and unlock",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The token's principal grant caps calls per 10 s. Policy is re-read so a
+    /// tightened grant applies to already-issued tokens.
+    fn grant_rate_limit(&self, claims: &Token) -> std::result::Result<u32, Refusal> {
+        let mut guard = self
+            .session
+            .lock()
+            .map_err(|_| refusal("io", "session poisoned"))?;
+        let s = self.live(&mut guard)?;
+        let mk = geode_grotto::kdf::derive_meta_key(&s.ctx.ek, s.ctx.vault_id, s.ctx.epoch);
+        let policy =
+            geode_grotto::policy::load_policy(&self.vault, &mk, s.ctx.vault_id, s.ctx.epoch)?;
+        let limit = policy
+            .principals
+            .iter()
+            .find(|g| g.id == claims.principal_id)
+            .and_then(|g| g.max_calls_per_10s)
+            .unwrap_or(RATE_DEFAULT);
+        Ok(limit.clamp(1, RATE_MAX_GRANT))
+    }
+
+    /// One authenticated call against the daemon-wide `(token, peer)` window.
+    fn rate_token(
+        &self,
+        claims: &Token,
+        peer_uid: u32,
+        limit: u32,
+    ) -> std::result::Result<(), Refusal> {
+        let mut rate = self
+            .rate
+            .lock()
+            .map_err(|_| refusal("io", "rate map poisoned"))?;
+        if rate.allow_token(claims.token_id.0, peer_uid, limit, Instant::now()) {
+            Ok(())
+        } else {
+            Err(refusal(
+                "rate_limited",
+                format!("{limit} tool calls / 10 s per token"),
+            ))
+        }
+    }
+
     /// The frozen three, plus `geode_run` only when the bound token holds
     /// `Inject` (design §5).
     fn tools(&self, conn: &Conn) -> Vec<serde_json::Value> {
@@ -763,21 +910,24 @@ impl Daemon {
                 format!("tool '{name}' is not available"),
             ));
         }
-        let sealed = conn
-            .sealed
-            .clone()
-            .ok_or_else(|| refusal("unauthenticated", "no token bound to this connection"))?;
-        if conn.window.elapsed() >= RATE_WINDOW {
-            conn.window = Instant::now();
-            conn.calls = 0;
-        }
-        conn.calls = conn.calls.saturating_add(1);
-        if conn.calls > RATE_MAX {
-            return Err(refusal("rate_limited", "128 tool calls / 10 s per token"));
-        }
+        let Some(sealed) = conn.sealed.clone() else {
+            self.note_failed_auth(conn.peer.uid)?;
+            return Err(refusal(
+                "unauthenticated",
+                "no token bound to this connection",
+            ));
+        };
+        let claims = match self.verify_token(conn.peer, &sealed) {
+            Ok(claims) => claims,
+            Err(err) => {
+                self.note_failed_auth(conn.peer.uid)?;
+                return Err(err);
+            }
+        };
+        let limit = self.grant_rate_limit(&claims)?;
+        self.rate_token(&claims, conn.peer.uid, limit)?;
         let empty = serde_json::json!({});
         let args = params.get("arguments").unwrap_or(&empty);
-        let claims = self.verify_token(conn.peer, &sealed)?;
         if name == RUN_TOOL && !claims.allow_ops.contains(&Op::Inject) {
             return Err(refusal("policy_deny", "token does not hold inject"));
         }
@@ -797,6 +947,9 @@ impl Daemon {
             .map_err(|_| refusal("io", "session poisoned"))?;
         let s = self.live(&mut guard)?;
         s.last_used = Instant::now();
+        // A rotation while the daemon holds old-epoch keys must fail closed,
+        // checked under the same lock that hands `s.ctx` to the tool.
+        self.disk_epoch_matches(&s.ctx)?;
         let vault_str = self.vault.to_str().unwrap_or_default();
         let call = AgentCall {
             facet_events: false,
@@ -862,9 +1015,19 @@ impl Daemon {
             let s = self.live(&mut guard)?;
             s.last_used = Instant::now();
             let ctx = &s.ctx;
+            // Same critical section as the manifest reload below: no rotation
+            // can land between the epoch check and the state read.
+            self.disk_epoch_matches(ctx)?;
             let mk = geode_grotto::kdf::derive_meta_key(&ctx.ek, ctx.vault_id, ctx.epoch);
             let policy =
                 geode_grotto::policy::load_policy(&self.vault, &mk, ctx.vault_id, ctx.epoch)?;
+            // G-3: reload the authenticated manifest on every call. A write or
+            // reseal made after unlock must be visible here, and a replace must
+            // never let the old object id win.
+            let manifest_key =
+                geode_grotto::kdf::derive_manifest_key(&ctx.ek, ctx.vault_id, ctx.epoch);
+            let manifest =
+                geode_grotto::snapshot::read_manifest_file(&self.vault, ctx.epoch, &manifest_key)?;
             let row = run::RowBase {
                 principal: claims.principal_id.0.clone(),
                 token_id: cmd::hex(&claims.token_id.0),
@@ -889,7 +1052,7 @@ impl Daemon {
                 root: &self.vault,
                 ek: &ctx.ek,
                 epoch: ctx.epoch,
-                manifest: &ctx.manifest,
+                manifest: &manifest,
             };
             let base_path = std::env::var_os("PATH");
             let planned = inject::plan(
@@ -1039,6 +1202,23 @@ impl Daemon {
             "vault": self.vault.display().to_string(),
         })
     }
+}
+
+/// Read the plaintext `vault_id`/`epoch` from `header.json`. Used only for the
+/// cheap rotation guard; the MAC-verified loads still authenticate the file.
+fn disk_header_identity(vault: &Path) -> Result<(String, u32)> {
+    let text = std::fs::read_to_string(vault.join("header.json")).map_err(Error::Io)?;
+    let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| Error::AuthFail)?;
+    let vault_id = value
+        .get("vault_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(Error::AuthFail)?
+        .to_owned();
+    let epoch = value
+        .get("epoch")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(Error::AuthFail)?;
+    Ok((vault_id, u32::try_from(epoch).map_err(|_| Error::AuthFail)?))
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
@@ -1677,5 +1857,300 @@ mod tests {
     fn identity_rules_are_the_os_crate_rules() {
         assert!(ident::check_daemon_identity(0, None, Some(0)).is_err());
         assert!(ident::check_custody_peer(9, 9).is_err());
+    }
+
+    // ---- G1: custody freshness and daemon-wide rate limits ----
+
+    /// Unlock once, then open a connection bound to `tok` without unlocking
+    /// again. A second unlock would replace the cached session and mask G-3.
+    fn unlock_once(fx: &Fx) {
+        let mut c = raw(fx);
+        let r = c.call("geode/custody.unlock", serde_json::json!({}));
+        assert!(r.get("error").is_none(), "{r}");
+    }
+
+    fn conn(fx: &Fx, tok: &str) -> Raw {
+        let mut a = raw(fx);
+        let r = a.call(
+            "initialize",
+            serde_json::json!({"_meta": {"geode_token": tok}}),
+        );
+        assert!(r.get("error").is_none(), "{r}");
+        a
+    }
+
+    fn list_call(a: &mut Raw, fx: &Fx) -> serde_json::Value {
+        let vault = fx.vault().to_str().unwrap().to_owned();
+        a.call(
+            "tools/call",
+            serde_json::json!({"name": "geode_list", "arguments": {"vault": vault}}),
+        )
+    }
+
+    fn read_call(a: &mut Raw, fx: &Fx, mode: &str) -> serde_json::Value {
+        let vault = fx.vault().to_str().unwrap().to_owned();
+        a.call(
+            "tools/call",
+            serde_json::json!({"name": "geode_read", "arguments": {
+                "vault": vault, "path": "cfg/note", "mode": mode,
+            }}),
+        )
+    }
+
+    fn write_call(a: &mut Raw, fx: &Fx, path: &str, body: &str) -> serde_json::Value {
+        let vault = fx.vault().to_str().unwrap().to_owned();
+        a.call(
+            "tools/call",
+            serde_json::json!({"name": "geode_write", "arguments": {
+                "vault": vault, "path": path, "body": body,
+            }}),
+        )
+    }
+
+    fn limited(resp: &serde_json::Value) -> bool {
+        resp["result"]["isError"] == true && tool_err(resp) == "rate_limited"
+    }
+
+    /// The call must be refused by one of `allowed` and must not carry the
+    /// vault secret anywhere in the response.
+    fn assert_closed(resp: &serde_json::Value, allowed: &[&str]) {
+        assert_eq!(resp["result"]["isError"], true, "call was served: {resp}");
+        let code = tool_err(resp);
+        assert!(
+            allowed.contains(&code.as_str()),
+            "unexpected refusal {code}: {resp}"
+        );
+        assert!(
+            !resp.to_string().contains(DUMMY),
+            "secret leaked after rotation: {resp}"
+        );
+    }
+
+    fn set_grant_rate(fx: &Fx, limit: Option<u32>) {
+        let isk = cmd::load_isk_given(&fx.key(), None).unwrap();
+        let ctx = cmd::load_vault(&fx.vault(), &isk).unwrap();
+        let mk = geode_grotto::kdf::derive_meta_key(&ctx.ek, ctx.vault_id, ctx.epoch);
+        let mut policy = geode_grotto::policy::default_policy(&cmd::hex(&ctx.vault_id.0));
+        policy.principals[0].max_calls_per_10s = limit;
+        geode_grotto::policy::seal_policy(&fx.vault(), &policy, &mk, ctx.vault_id, ctx.epoch)
+            .unwrap();
+    }
+
+    const RUN_COUNT: [&str; 3] = ["sh", "-c", "printf %s \"$KEY\" | wc -c | tr -d ' '"];
+
+    fn run_len(a: &mut Raw, fx: &Fx) -> String {
+        let doc = tool_doc(&run_call(a, fx, &RUN_COUNT));
+        doc["stdout_redacted"].as_str().unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn geode_run_reloads_manifest_after_daemon_write() {
+        let fx = start(Agents::Uids(Vec::new()));
+        let run_tok = run_inject_token(&fx);
+        let write_tok = token_with(
+            &fx,
+            Some(ident::euid()),
+            vec![Op::List, Op::Write],
+            Vec::new(),
+            Vec::new(),
+            TokenKind::Full,
+        );
+        unlock_once(&fx);
+        let mut runner = conn(&fx, &run_tok);
+        let mut writer = conn(&fx, &write_tok);
+        assert_eq!(run_len(&mut runner, &fx), DUMMY.len().to_string());
+        let newval = "sk-dummy-0000QA-REPLACED-VALUE";
+        let w = write_call(&mut writer, &fx, "cfg/note", newval);
+        assert!(w["result"]["isError"].is_null(), "write failed: {w}");
+        assert_eq!(run_len(&mut runner, &fx), newval.len().to_string());
+        // A fresh connection without another unlock must see it too.
+        let mut fresh = conn(&fx, &run_tok);
+        assert_eq!(run_len(&mut fresh, &fx), newval.len().to_string());
+    }
+
+    #[test]
+    fn geode_run_sees_external_reseal_without_relock() {
+        let fx = start(Agents::Uids(Vec::new()));
+        let run_tok = run_inject_token(&fx);
+        unlock_once(&fx);
+        let mut runner = conn(&fx, &run_tok);
+        assert_eq!(run_len(&mut runner, &fx), DUMMY.len().to_string());
+        let newval = "sk-dummy-0000QA-RESEALED-VALUE-42";
+        std::fs::write(fx.dir.join("src/cfg/note"), newval).unwrap();
+        let p = |s: &str| fx.dir.join(s).to_str().unwrap().to_owned();
+        geode(&["--key", &p("k.gkey"), "seal", &p("src"), &p("v.geode")]);
+        assert_eq!(run_len(&mut runner, &fx), newval.len().to_string());
+        let mut fresh = conn(&fx, &run_tok);
+        assert_eq!(run_len(&mut fresh, &fx), newval.len().to_string());
+    }
+
+    #[test]
+    fn geode_run_fails_closed_after_rotation() {
+        let fx = start(Agents::Uids(Vec::new()));
+        let run_tok = run_inject_token(&fx);
+        unlock_once(&fx);
+        let mut runner = conn(&fx, &run_tok);
+        assert_eq!(run_len(&mut runner, &fx), DUMMY.len().to_string());
+        let p = |s: &str| fx.dir.join(s).to_str().unwrap().to_owned();
+        geode(&[
+            "--key",
+            &p("k.gkey"),
+            "vault",
+            "rotate",
+            &p("v.geode"),
+            "--yes",
+            "--reseal",
+        ]);
+        let r = run_call(&mut runner, &fx, &RUN_COUNT);
+        assert_eq!(tool_err(&r), "vault_epoch_changed", "{r}");
+        assert!(!r.to_string().contains(DUMMY));
+    }
+
+    /// Rotate while unlocked, then prove the agent tools (not just
+    /// `geode_run`) fail closed with no secret in the response. Default and
+    /// sealed policy are both covered: a sealed policy may fail earlier while
+    /// the daemon still holds the old epoch's keys, which is equally closed.
+    fn rotated_agent_tools_are_closed(sealed_policy: bool) {
+        let fx = start(Agents::Uids(Vec::new()));
+        if sealed_policy {
+            set_grant_rate(&fx, None);
+        }
+        let tok = token_hex(&fx, Some(ident::euid()));
+        unlock_once(&fx);
+        let mut a = conn(&fx, &tok);
+        let list_before = list_call(&mut a, &fx);
+        assert!(list_before["result"]["isError"].is_null(), "{list_before}");
+        let read_before = read_call(&mut a, &fx, "text");
+        assert!(
+            read_before.to_string().contains(DUMMY),
+            "fixture did not read before rotation: {read_before}"
+        );
+
+        let p = |s: &str| fx.dir.join(s).to_str().unwrap().to_owned();
+        geode(&[
+            "--key",
+            &p("k.gkey"),
+            "vault",
+            "rotate",
+            &p("v.geode"),
+            "--yes",
+            "--reseal",
+        ]);
+
+        let allowed: &[&str] = if sealed_policy {
+            &["vault_epoch_changed", "auth_fail"]
+        } else {
+            &["vault_epoch_changed"]
+        };
+        let mut fresh = conn(&fx, &tok);
+        for (label, resp) in [
+            ("list", list_call(&mut a, &fx)),
+            ("read", read_call(&mut a, &fx, "text")),
+            ("list_fresh_conn", list_call(&mut fresh, &fx)),
+            ("read_fresh_conn", read_call(&mut fresh, &fx, "text")),
+        ] {
+            println!("{label}: {resp}");
+            assert_closed(&resp, allowed);
+        }
+    }
+
+    #[test]
+    fn rotated_vault_refuses_agent_tools_default_policy() {
+        rotated_agent_tools_are_closed(false);
+    }
+
+    #[test]
+    fn rotated_vault_refuses_agent_tools_sealed_policy() {
+        rotated_agent_tools_are_closed(true);
+    }
+
+    #[test]
+    fn rate_limit_survives_reconnect() {
+        let fx = start(Agents::Uids(Vec::new()));
+        let tok = token_hex(&fx, Some(ident::euid()));
+        unlock_once(&fx);
+        let mut a = conn(&fx, &tok);
+        for i in 0..RATE_DEFAULT {
+            let r = list_call(&mut a, &fx);
+            assert!(!limited(&r), "call {} limited early: {r}", i + 1);
+        }
+        assert!(
+            limited(&list_call(&mut a, &fx)),
+            "129th call was not limited"
+        );
+        let mut b = conn(&fx, &tok);
+        assert!(
+            limited(&list_call(&mut b, &fx)),
+            "a reconnect reset the budget"
+        );
+    }
+
+    #[test]
+    fn grant_max_calls_per_10s_blocks_across_reconnects() {
+        let fx = start(Agents::Uids(Vec::new()));
+        set_grant_rate(&fx, Some(3));
+        let tok = token_hex(&fx, Some(ident::euid()));
+        unlock_once(&fx);
+        let mut a = conn(&fx, &tok);
+        for i in 0..3 {
+            let r = list_call(&mut a, &fx);
+            assert!(!limited(&r), "call {} limited early: {r}", i + 1);
+        }
+        assert!(limited(&list_call(&mut a, &fx)), "4th call was not limited");
+        let mut b = conn(&fx, &tok);
+        assert!(
+            limited(&list_call(&mut b, &fx)),
+            "the grant limit did not survive a reconnect"
+        );
+    }
+
+    #[test]
+    fn sliding_window_blocks_fixed_window_boundary_burst() {
+        let base = Instant::now();
+        let at_start = base;
+        let burst = base + Duration::from_millis(9_900);
+        let boundary = base + Duration::from_millis(10_100);
+        let mut rate = RateLimiter::default();
+        // 128 calls inside [0 s, 9.9 s]: one at the start, 127 at 9.9 s.
+        assert!(rate.allow_token([7; 16], 42, 128, at_start));
+        for _ in 0..127 {
+            assert!(rate.allow_token([7; 16], 42, 128, burst));
+        }
+        // At 10.1 s only the t=0 call has left the 10 s window, so exactly one
+        // slot is free. A fixed window anchored at t=0 would clear the whole
+        // queue and allow 128 calls here, which is the regression this guards.
+        assert!(
+            rate.allow_token([7; 16], 42, 128, boundary),
+            "the expired t=0 call did not free exactly one slot"
+        );
+        assert!(
+            !rate.allow_token([7; 16], 42, 128, boundary),
+            "the 9.9 s burst is still inside the 10 s window; a fixed-window reset leaked through"
+        );
+    }
+
+    #[test]
+    fn failed_auth_budget_is_bounded_and_leaves_tokens_alone() {
+        let base = Instant::now();
+        let mut rate = RateLimiter::default();
+        for _ in 0..PREAUTH_MAX {
+            assert!(rate.allow_failed_auth(42, base));
+        }
+        assert!(!rate.allow_failed_auth(42, base));
+        // A valid token's budget is separate and unaffected.
+        assert!(rate.allow_token([9; 16], 42, 128, base));
+    }
+
+    #[test]
+    fn rate_limiter_evicts_expired_entries() {
+        let base = Instant::now();
+        let mut rate = RateLimiter::default();
+        assert!(rate.allow_token([7; 16], 42, 128, base));
+        let later = base + RATE_EVICT_EVERY + Duration::from_secs(1);
+        assert!(rate.allow_token([8; 16], 42, 128, later));
+        assert!(
+            !rate.tokens.contains_key(&([7; 16], 42)),
+            "expired token entry was not evicted"
+        );
     }
 }

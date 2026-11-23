@@ -225,6 +225,7 @@ pub const MAGIC_GKEY: &[u8; 4] = b"GKEY";
 pub const MAGIC_GTOK: &[u8; 4] = b"GTOK";
 pub const MAGIC_GMFT: &[u8; 4] = b"GMFT";
 pub const MAGIC_GPOL: &[u8; 4] = b"GPOL";
+pub const MAGIC_GPO2: &[u8; 4] = b"GPO2";
 
 /// Abort on unknown suite (02-cryptography 1.1; SPEC 4.2).
 pub fn assert_suite(suite: u8) -> Result<()> {

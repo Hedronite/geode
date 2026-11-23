@@ -102,7 +102,24 @@ pub fn run(args: &VerifyArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     let start = Instant::now();
     let mut chunks_checked = 0u64;
 
+    // Merkle root consistency in every mode (04-vault 4).
+    if geode_grotto::manifest::entries_root(&ctx.manifest.entries)? != ctx.manifest.root {
+        return Err(Error::AuthFail);
+    }
+    // N-4: full verify authenticates a sealed policy when one exists.
+    if matches!(mode, Mode::Full) && geode_grotto::policy::policy_path(&args.vault).is_file() {
+        let mk = geode_grotto::kdf::derive_meta_key(&ctx.ek, ctx.vault_id, ctx.epoch);
+        geode_grotto::policy::load_policy(&args.vault, &mk, ctx.vault_id, ctx.epoch)?;
+    }
+    let mut files_checked = 0u64;
+
     for e in &ctx.manifest.entries {
+        if e.kind == geode_grotto::manifest::EntryKind::Dir {
+            // A `kind: dir` row names no `.gobj` (03-format 5); `open` and
+            // rotate already skip it, and verify must too.
+            continue;
+        }
+        files_checked += 1;
         let raw = corevault::read_object(&args.vault, ctx.epoch, &e.object_id)?;
         if raw.len() < object::HEADER_SIZE {
             return Err(Error::AuthFail);
@@ -123,10 +140,17 @@ pub fn run(args: &VerifyArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
             return Err(Error::AuthFail);
         }
         let bind: &[u8] = if e.bind { e.path.as_bytes() } else { b"" };
+        // Trailing or truncated bytes fail every mode, not just full.
+        if chunks.len() != object::expected_chunks_len(&header)? {
+            return Err(Error::AuthFail);
+        }
         let n = header.chunk_count;
         match mode {
             Mode::Full => {
                 object::open_object(&ctx.ek, header_bytes, chunks, bind)?;
+                if object::content_root(&header, chunks)? != e.content_root {
+                    return Err(Error::AuthFail);
+                }
                 chunks_checked += u64::from(n);
             }
             Mode::Cheap | Mode::Sample(_) => {
@@ -158,21 +182,27 @@ pub fn run(args: &VerifyArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     cmd::emit(
         out,
         "verify",
-        serde_json::json!({
-            "vault_id": cmd::hex(&ctx.vault_id.0),
-            "epoch": ctx.epoch.0,
-            "key_id": cmd::hex(&ctx.key_id.0),
-            "files": ctx.manifest.entries.len(),
-            "content_root": cmd::hex(&ctx.manifest.root),
-            "elapsed_ms": start.elapsed().as_millis() as u64,
-        }),
+        event_json(&ctx, files_checked, start.elapsed().as_millis() as u64),
         &format!(
-            "verify ok ({mode_name}): {} file(s), {chunks_checked} chunk(s) checked, vault {}",
-            ctx.manifest.entries.len(),
+            "verify ok ({mode_name}): {files_checked} file(s), {chunks_checked} chunk(s) checked, vault {}",
             cmd::hex(&ctx.vault_id.0)
         ),
     );
     Ok(())
+}
+
+/// JSON event body. `manifest` is the schema field; `content_root` is the
+/// 3.x backward-compatibility alias for the same verified manifest root.
+fn event_json(ctx: &cmd::VaultCtx, files: u64, elapsed_ms: u64) -> serde_json::Value {
+    serde_json::json!({
+        "vault_id": cmd::hex(&ctx.vault_id.0),
+        "epoch": ctx.epoch.0,
+        "key_id": cmd::hex(&ctx.key_id.0),
+        "files": files,
+        "manifest": cmd::hex(&ctx.manifest.root),
+        "content_root": cmd::hex(&ctx.manifest.root),
+        "elapsed_ms": elapsed_ms,
+    })
 }
 
 #[cfg(test)]
@@ -181,6 +211,40 @@ mod r_apply_oracle_tests {
     use geode_grotto::kdf::ObjectId;
     use geode_grotto::kdf::{Epoch, EpochKey, VaultId};
     use geode_grotto::object;
+
+    #[test]
+    fn verify_event_uses_schema_manifest_and_alias() {
+        use geode_grotto::kdf::{Epoch, EpochKey, KeyId, VaultId};
+        use geode_grotto::manifest::Manifest;
+        let vid = VaultId([0x01; 16]);
+        let epoch = Epoch(1);
+        let root = [0x09u8; 32];
+        let ctx = cmd::VaultCtx {
+            root: std::path::PathBuf::new(),
+            vault_id: vid,
+            epoch,
+            key_id: KeyId([0x02; 16]),
+            ek: EpochKey::from_bytes([0x03; 32]),
+            manifest: Manifest {
+                vault_id: vid,
+                epoch,
+                suite: geode_grotto::SUITE_0X01,
+                flags: 0,
+                generated_at: 0,
+                generator: "test".into(),
+                root,
+                entry_count: 0,
+                total_plain_bytes: 0,
+                total_cipher_bytes: 0,
+                entries: Vec::new(),
+            },
+        };
+        let doc = event_json(&ctx, 2, 3);
+        let hex = cmd::hex(&root);
+        assert_eq!(doc["manifest"], hex);
+        assert_eq!(doc["content_root"], hex);
+        assert!(doc.get("manifest_root").is_none());
+    }
 
     #[test]
     fn check_chunk_rejects_flipped_ciphertext_bit() {

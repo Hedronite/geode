@@ -199,3 +199,154 @@ fn bit_flip_fails_closed_exit_2() {
     std::fs::write(&obj, &original).expect("restore object");
     assert_ok(dir, &["--key", "k.gkey", "verify", "v.geode"]);
 }
+
+// ---- v310 G2: verify integrity and tamper detection ----
+
+/// Key material for a vault the shipped CLI built. Tests only: it reads the
+/// throwaway fixture key the same way `geode` does.
+struct VaultKeys {
+    vault_id: geode_grotto::kdf::VaultId,
+    epoch: geode_grotto::kdf::Epoch,
+    manifest_key: [u8; 32],
+    meta_key: [u8; 32],
+}
+
+fn unhex32(s: &str) -> Vec<u8> {
+    assert_eq!(s.len() % 2, 0, "hex length");
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+        .collect()
+}
+
+fn vault_keys(dir: &Path) -> VaultKeys {
+    let root = dir.join("v.geode");
+    let raw = std::fs::read(dir.join("k.gkey")).expect("gkey");
+    let isk =
+        geode_grotto::kdf::IdentitySecret::from_bytes(raw[6..38].try_into().expect("isk bytes"));
+    let header: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("header.json")).expect("header")).unwrap();
+    let vault_id = geode_grotto::kdf::VaultId(
+        unhex32(header["vault_id"].as_str().unwrap())
+            .try_into()
+            .unwrap(),
+    );
+    let epoch = geode_grotto::kdf::Epoch(u32::try_from(header["epoch"].as_u64().unwrap()).unwrap());
+    let recipients: geode_grotto::recipients::Recipients =
+        serde_json::from_slice(&std::fs::read(root.join("recipients.json")).expect("recipients"))
+            .unwrap();
+    let ek = geode_grotto::recipients::unwrap_for_identity(&recipients, &isk, vault_id, epoch)
+        .expect("unwrap epoch key");
+    VaultKeys {
+        vault_id,
+        epoch,
+        manifest_key: geode_grotto::kdf::derive_manifest_key(&ek, vault_id, epoch),
+        meta_key: geode_grotto::kdf::derive_meta_key(&ek, vault_id, epoch),
+    }
+}
+
+fn load_manifest(dir: &Path, keys: &VaultKeys) -> geode_grotto::manifest::Manifest {
+    geode_grotto::snapshot::read_manifest_file(&dir.join("v.geode"), keys.epoch, &keys.manifest_key)
+        .expect("manifest")
+}
+
+fn write_manifest(dir: &Path, keys: &VaultKeys, manifest: &geode_grotto::manifest::Manifest) {
+    geode_grotto::snapshot::write_manifest_file(
+        &dir.join("v.geode"),
+        keys.epoch,
+        manifest,
+        &keys.manifest_key,
+    )
+    .expect("write manifest");
+}
+
+#[test]
+fn trailing_bytes_fail_verify_and_cat() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    assert_ok(dir, &["keygen", "--insecure-plaintext", "k.gkey"]);
+    assert_ok(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]);
+    std::fs::write(dir.join("note.txt"), b"tail check\n").expect("write");
+    assert_ok(dir, &["--key", "k.gkey", "seal", "note.txt", "v.geode"]);
+    assert_ok(dir, &["--key", "k.gkey", "verify", "v.geode"]);
+    let obj = first_object(&dir.join("v.geode"));
+    let original = std::fs::read(&obj).expect("read object");
+    let mut longer = original.clone();
+    longer.extend_from_slice(b"thirteen-byte");
+    std::fs::write(&obj, &longer).expect("append");
+    assert_exit(dir, &["--key", "k.gkey", "verify", "v.geode"], 2);
+    assert_exit(dir, &["--key", "k.gkey", "verify", "v.geode", "--cheap"], 2);
+    assert_exit(dir, &["--key", "k.gkey", "cat", "v.geode", "note.txt"], 2);
+    std::fs::write(&obj, &original).expect("restore");
+    assert_ok(dir, &["--key", "k.gkey", "verify", "v.geode"]);
+}
+
+#[test]
+fn tampered_manifest_root_fails_full_and_cheap_verify() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    assert_ok(dir, &["keygen", "--insecure-plaintext", "k.gkey"]);
+    assert_ok(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]);
+    std::fs::write(dir.join("note.txt"), b"root check\n").expect("write");
+    assert_ok(dir, &["--key", "k.gkey", "seal", "note.txt", "v.geode"]);
+    let keys = vault_keys(dir);
+    let mut manifest = load_manifest(dir, &keys);
+    manifest.root = [0xaa; 32];
+    write_manifest(dir, &keys, &manifest);
+    assert_exit(dir, &["--key", "k.gkey", "verify", "v.geode"], 2);
+    assert_exit(dir, &["--key", "k.gkey", "verify", "v.geode", "--cheap"], 2);
+}
+
+#[test]
+fn tampered_entry_content_root_fails_full_verify() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    assert_ok(dir, &["keygen", "--insecure-plaintext", "k.gkey"]);
+    assert_ok(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]);
+    std::fs::write(dir.join("note.txt"), b"entry root check\n").expect("write");
+    assert_ok(dir, &["--key", "k.gkey", "seal", "note.txt", "v.geode"]);
+    let keys = vault_keys(dir);
+    let mut manifest = load_manifest(dir, &keys);
+    let entry = manifest
+        .entries
+        .iter_mut()
+        .find(|e| e.kind == geode_grotto::manifest::EntryKind::File)
+        .expect("a file entry");
+    entry.content_root = [0xbb; 32];
+    manifest.root = geode_grotto::manifest::entries_root(&manifest.entries).expect("root");
+    write_manifest(dir, &keys, &manifest);
+    assert_exit(dir, &["--key", "k.gkey", "verify", "v.geode"], 2);
+}
+
+#[test]
+fn tampered_policy_fails_full_verify_and_clean_policy_passes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    assert_ok(dir, &["keygen", "--insecure-plaintext", "k.gkey"]);
+    assert_ok(dir, &["--key", "k.gkey", "vault", "init", "v.geode"]);
+    std::fs::write(dir.join("note.txt"), b"policy check\n").expect("write");
+    assert_ok(dir, &["--key", "k.gkey", "seal", "note.txt", "v.geode"]);
+    let keys = vault_keys(dir);
+    // No sealed policy yet: verify stays clean.
+    assert_ok(dir, &["--key", "k.gkey", "verify", "v.geode"]);
+    let vault_hex = keys.vault_id.0.iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    });
+    let policy = geode_grotto::policy::default_policy(&vault_hex);
+    let path = geode_grotto::policy::seal_policy(
+        &dir.join("v.geode"),
+        &policy,
+        &keys.meta_key,
+        keys.vault_id,
+        keys.epoch,
+    )
+    .expect("seal policy");
+    assert_ok(dir, &["--key", "k.gkey", "verify", "v.geode"]);
+    let mut sealed = std::fs::read(&path).expect("policy bytes");
+    let last = sealed.len() - 1;
+    sealed[last] ^= 0x01;
+    std::fs::write(&path, &sealed).expect("tamper policy");
+    assert_exit(dir, &["--key", "k.gkey", "verify", "v.geode"], 2);
+}
