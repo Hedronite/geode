@@ -468,6 +468,13 @@ fn render_picker_empty(frame: &mut Frame, area: Rect, app: &App, palette: Palett
         ))
         .alignment(Alignment::Center),
     );
+    lines.push(
+        Line::from(Span::styled(
+            "sources: $GEODE_VAULT · vaults registry · ./name.geode · ~/notes.geode",
+            Style::default().fg(palette.muted),
+        ))
+        .alignment(Alignment::Center),
+    );
     if let Some(k) = app.key() {
         lines.push(
             Line::from(Span::styled(
@@ -692,6 +699,33 @@ fn help_lines(palette: Palette) -> Vec<Line<'static>> {
         )),
         Line::from(Span::styled(
             "  [ · ]              cycle verb tabs (list / verify / cat)",
+            Style::default().fg(palette.muted),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "CLI verbs (shell, not tabs)",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  geode keygen ...   create an identity key",
+            Style::default().fg(palette.muted),
+        )),
+        Line::from(Span::styled(
+            "  geode vault init DIR   create a vault",
+            Style::default().fg(palette.muted),
+        )),
+        Line::from(Span::styled(
+            "  geode seal SRC VAULT   seal a file or tree",
+            Style::default().fg(palette.muted),
+        )),
+        Line::from(Span::styled(
+            "  geode open VAULT DIR   open a mount",
+            Style::default().fg(palette.muted),
+        )),
+        Line::from(Span::styled(
+            "  geode keyring ...  manage keyring entries",
             Style::default().fg(palette.muted),
         )),
         Line::from(""),

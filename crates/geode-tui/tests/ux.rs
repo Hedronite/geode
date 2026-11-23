@@ -287,11 +287,9 @@ fn list_view_is_flat_files() {
     fx.build();
     let mut app = open_app(&fx, Appearance::Graphite);
     let tree_rows = app.row_count();
-    // geode, keygen, vault, seal, open, verify, list
-    for _ in 0..6 {
-        press_char(&mut app, ']');
-    }
-    assert_eq!(app.view(), View::List, "six ] land on list");
+    // geode -> list
+    press_char(&mut app, ']');
+    assert_eq!(app.view(), View::List, "one ] lands on list");
     assert_eq!(
         app.row_count(),
         3,

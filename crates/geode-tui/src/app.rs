@@ -38,13 +38,11 @@ use crate::tree::{self, TreeRow};
 use crate::vault::{self, Preview, VaultCtx, VerifyReport};
 use geode_grotto::snapshot::{GcReport, SnapshotEnvelope};
 
-/// Shipped verb tabs (14-tui §1.2). `geode` is the brand/home tab.
-/// **No `mount`** — mount is optional chrome (14-tui §9). `keyring` ships
-/// in 0.2. `[` / `]` cycle and activate: tree, list, verify, cat (preview);
-/// the rest are CLI-only banners.
-pub const VERB_TABS: &[&str] = &[
-    "geode", "keygen", "vault", "seal", "open", "verify", "list", "cat", "keyring",
-];
+/// Interactive verb tabs (14-tui §1.2). `geode` is the brand/home tab.
+/// Every tab is a real view or action: tree, list, verify, cat (preview).
+/// Lifecycle commands such as `keygen`, `vault`, `seal`, `open`, and
+/// `keyring` are CLI verbs, documented in help, never fake tabs.
+pub const VERB_TABS: &[&str] = &["geode", "list", "verify", "cat"];
 
 /// A message from the key handler. Only `Quit` breaks the event loop;
 /// every other action mutates `App` in place and returns `None`.
@@ -496,9 +494,7 @@ impl App {
                 }
             }
             "cat" => self.toggle_preview(),
-            other => {
-                self.error = Some(format!("CLI-only in 0.2: `geode {other}`"));
-            }
+            _ => {}
         }
     }
 
@@ -944,7 +940,43 @@ impl App {
     }
 }
 
-fn discover_picker_items(explicit: Option<&Path>) -> Vec<PickerItem> {
+/// Discover picker vaults from all supported sources in deterministic
+/// priority order: explicit argument, `$GEODE_VAULT`, the vaults registry,
+/// one level of `*.geode` directories in the working directory (sorted by
+/// filename), then `$HOME/notes.geode`. Only directories with a regular
+/// `GEODE` marker are kept; canonical paths deduplicate.
+#[must_use]
+pub fn discover_picker_items(explicit: Option<&Path>) -> Vec<PickerItem> {
+    let cwd = std::env::current_dir().ok();
+    let home = std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let env_vault = std::env::var_os("GEODE_VAULT")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    discover_picker_items_with(
+        explicit,
+        cwd.as_deref(),
+        home.as_deref(),
+        xdg.as_deref(),
+        env_vault.as_deref(),
+    )
+}
+
+/// Testable discovery core. Every path is validated as a vault and
+/// canonicalized before deduplication; missing or unreadable sources are
+/// skipped silently.
+#[must_use]
+pub fn discover_picker_items_with(
+    explicit: Option<&Path>,
+    cwd: Option<&Path>,
+    home: Option<&Path>,
+    xdg_config: Option<&Path>,
+    env_vault: Option<&Path>,
+) -> Vec<PickerItem> {
     let mut out: Vec<PickerItem> = Vec::new();
     let mut push = |p: PathBuf| {
         if !p.join("GEODE").is_file() {
@@ -960,11 +992,61 @@ fn discover_picker_items(explicit: Option<&Path>) -> Vec<PickerItem> {
         );
         out.push(PickerItem { path: canon, label });
     };
+    let resolve = |p: &Path| -> PathBuf {
+        let expanded = match (p.strip_prefix("~"), home) {
+            (Ok(rest), Some(home)) => home.join(rest),
+            _ => p.to_path_buf(),
+        };
+        if expanded.is_absolute() {
+            expanded
+        } else if let Some(cwd) = cwd {
+            cwd.join(expanded)
+        } else {
+            expanded
+        }
+    };
+
     if let Some(p) = explicit {
-        push(p.to_path_buf());
+        push(resolve(p));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        push(PathBuf::from(home).join("notes.geode"));
+    if let Some(p) = env_vault.filter(|p| !p.as_os_str().is_empty()) {
+        push(resolve(p));
+    }
+    let registry = xdg_config
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|xdg| xdg.join("hedronite/geode/vaults"))
+        .or_else(|| home.map(|home| home.join(".config/hedronite/geode/vaults")));
+    if let Some(registry) = registry {
+        if let Ok(text) = std::fs::read_to_string(registry) {
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                push(resolve(Path::new(line)));
+            }
+        }
+    }
+    if let Some(cwd) = cwd {
+        if let Ok(entries) = std::fs::read_dir(cwd) {
+            let mut candidates: Vec<PathBuf> = entries
+                .filter_map(std::result::Result::ok)
+                .map(|entry| entry.path())
+                .filter(|p| {
+                    p.is_dir()
+                        && p.file_name()
+                            .and_then(std::ffi::OsStr::to_str)
+                            .is_some_and(|name| name.ends_with(".geode"))
+                })
+                .collect();
+            candidates.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+            for p in candidates {
+                push(p);
+            }
+        }
+    }
+    if let Some(home) = home {
+        push(home.join("notes.geode"));
     }
     out
 }
