@@ -12,7 +12,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
-Hardening release, planned as 3.1.0 (the crate version is not bumped yet). The cipher suite stays `0x01`. `GDE1` objects, manifests, headers, and recipients are unchanged. Only the sealed policy container gains a new format (below).
+## [3.1.0] — 2026-11-23
+
+Geode 3.1.0 hardening release. The cipher suite stays `0x01`. `GDE1` objects, manifests, headers, and recipients are unchanged. Only the sealed policy container gains the `GPO2` format (below).
 
 ### Upgrade notes
 
@@ -350,7 +352,8 @@ First release. Conformance profile **`core`** (§2): format, crypto, vault init,
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/Hedronite/geode/compare/v3.0.1...HEAD
+[Unreleased]: https://github.com/Hedronite/geode/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/Hedronite/geode/compare/v3.0.1...v3.1.0
 [3.0.1]: https://github.com/Hedronite/geode/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/Hedronite/geode/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/Hedronite/geode/compare/v1.2.1...v2.0.0

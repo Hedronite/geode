@@ -47,7 +47,7 @@ The on-disk format is **GDE1**, cipher suite **`0x01`**: AEGIS-256-X2, BLAKE3, A
 | Format | GDE1, suite `0x01` |
 | Binary | `geode` ([`geode-cli`](crates/geode-cli)) |
 | Library | [`geode-grotto`](crates/geode-core) (Rust import `geode_grotto`) |
-| Version | **3.0.1** · [changelog](CHANGELOG.md) |
+| Version | **3.1.0** · [changelog](CHANGELOG.md) |
 | Platforms | Linux and macOS |
 | Rust | 1.89 |
 | License | [Apache-2.0](LICENSE) |
@@ -274,9 +274,10 @@ The Cargo feature `test-trusted-root` is test-only and insecure. It compiles a h
 
 ## Status
 
-Version **3.0.1**. After this tag, the crates `geode-cli`, `geode-grotto`, `geode-tui`, `geode-redact`, and `geode-os` publish at the same version. The previous release is [`v3.0.0`](https://github.com/Hedronite/geode/releases/tag/v3.0.0).
+Version **3.1.0**. After this tag, the crates `geode-cli`, `geode-grotto`, `geode-tui`, `geode-redact`, and `geode-os` publish at the same version. The previous release is [`v3.0.1`](https://github.com/Hedronite/geode/releases/tag/v3.0.1).
 
 - The format is GDE1, suite `0x01`. Objects written by 1.0.0 are still readable.
+- 3.1.0 hardens vault rotation, policy sealing, and custody: `--seal-names` paths re-seal across epoch rotations and `Dir` rows carry forward without object reads; `policy.json.sealed` moves to `GPO2` with a fresh random nonce while keeping suite `0x01`; custody reloads and MAC-checks the manifest per run with daemon-wide per-grant rate limiting and `0600` audit DB files; mount reads seek directly to requested chunks; `verify` checks Merkle roots, trailing/truncated bytes, and policy MACs; and `write_atomic` fsyncs directories after rename.
 - 1.2 added keyring custody and secret injection: `geode run`, the custody daemon, `geode custody`, `geode audit verify`, and the `inject` token operation.
 - `geode sign pub` and `geode sign blob` are still there.
 - A token with `read` still reads plaintext.
