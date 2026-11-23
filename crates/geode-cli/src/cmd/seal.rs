@@ -96,63 +96,21 @@ fn mtime_ms(meta: &std::fs::Metadata) -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
-/// `parent_id` for one path component (02-cryptography 5.3).
-///
-/// Root components use `0x00*16`. Directory objects do not exist yet, so a
-/// deeper component's `parent_id` is `BLAKE3(sealed parent path)[0..16]`.
-/// INTERIM (G0b): must match backend G0a `vectors/v1/name.json`; if the
-/// vectors pin a different derivation, change only this function.
-fn parent_id(sealed_parent: Option<&str>) -> [u8; 16] {
-    match sealed_parent {
-        None => [0u8; 16],
-        Some(p) => {
-            let digest = blake3::hash(p.as_bytes());
-            let mut id = [0u8; 16];
-            id.copy_from_slice(&digest.as_bytes()[..16]);
-            id
-        }
-    }
-}
-
 /// Name-sealing key: `NameKey` derived from `EK` (02-cryptography 3).
 fn name_key(ctx: &cmd::VaultCtx) -> [u8; 32] {
     kdf::derive_name_key(&ctx.ek, ctx.vault_id, ctx.epoch)
 }
 
-/// Seal every component of a vault-relative plaintext path (02-cryptography
-/// 5). Components join with `/`; each is sealed under its parent's id.
+/// Seal every component of a vault-relative plaintext path. Core
+/// `name::seal_rel_path` owns the parent-id chain so rotate shares it.
 pub(crate) fn seal_rel_path(ctx: &cmd::VaultCtx, rel: &str) -> Result<String> {
-    let nk = name_key(ctx);
-    let mut sealed: Vec<String> = Vec::new();
-    for comp in rel.split('/') {
-        let pid = if sealed.is_empty() {
-            parent_id(None)
-        } else {
-            parent_id(Some(&sealed.join("/")))
-        };
-        sealed.push(name::seal_name(&nk, &ctx.vault_id, ctx.epoch, &pid, comp)?);
-    }
-    Ok(sealed.join("/"))
+    name::seal_rel_path(&name_key(ctx), &ctx.vault_id, ctx.epoch, rel)
 }
 
-/// Open a sealed vault-relative path back to plaintext components (for
-/// `list` display and `open` extraction). A wrong key or a wrong tweak is
-/// `Error::AuthFail`, not a garbage name: `name::open_name` re-derives the
-/// deterministic pad and fails closed (02-cryptography 5.2).
+/// Open a sealed vault-relative path back to plaintext components, using the
+/// same core parent-id chain as `seal_rel_path`.
 pub(crate) fn open_rel_path(ctx: &cmd::VaultCtx, sealed: &str) -> Result<String> {
-    let nk = name_key(ctx);
-    let mut plain: Vec<String> = Vec::new();
-    let mut sealed_comps: Vec<String> = Vec::new();
-    for comp in sealed.split('/') {
-        let pid = if sealed_comps.is_empty() {
-            parent_id(None)
-        } else {
-            parent_id(Some(&sealed_comps.join("/")))
-        };
-        plain.push(name::open_name(&nk, &ctx.vault_id, ctx.epoch, &pid, comp)?);
-        sealed_comps.push(comp.to_string());
-    }
-    Ok(plain.join("/"))
+    name::open_rel_path(&name_key(ctx), &ctx.vault_id, ctx.epoch, sealed)
 }
 
 /// Operator-facing path for a manifest entry: opens sealed names, passes

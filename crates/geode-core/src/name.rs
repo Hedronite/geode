@@ -6,19 +6,18 @@
 //! HCTR2-256 keyed by `NameKey` under a per-(vault, epoch, parent) tweak, and
 //! finally encoded as base32hex (RFC 4648, lowercase, no padding).
 //!
-//! # Integrity (fail-closed)
+//! # Integrity (manifest MAC first, pad as defense in depth)
 //!
-//! HCTR2 is a length-preserving tweakable cipher with no separate tag, so
-//! integrity comes from re-verifying the deterministic pad after decrypt:
-//! the pad is `BLAKE3-XOF(NameKey, "pad" || parent_id || component)`, which
-//! the opener recomputes from the recovered component and compares to the
-//! decrypted tail. A single bit flip in the ciphertext diffuses across the
-//! whole HCTR2 block and breaks the pad check, so bit-flip => `AuthFail`
-//! (a hard guarantee, not merely probable). As a consequence a wrong key
-//! also yields `AuthFail` (fail-closed) rather than a garbage name; this is
-//! a deliberate, safer deviation from the v0.1 descriptive prose
-//! ("wrong key produces garbage names") per the v0.2.1 brief. Listing
-//! still works on ciphertext names without opening.
+//! The authenticated manifest entry is the primary integrity anchor for a
+//! sealed name. As a second wall, the opener re-derives the deterministic
+//! pad (`BLAKE3-XOF(NameKey, "pad" || parent_id || component)`) from the
+//! recovered component and compares it to the decrypted tail in constant
+//! time. The pad is `bucket - len` bytes, so a component whose length is
+//! exactly the bucket size has **zero** pad bytes and that second wall is
+//! empty; correctness then rests on the MAC'd manifest and the HCTR2 tweak.
+//! A wrong key or wrong tweak normally lands on a pad mismatch or a
+//! non-UTF-8 component (`AuthFail`), but that is not a universal guarantee.
+//! Listing still works on ciphertext names without opening.
 //!
 //! # Determinism leak (documented)
 //!
@@ -198,7 +197,7 @@ pub fn open_name_ciphertext(
 
     // Re-derive the pad from the recovered component and verify the tail.
     let pad = name_pad(name_key, parent_id, comp_bytes, bucket - len);
-    if plain[1 + len..] != pad[..] {
+    if !crate::zero::ct_eq(&plain[1 + len..], &pad[..]) {
         return Err(Error::AuthFail);
     }
 
@@ -219,6 +218,68 @@ pub fn open_name(
 ) -> Result<String> {
     let ct = base32hex_decode(encoded)?;
     open_name_ciphertext(name_key, vault_id, epoch, parent_id, &ct)
+}
+
+/// `parent_id` for one path component (02-cryptography 5.3).
+///
+/// The root component uses `0x00*16`. Directory objects do not exist, so a
+/// deeper component's parent id is `BLAKE3(sealed parent path)[0..16]`.
+/// INTERIM (v310): `vectors/v1/name.json` pins this derivation; change it
+/// only together with the vectors and `rotate::reseal`.
+#[must_use]
+pub fn parent_id(sealed_parent: Option<&str>) -> [u8; 16] {
+    match sealed_parent {
+        None => [0u8; 16],
+        Some(parent) => {
+            let digest = blake3::hash(parent.as_bytes());
+            let mut id = [0u8; 16];
+            id.copy_from_slice(&digest.as_bytes()[..16]);
+            id
+        }
+    }
+}
+
+/// Seal every component of a vault-relative plaintext path (02-cryptography
+/// 5). Components join with `/`; each is sealed under its parent's id.
+pub fn seal_rel_path(
+    name_key: &[u8; 32],
+    vault_id: &VaultId,
+    epoch: Epoch,
+    rel: &str,
+) -> Result<String> {
+    let mut sealed: Vec<String> = Vec::new();
+    for component in rel.split('/') {
+        let parent = sealed.join("/");
+        let pid = if sealed.is_empty() {
+            parent_id(None)
+        } else {
+            parent_id(Some(&parent))
+        };
+        sealed.push(seal_name(name_key, vault_id, epoch, &pid, component)?);
+    }
+    Ok(sealed.join("/"))
+}
+
+/// Open a sealed vault-relative path back to plaintext components.
+pub fn open_rel_path(
+    name_key: &[u8; 32],
+    vault_id: &VaultId,
+    epoch: Epoch,
+    sealed: &str,
+) -> Result<String> {
+    let mut plain: Vec<String> = Vec::new();
+    let mut sealed_components: Vec<String> = Vec::new();
+    for component in sealed.split('/') {
+        let parent = sealed_components.join("/");
+        let pid = if sealed_components.is_empty() {
+            parent_id(None)
+        } else {
+            parent_id(Some(&parent))
+        };
+        plain.push(open_name(name_key, vault_id, epoch, &pid, component)?);
+        sealed_components.push(component.to_string());
+    }
+    Ok(plain.join("/"))
 }
 
 #[cfg(test)]
@@ -252,6 +313,24 @@ mod tests {
     #[test]
     fn bucket_rejects_too_long() {
         assert!(bucket_for_len(256).is_err());
+    }
+
+    /// Ruling 2 Option A: a component whose length equals the bucket has a
+    /// zero-byte tail pad. The opener still accepts it deterministically; the
+    /// MACd manifest is the primary integrity anchor for that case. This test
+    /// pins the exact boundary rather than guessing with random tweaks.
+    #[test]
+    fn exact_bucket_zero_pad_opens_deterministically() {
+        let component = b"0123456789abcdef"; // 16 bytes == the 16 bucket
+        let mut sealed_plain = vec![16u8];
+        sealed_plain.extend_from_slice(component);
+        let tweak = build_tweak(&vid(), EP, &ROOT_PARENT);
+        let mut ciphertext = vec![0u8; sealed_plain.len()];
+        name_cipher(&nk()).encrypt(&mut ciphertext, &sealed_plain, &tweak);
+        assert_eq!(
+            open_name_ciphertext(&nk(), &vid(), EP, &ROOT_PARENT, &ciphertext).unwrap(),
+            "0123456789abcdef"
+        );
     }
 
     #[test]
