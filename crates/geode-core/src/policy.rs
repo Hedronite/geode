@@ -698,18 +698,19 @@ mod tests {
         let root = d.path();
         let vid = VaultId([0x01; 16]);
         let epoch = Epoch(1);
-        let mut p1 = default_policy(&vault::hex_encode(&vid.0));
+        // Differ early (inside the first AEGIS block) so a reused nonce
+        // would expose plaintext XOR in a deterministic 16-byte window.
+        let p1 = default_policy(&vault::hex_encode(&vid.0));
         let mut p2 = default_policy(&vault::hex_encode(&vid.0));
-        p1.principals[0].prefixes = vec!["aaaaaaaaaaaaaaaa".into()];
-        p2.principals[0].prefixes = vec!["bbbbbbbbbbbbbbbb".into()];
+        p2.default = DefaultVerdict::Allow;
         seal_policy(root, &p1, &meta_key(), vid, epoch).unwrap();
         let c1 = std::fs::read(policy_path(root)).unwrap();
         let l1 = load_policy(root, &meta_key(), vid, epoch).unwrap();
-        assert_eq!(l1.principals[0].prefixes, p1.principals[0].prefixes);
+        assert_eq!(l1.default, DefaultVerdict::Deny);
         seal_policy(root, &p2, &meta_key(), vid, epoch).unwrap();
         let c2 = std::fs::read(policy_path(root)).unwrap();
         let l2 = load_policy(root, &meta_key(), vid, epoch).unwrap();
-        assert_eq!(l2.principals[0].prefixes, p2.principals[0].prefixes);
+        assert_eq!(l2.default, DefaultVerdict::Allow);
         let n1 = &c1[5..37];
         let n2 = &c2[5..37];
         assert_ne!(n1, n2, "GPO2 must draw a fresh nonce per seal");
@@ -719,11 +720,15 @@ mod tests {
         let ct2 = &c2[GPO2_HEADER_LEN..];
         let overlap = pt1.len().min(pt2.len()).min(ct1.len()).min(ct2.len());
         let first = (0..overlap).find(|&i| pt1[i] != pt2[i]).unwrap();
-        let xor_ct: Vec<u8> = (first..overlap).map(|i| ct1[i] ^ ct2[i]).collect();
-        let xor_pt: Vec<u8> = (first..overlap).map(|i| pt1[i] ^ pt2[i]).collect();
+        // Check the 16-byte window at the first difference, where a reused
+        // nonce would expose plaintext XOR directly.
+        let end = (first + 16).min(overlap);
+        assert!(end > first, "no room for the difference window");
+        let xor_ct: Vec<u8> = (first..end).map(|i| ct1[i] ^ ct2[i]).collect();
+        let xor_pt: Vec<u8> = (first..end).map(|i| pt1[i] ^ pt2[i]).collect();
         assert_ne!(
             xor_ct, xor_pt,
-            "ciphertext XOR still reveals plaintext XOR after the first difference"
+            "ciphertext XOR reveals plaintext XOR in the 16-byte window at the first difference"
         );
     }
 
