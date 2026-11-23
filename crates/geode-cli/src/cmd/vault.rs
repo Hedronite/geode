@@ -672,8 +672,47 @@ fn now_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
+fn canonical_existing_ancestor(path: &Path) -> Result<PathBuf> {
+    let mut cursor = path;
+    loop {
+        match cursor.canonicalize() {
+            Ok(canonical) => return Ok(canonical),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(Error::Format(format!(
+                    "cannot resolve {}: {e}",
+                    cursor.display()
+                )))
+            }
+        }
+        cursor = cursor.parent().ok_or_else(|| {
+            Error::Format(format!(
+                "cannot resolve {}: no existing ancestor",
+                path.display()
+            ))
+        })?;
+    }
+}
+
 fn init(args: &InitArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
-    if args.dir.exists() && args.dir.read_dir().map_err(Error::Io)?.next().is_some() {
+    let target = if args.dir.is_absolute() {
+        args.dir.clone()
+    } else {
+        std::env::current_dir().map_err(Error::Io)?.join(&args.dir)
+    };
+    // Refuse nested vaults before touching the filesystem for creation or
+    // loading a key. Canonicalizing the deepest existing ancestor resolves
+    // symlinks, so a link into an existing vault is refused too.
+    let ancestor = canonical_existing_ancestor(&target)?;
+    for anc in ancestor.ancestors() {
+        if anc.join("GEODE").is_file() {
+            return Err(Error::Format(format!(
+                "refusing to initialize a vault inside existing vault '{}'",
+                anc.display()
+            )));
+        }
+    }
+    if target.exists() && target.read_dir().map_err(Error::Io)?.next().is_some() {
         return Err(Error::Format(format!(
             "{} exists and is not empty",
             args.dir.display()
