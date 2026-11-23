@@ -102,7 +102,24 @@ pub fn run(args: &VerifyArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
     let start = Instant::now();
     let mut chunks_checked = 0u64;
 
+    // Merkle root consistency in every mode (04-vault 4).
+    if geode_grotto::manifest::entries_root(&ctx.manifest.entries)? != ctx.manifest.root {
+        return Err(Error::AuthFail);
+    }
+    // N-4: full verify authenticates a sealed policy when one exists.
+    if matches!(mode, Mode::Full) && geode_grotto::policy::policy_path(&args.vault).is_file() {
+        let mk = geode_grotto::kdf::derive_meta_key(&ctx.ek, ctx.vault_id, ctx.epoch);
+        geode_grotto::policy::load_policy(&args.vault, &mk, ctx.vault_id, ctx.epoch)?;
+    }
+    let mut files_checked = 0u64;
+
     for e in &ctx.manifest.entries {
+        if e.kind == geode_grotto::manifest::EntryKind::Dir {
+            // A `kind: dir` row names no `.gobj` (03-format 5); `open` and
+            // rotate already skip it, and verify must too.
+            continue;
+        }
+        files_checked += 1;
         let raw = corevault::read_object(&args.vault, ctx.epoch, &e.object_id)?;
         if raw.len() < object::HEADER_SIZE {
             return Err(Error::AuthFail);
@@ -123,10 +140,17 @@ pub fn run(args: &VerifyArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
             return Err(Error::AuthFail);
         }
         let bind: &[u8] = if e.bind { e.path.as_bytes() } else { b"" };
+        // Trailing or truncated bytes fail every mode, not just full.
+        if chunks.len() != object::expected_chunks_len(&header)? {
+            return Err(Error::AuthFail);
+        }
         let n = header.chunk_count;
         match mode {
             Mode::Full => {
                 object::open_object(&ctx.ek, header_bytes, chunks, bind)?;
+                if object::content_root(&header, chunks)? != e.content_root {
+                    return Err(Error::AuthFail);
+                }
                 chunks_checked += u64::from(n);
             }
             Mode::Cheap | Mode::Sample(_) => {
@@ -162,13 +186,12 @@ pub fn run(args: &VerifyArgs, global: &GlobalArgs, out: OutMode) -> Result<()> {
             "vault_id": cmd::hex(&ctx.vault_id.0),
             "epoch": ctx.epoch.0,
             "key_id": cmd::hex(&ctx.key_id.0),
-            "files": ctx.manifest.entries.len(),
-            "content_root": cmd::hex(&ctx.manifest.root),
+            "files": files_checked,
+            "manifest_root": cmd::hex(&ctx.manifest.root),
             "elapsed_ms": start.elapsed().as_millis() as u64,
         }),
         &format!(
-            "verify ok ({mode_name}): {} file(s), {chunks_checked} chunk(s) checked, vault {}",
-            ctx.manifest.entries.len(),
+            "verify ok ({mode_name}): {files_checked} file(s), {chunks_checked} chunk(s) checked, vault {}",
             cmd::hex(&ctx.vault_id.0)
         ),
     );

@@ -241,7 +241,68 @@ pub fn seal_object(ek: &EpochKey, spec: &ObjectSpec<'_>, plaintext: &[u8]) -> Re
     })
 }
 
+/// Exact byte length of the chunk records for `header` (`tag[16] || ct` per
+/// chunk, the last one short). Rejects a header whose `chunk_count` disagrees
+/// with `plain_len`/`chunk_size`, and any arithmetic overflow.
 #[allow(clippy::cast_possible_truncation)]
+pub fn expected_chunks_len(header: &ObjectHeader) -> Result<usize> {
+    let cs = u64::from(header.chunk_size);
+    if cs == 0 {
+        return Err(Error::Format("chunk_size 0 in header".into()));
+    }
+    let count = u64::from(header.chunk_count);
+    let plain = header.plain_len;
+    if count == 0 {
+        return if plain == 0 {
+            Ok(0)
+        } else {
+            Err(Error::AuthFail)
+        };
+    }
+    if plain == 0 || plain.div_ceil(cs) != count {
+        return Err(Error::AuthFail);
+    }
+    let full = count - 1;
+    let last = plain
+        .checked_sub(full.checked_mul(cs).ok_or(Error::AuthFail)?)
+        .ok_or(Error::AuthFail)?;
+    if last == 0 || last > cs {
+        return Err(Error::AuthFail);
+    }
+    let records = full
+        .checked_mul(16u64.checked_add(cs).ok_or(Error::AuthFail)?)
+        .ok_or(Error::AuthFail)?;
+    let total = records
+        .checked_add(16)
+        .and_then(|v| v.checked_add(last))
+        .ok_or(Error::AuthFail)?;
+    usize::try_from(total).map_err(|_| Error::AuthFail)
+}
+
+/// Merkle `ContentRoot` over the chunk records (`02-cryptography` 4.4):
+/// `leaf_i = BLAKE3(i || tag_i || plain_len_i)`. Verifies the record length
+/// exactly, so trailing or truncated bytes are `AuthFail`.
+pub fn content_root(header: &ObjectHeader, chunks: &[u8]) -> Result<[u8; 32]> {
+    let expected = expected_chunks_len(header)?;
+    if chunks.len() != expected {
+        return Err(Error::AuthFail);
+    }
+    let cs = u64::from(header.chunk_size);
+    let mut leaves = Vec::with_capacity(header.chunk_count as usize);
+    let mut offset = 0usize;
+    for i in 0..header.chunk_count {
+        let this_plain = cs.min(header.plain_len - u64::from(i) * cs);
+        let rec_len = 16 + usize::try_from(this_plain).map_err(|_| Error::AuthFail)?;
+        let rec = chunks
+            .get(offset..offset + rec_len)
+            .ok_or(Error::AuthFail)?;
+        let tag: [u8; 16] = rec[..16].try_into().map_err(|_| Error::AuthFail)?;
+        leaves.push(chunk_leaf(u64::from(i), &tag, this_plain));
+        offset += rec_len;
+    }
+    Ok(merkle_root(&leaves))
+}
+
 pub fn open_object(
     ek: &EpochKey,
     header_bytes: &[u8],
@@ -266,6 +327,9 @@ pub fn open_object(
         return Err(Error::Format("chunk_size 0 in header".into()));
     }
     validate_chunk_size(header.chunk_size)?;
+    if chunk_bytes.len() != expected_chunks_len(&header)? {
+        return Err(Error::AuthFail);
+    }
     let mut plaintext = Vec::with_capacity(header.plain_len as usize);
     let mut offset = 0usize;
     for i in 0..header.chunk_count {
@@ -291,6 +355,9 @@ pub fn open_object(
         };
         plaintext.extend_from_slice(&open_chunk(ek, &ad, rec)?);
         offset += rec_len;
+    }
+    if offset != chunk_bytes.len() {
+        return Err(Error::AuthFail);
     }
     Ok((header, plaintext))
 }
@@ -411,6 +478,57 @@ mod tests {
         hb[92] ^= 0x01;
         let r = open_object(&ek, &hb, &sealed.chunks, b"");
         assert!(matches!(r, Err(Error::AuthFail)));
+    }
+
+    #[test]
+    fn content_root_matches_sealed_root() {
+        let ek = ek();
+        let sealed = seal_object(
+            &ek,
+            &ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid(),
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
+            b"root roundtrip",
+        )
+        .unwrap();
+        assert_eq!(
+            content_root(&sealed.header, &sealed.chunks).unwrap(),
+            sealed.content_root
+        );
+    }
+
+    #[test]
+    fn open_object_rejects_trailing_bytes() {
+        let ek = ek();
+        let sealed = seal_object(
+            &ek,
+            &ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid(),
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                path_bind: b"",
+            },
+            b"no trailing bytes",
+        )
+        .unwrap();
+        let hb = sealed.header.to_bytes();
+        let mut longer = sealed.chunks.clone();
+        longer.push(0);
+        let r = open_object(&ek, &hb, &longer, b"");
+        assert!(matches!(r, Err(Error::AuthFail)), "{r:?}");
+        let r = content_root(&sealed.header, &longer);
+        assert!(matches!(r, Err(Error::AuthFail)), "{r:?}");
+        // The exact bytes still open and match the sealed root.
+        assert!(open_object(&ek, &hb, &sealed.chunks, b"").is_ok());
+        assert_eq!(
+            content_root(&sealed.header, &sealed.chunks).unwrap(),
+            sealed.content_root
+        );
     }
 
     #[test]

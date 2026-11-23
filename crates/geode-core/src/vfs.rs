@@ -58,7 +58,7 @@ use crate::snapshot::{read_manifest_file, write_manifest_file};
 use crate::vault as corevault;
 use crate::{Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// Maximum bytes a single `read_range` call will return. Guards against a
@@ -159,6 +159,9 @@ fn chunk_window(off: u64, end: u64, chunk_size: u64, chunk_count: u64) -> Option
     })
 }
 
+/// Read `range` from one sealed object without loading the whole `.gobj`:
+/// parse and authenticate the header, require the exact on-disk length, seek
+/// to the first wanted chunk record, and read only that window.
 #[allow(clippy::cast_possible_truncation)]
 pub fn read_range(ek: &EpochKey, obj: &ObjectRef<'_>, range: ByteRange) -> Result<Vec<u8>> {
     if range.len == 0 {
@@ -170,18 +173,28 @@ pub fn read_range(ek: &EpochKey, obj: &ObjectRef<'_>, range: ByteRange) -> Resul
             range.len
         )));
     }
+    let path = corevault::object_path(obj.vault_root, obj.epoch, &obj.object_id)?;
+    let mut file = std::fs::File::open(&path)?;
+    let file_len = file.metadata()?.len();
+    read_range_at(ek, obj, range, &mut file, file_len)
+}
 
-    // Reads the whole `.gobj` file; decryption touches only the chunk window (A-1/S-03).
-    let raw = corevault::read_object(obj.vault_root, obj.epoch, &obj.object_id)?;
-    if raw.len() < HEADER_SIZE {
-        return Err(Error::Format(format!(
-            "object file too short: {} < {HEADER_SIZE}",
-            raw.len()
-        )));
-    }
-    let (header_bytes, chunk_bytes) = raw.split_at(HEADER_SIZE);
-    let header = ObjectHeader::from_bytes(header_bytes)?;
-
+/// The IO seam behind [`read_range`]: any `Read + Seek` over the object file
+/// bytes. `file_len` is the file's true length; a mismatch with the header's
+/// exact expected length is `AuthFail` (trailing or truncated bytes).
+#[allow(clippy::cast_possible_truncation)]
+fn read_range_at<R: Read + Seek>(
+    ek: &EpochKey,
+    obj: &ObjectRef<'_>,
+    range: ByteRange,
+    reader: &mut R,
+    file_len: u64,
+) -> Result<Vec<u8>> {
+    let mut header_bytes = [0u8; HEADER_SIZE];
+    reader
+        .read_exact(&mut header_bytes)
+        .map_err(|_| Error::AuthFail)?;
+    let header = ObjectHeader::from_bytes(&header_bytes)?;
     let want = compute_header_tag(ek, &header);
     if !crate::zero::ct_eq(&want, &header.header_tag) {
         return Err(Error::AuthFail);
@@ -189,7 +202,6 @@ pub fn read_range(ek: &EpochKey, obj: &ObjectRef<'_>, range: ByteRange) -> Resul
     if header.object_id != obj.object_id {
         return Err(Error::AuthFail);
     }
-
     let effective_bind: Vec<u8> = if header.path_bind_hash == [0u8; 32] {
         Vec::new()
     } else {
@@ -198,10 +210,16 @@ pub fn read_range(ek: &EpochKey, obj: &ObjectRef<'_>, range: ByteRange) -> Resul
         }
         obj.path_bind.to_vec()
     };
-
     let cs = u64::from(header.chunk_size);
     if cs == 0 {
         return Err(Error::Format("chunk_size 0 in header".into()));
+    }
+    let chunks_len = object::expected_chunks_len(&header)?;
+    let expected = (HEADER_SIZE as u64)
+        .checked_add(u64::try_from(chunks_len).map_err(|_| Error::AuthFail)?)
+        .ok_or(Error::AuthFail)?;
+    if file_len != expected {
+        return Err(Error::AuthFail);
     }
     let plain_len = header.plain_len;
     let off = range.off;
@@ -217,49 +235,48 @@ pub fn read_range(ek: &EpochKey, obj: &ObjectRef<'_>, range: ByteRange) -> Resul
     let Some(win) = chunk_window(off, end, cs, chunk_count) else {
         return Ok(Vec::new());
     };
-
+    let record_len = cs.checked_add(16).ok_or(Error::AuthFail)?;
+    let first_offset = win
+        .first
+        .checked_mul(record_len)
+        .and_then(|v| v.checked_add(HEADER_SIZE as u64))
+        .ok_or(Error::AuthFail)?;
+    reader
+        .seek(SeekFrom::Start(first_offset))
+        .map_err(|_| Error::AuthFail)?;
     let mut out = Vec::with_capacity(win.want_len);
-    let mut offset = 0usize;
-    for i in 0..=win.last {
-        if offset + 16 > chunk_bytes.len() {
-            return Err(Error::AuthFail);
-        }
+    for i in win.first..=win.last {
         let remaining_plain = plain_len - i * cs;
         let this_plain = cs.min(remaining_plain);
-        let rec_len = 16 + this_plain as usize;
-        if offset + rec_len > chunk_bytes.len() {
-            return Err(Error::AuthFail);
+        let rec_len = 16 + usize::try_from(this_plain).map_err(|_| Error::AuthFail)?;
+        let mut rec = vec![0u8; rec_len];
+        reader.read_exact(&mut rec).map_err(|_| Error::AuthFail)?;
+        let ad = ChunkAd {
+            suite: header.suite,
+            vault_id: header.vault_id,
+            epoch: header.epoch,
+            object_id: header.object_id,
+            chunk_index: i,
+            plain_len: header.plain_len,
+            chunk_size: header.chunk_size,
+            // 12.5: clone per touched chunk; hoist after a bench exists.
+            path_bind: effective_bind.clone(),
+        };
+        let pt = open_chunk(ek, &ad, &rec)?;
+        if i == win.first && i == win.last {
+            let end_i = win.local_off + win.want_len;
+            out.extend_from_slice(&pt[win.local_off..end_i.min(pt.len())]);
+        } else if i == win.first {
+            out.extend_from_slice(&pt[win.local_off..]);
+        } else if i == win.last {
+            let take = win.want_len.saturating_sub(out.len());
+            out.extend_from_slice(&pt[..take.min(pt.len())]);
+        } else {
+            out.extend_from_slice(&pt);
         }
-        let rec = &chunk_bytes[offset..offset + rec_len];
-        if i >= win.first {
-            let ad = ChunkAd {
-                suite: header.suite,
-                vault_id: header.vault_id,
-                epoch: header.epoch,
-                object_id: header.object_id,
-                chunk_index: i,
-                plain_len: header.plain_len,
-                chunk_size: header.chunk_size,
-                // 12.5: clone per touched chunk; hoist after a bench exists.
-                path_bind: effective_bind.clone(),
-            };
-            let pt = open_chunk(ek, &ad, rec)?;
-            if i == win.first && i == win.last {
-                let end_i = win.local_off + win.want_len;
-                out.extend_from_slice(&pt[win.local_off..end_i.min(pt.len())]);
-            } else if i == win.first {
-                out.extend_from_slice(&pt[win.local_off..]);
-            } else if i == win.last {
-                let take = win.want_len.saturating_sub(out.len());
-                out.extend_from_slice(&pt[..take.min(pt.len())]);
-            } else {
-                out.extend_from_slice(&pt);
-            }
-            if out.len() >= win.want_len {
-                break;
-            }
+        if out.len() >= win.want_len {
+            break;
         }
-        offset += rec_len;
     }
     out.truncate(win.want_len);
     Ok(out)
@@ -1244,6 +1261,90 @@ mod tests {
         .unwrap();
         assert_eq!(got, want);
         assert_eq!(got.len() as u64, len);
+    }
+
+    /// Counts the bytes the read seam actually pulls, so a whole-file read
+    /// cannot pass as a window read.
+    struct CountingCursor {
+        inner: std::io::Cursor<Vec<u8>>,
+        read: u64,
+    }
+
+    impl std::io::Read for CountingCursor {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.read += u64::try_from(n).unwrap();
+            Ok(n)
+        }
+    }
+
+    impl std::io::Seek for CountingCursor {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(pos)
+        }
+    }
+
+    #[test]
+    fn read_range_reads_only_the_header_and_target_chunk() {
+        let body: Vec<u8> = (0..(2 * CS as usize + 100))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let oid = corevault::new_object_id().unwrap();
+        let sealed = object::seal_object(
+            &ek(),
+            &object::ObjectSpec {
+                vault_id: VaultId([0x01; 16]),
+                epoch: Epoch(1),
+                object_id: oid,
+                chunk_size: CS,
+                path_bind: b"",
+            },
+            &body,
+        )
+        .unwrap();
+        let mut bytes = sealed.header.to_bytes();
+        bytes.extend_from_slice(&sealed.chunks);
+        let total = u64::try_from(bytes.len()).unwrap();
+        let mut counter = CountingCursor {
+            inner: std::io::Cursor::new(bytes),
+            read: 0,
+        };
+        let obj = ObjectRef {
+            vault_root: Path::new("/nonexistent"),
+            epoch: Epoch(1),
+            object_id: oid,
+            path_bind: b"",
+        };
+        let off = u64::from(CS) + 5;
+        let got = read_range_at(&ek(), &obj, ByteRange::new(off, 1), &mut counter, total).unwrap();
+        assert_eq!(got, &body[off as usize..off as usize + 1]);
+        // Header plus exactly one chunk record (tag + ciphertext).
+        let record = 16 + u64::from(CS);
+        assert_eq!(counter.read, HEADER_SIZE as u64 + record);
+    }
+
+    #[test]
+    fn read_range_rejects_trailing_and_truncated_bytes() {
+        let body = b"trailing bytes must not pass";
+        let (d, oid) = fixture(body, DEFAULT_CHUNK_SIZE);
+        let root = d.path().join("v.geode");
+        let path = corevault::object_path(&root, Epoch(1), &oid).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let obj = ObjectRef {
+            vault_root: &root,
+            epoch: Epoch(1),
+            object_id: oid,
+            path_bind: b"",
+        };
+        let mut longer = original.clone();
+        longer.extend_from_slice(b"junk");
+        std::fs::write(&path, &longer).unwrap();
+        let r = read_range(&ek(), &obj, ByteRange::new(0, 1));
+        assert!(matches!(r, Err(Error::AuthFail)), "trailing: {r:?}");
+        let shorter = &original[..original.len() - 1];
+        std::fs::write(&path, shorter).unwrap();
+        let r = read_range(&ek(), &obj, ByteRange::new(0, 1));
+        assert!(matches!(r, Err(Error::AuthFail)), "truncated: {r:?}");
     }
 
     #[test]
