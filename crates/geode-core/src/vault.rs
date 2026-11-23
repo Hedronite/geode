@@ -63,6 +63,16 @@ fn shard_dir(objects_root: &Path, object_id: &ObjectId) -> PathBuf {
     objects_root.join(&hex[..2])
 }
 
+/// `dest.parent()` is `""` for a bare relative path; treat that as `.` so
+/// relative writes keep working and `.` becomes the existing ancestor.
+fn dir_or_dot(path: &Path) -> &Path {
+    if path.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        path
+    }
+}
+
 /// Atomic write: temp + fsync(file) + rename + fsync directories
 /// (03-format 10, revised for G-7).
 ///
@@ -92,20 +102,21 @@ fn write_atomic_with(
     rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
     sync_dir: impl Fn(&Path) -> std::io::Result<()>,
 ) -> Result<()> {
-    let parent = dest
-        .parent()
-        .ok_or_else(|| Error::Format("dest has no parent".into()))?;
+    let parent = dir_or_dot(
+        dest.parent()
+            .ok_or_else(|| Error::Format("dest has no parent".into()))?,
+    );
     // Walk up to the first existing ancestor so a brand-new shard directory
-    // tells us every directory whose entry must be persisted.
+    // tells us every directory whose entry must be persisted. A bare relative
+    // destination (`"note.txt"`) has the empty parent, which is `.`.
     let mut missing = Vec::new();
     let mut cursor = parent;
     while !cursor.exists() {
-        let up = cursor
-            .parent()
-            .ok_or_else(|| Error::Format("dest has no existing ancestor".into()))?;
-        if up.as_os_str().is_empty() {
-            return Err(Error::Format("dest has no existing ancestor".into()));
-        }
+        let up = dir_or_dot(
+            cursor
+                .parent()
+                .ok_or_else(|| Error::Format("dest has no existing ancestor".into()))?,
+        );
         missing.push(cursor.to_path_buf());
         cursor = up;
     }
@@ -133,9 +144,8 @@ fn write_atomic_with(
     let mut dirs = Vec::with_capacity(missing.len() + 1);
     dirs.push(parent.to_path_buf());
     for dir in &missing {
-        if let Some(up) = dir.parent() {
-            dirs.push(up.to_path_buf());
-        }
+        let up = dir_or_dot(dir.parent().unwrap_or_else(|| Path::new("")));
+        dirs.push(up.to_path_buf());
     }
     dirs.sort();
     dirs.dedup();
@@ -423,6 +433,79 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, Error::Io(ref e) if e.to_string() == "grand-sync"));
         assert_eq!(std::fs::read(&dest).unwrap(), b"x");
+    }
+
+    /// Relative destinations keep working: the empty parent is `.`. Runs in a
+    /// child process with its own cwd so no other parallel test sees a cwd
+    /// change.
+    #[test]
+    fn relative_paths_sync_dot_ancestor() {
+        if std::env::var_os("GEODE_RELATIVE_PATH_CHILD").is_some() {
+            relative_paths_child();
+            return;
+        }
+        let d = tempdir().unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "vault::tests::relative_paths_sync_dot_ancestor",
+                "--test-threads=1",
+            ])
+            .env("GEODE_RELATIVE_PATH_CHILD", "1")
+            .current_dir(d.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "relative-path child failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("1 passed"),
+            "child did not run exactly this test: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    fn relative_paths_child() {
+        // Production path: bare, one new directory, and a nested chain.
+        for dest in ["bare.txt", "newtop/x.bin", "newtop3/a/b.bin"] {
+            write_atomic(Path::new(dest), b"relative").unwrap();
+            assert_eq!(std::fs::read(dest).unwrap(), b"relative");
+        }
+
+        fn seam_dirs(dest: &str) -> Vec<String> {
+            let log = RefCell::new(Vec::<String>::new());
+            write_atomic_with(
+                Path::new(dest),
+                b"seam",
+                |_| Ok(()),
+                |tmp, dst| std::fs::rename(tmp, dst),
+                |dir| {
+                    log.borrow_mut().push(dir.to_string_lossy().into_owned());
+                    Ok(())
+                },
+            )
+            .unwrap();
+            log.into_inner()
+        }
+
+        assert_eq!(seam_dirs("seam-bare.txt"), vec![".".to_owned()]);
+        let one = seam_dirs("seam-newtop/x.bin");
+        for want in [".", "seam-newtop"] {
+            assert!(
+                one.iter().any(|dir| dir == want),
+                "sync dirs {one:?} missing {want}"
+            );
+        }
+        let nested = seam_dirs("seam-newtop3/a/b.bin");
+        for want in [".", "seam-newtop3", "seam-newtop3/a"] {
+            assert!(
+                nested.iter().any(|dir| dir == want),
+                "sync dirs {nested:?} missing {want}"
+            );
+        }
     }
 
     #[test]
