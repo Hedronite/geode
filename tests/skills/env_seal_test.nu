@@ -16,6 +16,16 @@ def invoke [nu_exe: string, script: string, args: list<string>] {
   { proc: $r.exit_code, stderr: ($r.stderr | str trim), doc: $doc }
 }
 
+def wait-empty [path: string] {
+  mut i = 0
+  while $i < 40 {
+    if ((ls $path | length) == 0) { return true }
+    sleep 25ms
+    $i = $i + 1
+  }
+  false
+}
+
 def envelope? [doc: any, command: string, code: int] {
   if $doc == null { return false }
   if (($doc | get -o ok | default null) == null) { return false }
@@ -192,6 +202,33 @@ def main [--geode: string = "target/debug/geode"] {
   let bad_cfg = (invoke $nu_exe $script ["seal-config" $dirty $vault "--as" "app/dirty.conf" "--key" $key "--geode" $geode])
   let bad_cfg_cat = (cat-value $geode $key $vault "app/dirty.conf")
   $results = ($results | append (chk (($bad_cfg.doc | get -o exit) == 2 and ($bad_cfg.doc | get -o ok) == false and $bad_cfg_cat.exit_code != 0) "seal-config: inline secret refused, nothing written"))
+
+  # ---- seal-config failure envelopes and temp-path capture ----
+  let scan_fail = ($work | path join "stub-scan-fail")
+  ["#!/bin/sh" '[ "$1" = scan ] && exit 1' 'exit 0'] | str join "\n" | save -f $scan_fail
+  ^chmod 755 $scan_fail
+  let sf = (invoke $nu_exe $script ["seal-config" $clean $vault "--as" "app/sf.conf" "--geode" $scan_fail])
+  let sfd = $sf.doc
+  $results = ($results | append (chk (($sf.proc == 0) and ($sf.stderr == "") and ($sfd != null) and (($sfd | get -o ok) == false) and (($sfd | get -o exit) == 2)) "seal-config: scan failure prints envelope"))
+
+  let seal_fail = ($work | path join "stub-seal-fail")
+  ["#!/bin/sh" '[ "$1" = seal ] && exit 1' 'exit 0'] | str join "\n" | save -f $seal_fail
+  ^chmod 755 $seal_fail
+  let sf2 = (invoke $nu_exe $script ["seal-config" $clean $vault "--as" "app/sf2.conf" "--geode" $seal_fail])
+  let sf2d = $sf2.doc
+  $results = ($results | append (chk (($sf2.proc == 0) and ($sf2.stderr == "") and ($sf2d != null) and (($sf2d | get -o ok) == false) and (($sf2d | get -o exit) == 2)) "seal-config: seal failure prints envelope"))
+
+  let capture = ($work | path join "stub-capture")
+  ["#!/bin/sh" 'printf "%s\n" "$2" >> "$STUB_LOG"' 'exit 0'] | str join "\n" | save -f $capture
+  ^chmod 755 $capture
+  let capture_log = ($work | path join "capture.log")
+  $env.STUB_LOG = $capture_log
+  let cap_imp = (invoke $nu_exe $script ["import" $env2 $vault "--geode" $capture "--prefix" "capture/keys"])
+  let captured = if ($capture_log | path exists) { open $capture_log | lines } else { [] }
+  let inside_tmp = (($captured | length) > 0) and ($captured | all {|p| ($p | str starts-with ($tmp_scope + "/")) })
+  let cap_clean = (wait-empty $tmp_scope)
+  $results = ($results | append (chk (($cap_imp.doc | get -o exit) == 0 and $inside_tmp and $cap_clean) "import: temp object path is inside the overridden temp root"))
+  $env.STUB_LOG = null
 
   # ---- pin-check ----
   let pin_sh = (invoke $nu_exe $script ["pin-check" "/usr/bin/env"])
