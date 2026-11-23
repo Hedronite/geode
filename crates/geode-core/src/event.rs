@@ -63,7 +63,7 @@ const FORBIDDEN_FIELDS: &[&str] = &[
 /// with one of these, mark the value as smuggled sealed material (a raw
 /// `GTOK`, a `.gkey` file, a sealed manifest/policy). Catches a token/key
 /// even if it lands under a benign field name like `notes`.
-const SEALED_MAGIC_PREFIXES: &[&[u8]] = &[b"GDE1", b"GKEY", b"GTOK", b"GMFT", b"GPOL"];
+const SEALED_MAGIC_PREFIXES: &[&[u8]] = &[b"GDE1", b"GKEY", b"GTOK", b"GMFT", b"GPOL", b"GPO2"];
 
 /// True if `name` (case-insensitive) is a forbidden event field.
 fn is_forbidden_field(name: &str) -> bool {
@@ -415,6 +415,14 @@ mod tests {
     #[test]
     fn assert_event_safe_rejects_array_secret() {
         let v = json!({"items": [{"isk": "ab"}]});
+        let r = assert_event_safe(&v);
+        assert!(matches!(r, Err(Error::Format(_))), "got {r:?}");
+    }
+
+    #[test]
+    fn assert_event_safe_rejects_gpo2_material() {
+        // "GPO2" + a suite byte + nonce bytes, as a hex string.
+        let v = json!({"notes": "47504f32000102030405060708"});
         let r = assert_event_safe(&v);
         assert!(matches!(r, Err(Error::Format(_))), "got {r:?}");
     }

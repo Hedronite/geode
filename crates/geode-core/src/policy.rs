@@ -12,7 +12,7 @@
 use crate::kdf::{domains, Epoch, VaultId};
 use crate::manifest::canonicalize;
 use crate::vault::{self, write_atomic};
-use crate::{assert_magic, assert_suite, Error, Result, MAGIC_GPOL, SUITE_0X01};
+use crate::{Error, Result, MAGIC_GPO2, MAGIC_GPOL, SUITE_0X01};
 use aegis::aegis256x2::{Aegis256X2, Key};
 use std::path::{Path, PathBuf};
 
@@ -178,7 +178,8 @@ pub fn policy_path(vault_root: &Path) -> PathBuf {
     vault_root.join("policy.json.sealed")
 }
 
-/// Per-epoch AEGIS-256-X2 nonce for the policy file, derived from `MetaKey`.
+/// Legacy per-epoch AEGIS-256-X2 nonce for `GPOL`, derived from `MetaKey`.
+/// Only the legacy read path uses it; `GPO2` carries a random nonce.
 fn policy_nonce(meta_key: &[u8; 32]) -> [u8; 32] {
     let mut h = blake3::Hasher::new_keyed(meta_key);
     h.update(b"geode/v1/policy-nonce");
@@ -187,7 +188,7 @@ fn policy_nonce(meta_key: &[u8; 32]) -> [u8; 32] {
     n
 }
 
-/// AEAD associated data: `geode/v1/policy || vault_id || le32(epoch)`
+/// Legacy `GPOL` associated data: `geode/v1/policy || vault_id || le32(epoch)`
 /// (10-policy 3). Binds the sealed policy to a specific (`vault_id`, `epoch`).
 fn policy_ad(vault_id: VaultId, epoch: Epoch) -> Vec<u8> {
     let mut ad = Vec::with_capacity(domains::POLICY.len() + 16 + 4);
@@ -197,13 +198,39 @@ fn policy_ad(vault_id: VaultId, epoch: Epoch) -> Vec<u8> {
     ad
 }
 
-/// Sealed wire format: `GPOL(4) || suite(1) || tag(16) || ciphertext`.
-const POLICY_HEADER_LEN: usize = 4 + 1 + 16;
+/// `GPO2` associated data: the legacy domain plus magic, suite, vault id,
+/// epoch, and the explicit nonce. Domain-separated from `GPOL` so a tag
+/// cannot be transplanted between formats, epochs, vaults, or nonces.
+fn policy_ad_gpo2(vault_id: VaultId, epoch: Epoch, nonce: &[u8; 32]) -> Vec<u8> {
+    let mut ad = Vec::with_capacity(domains::POLICY.len() + 4 + 1 + 16 + 4 + 32);
+    ad.extend_from_slice(domains::POLICY.as_bytes());
+    ad.extend_from_slice(MAGIC_GPO2);
+    ad.push(SUITE_0X01);
+    ad.extend_from_slice(&vault_id.0);
+    ad.extend_from_slice(&epoch.0.to_le_bytes());
+    ad.extend_from_slice(nonce);
+    ad
+}
 
-/// Seal `policy` to `policy.json.sealed` atomically under `MetaKey`
-/// (10-policy 3). Returns the path written. The canonical (RFC 8785) JSON
-/// of `policy` is encrypted with AEGIS-256-X2; AD is
-/// `geode/v1/policy || vault_id || le32(epoch)`. Overwrites atomically.
+/// Legacy wire format: `GPOL(4) || suite(1) || tag(16) || ciphertext`.
+const GPOL_HEADER_LEN: usize = 4 + 1 + 16;
+
+/// Current wire format:
+/// `GPO2(4) || suite(1) || nonce(32) || tag(16) || ciphertext`.
+const GPO2_HEADER_LEN: usize = 4 + 1 + 32 + 16;
+
+fn random_policy_nonce() -> Result<[u8; 32]> {
+    let mut nonce = [0u8; 32];
+    getrandom::fill(&mut nonce).map_err(|e| Error::Crypto(format!("getrandom: {e}")))?;
+    Ok(nonce)
+}
+
+/// Seal `policy` to `policy.json.sealed` atomically under `MetaKey`.
+///
+/// Writes the current `GPO2` container with a fresh CSPRNG nonce. The
+/// canonical (RFC 8785) JSON of `policy` is encrypted with AEGIS-256-X2;
+/// AD binds `(magic, suite, vault_id, epoch, nonce)`. Cipher suite stays
+/// `0x01`. Overwrites atomically.
 pub fn seal_policy(
     vault_root: &Path,
     policy: &Policy,
@@ -211,16 +238,36 @@ pub fn seal_policy(
     vault_id: VaultId,
     epoch: Epoch,
 ) -> Result<PathBuf> {
+    seal_policy_with_nonce(
+        vault_root,
+        policy,
+        meta_key,
+        vault_id,
+        epoch,
+        random_policy_nonce()?,
+    )
+}
+
+/// Deterministic sealing seam for vectors and tests. Production
+/// [`seal_policy`] always draws a fresh nonce.
+fn seal_policy_with_nonce(
+    vault_root: &Path,
+    policy: &Policy,
+    meta_key: &[u8; 32],
+    vault_id: VaultId,
+    epoch: Epoch,
+    nonce: [u8; 32],
+) -> Result<PathBuf> {
     let value = serde_json::to_value(policy)
         .map_err(|e| Error::Format(format!("policy serialize: {e}")))?;
     let body = canonicalize(&value)?;
-    let nonce = policy_nonce(meta_key);
     let key: Key = *meta_key;
     let ctx = Aegis256X2::<16>::new(&key, &nonce);
-    let (ct, tag) = ctx.encrypt(&body, &policy_ad(vault_id, epoch));
-    let mut out = Vec::with_capacity(POLICY_HEADER_LEN + ct.len());
-    out.extend_from_slice(MAGIC_GPOL);
+    let (ct, tag) = ctx.encrypt(&body, &policy_ad_gpo2(vault_id, epoch, &nonce));
+    let mut out = Vec::with_capacity(GPO2_HEADER_LEN + ct.len());
+    out.extend_from_slice(MAGIC_GPO2);
     out.push(SUITE_0X01);
+    out.extend_from_slice(&nonce);
     out.extend_from_slice(&tag);
     out.extend_from_slice(&ct);
     let p = policy_path(vault_root);
@@ -228,12 +275,10 @@ pub fn seal_policy(
     Ok(p)
 }
 
-/// Load + authenticate `policy.json.sealed` (10-policy 3).
-///
-/// Missing file => `default_policy` (`human:local` admin on `""`, everyone
-/// else deny). Tamper / wrong `MetaKey` / bad magic => [`Error::AuthFail`].
-/// The body is parsed only after the tag verifies. Errors never contain
-/// ISK or key material.
+/// Load + authenticate `policy.json.sealed`, accepting `GPO2` and legacy
+/// `GPOL`. Missing file => `default_policy`; any malformed, truncated, or
+/// unauthenticated container => [`Error::AuthFail`] (exit 2). The body is
+/// parsed only after the tag verifies. Errors never contain key material.
 pub fn load_policy(
     vault_root: &Path,
     meta_key: &[u8; 32],
@@ -243,24 +288,37 @@ pub fn load_policy(
     let p = policy_path(vault_root);
     match std::fs::read(&p) {
         Ok(raw) => {
-            if raw.len() < POLICY_HEADER_LEN {
-                return Err(Error::Format("policy file too short".into()));
+            if raw.len() < 5 {
+                return Err(Error::AuthFail);
             }
-            let magic: &[u8; 4] = raw[..4]
-                .try_into()
-                .map_err(|_| Error::Format("policy magic slice".into()))?;
-            assert_magic(magic, MAGIC_GPOL)?;
-            let suite = raw[4];
-            assert_suite(suite)?;
-            let mut tag = [0u8; 16];
-            tag.copy_from_slice(&raw[5..21]);
-            let ct = &raw[21..];
-            let nonce = policy_nonce(meta_key);
+            let magic: [u8; 4] = raw[..4].try_into().map_err(|_| Error::AuthFail)?;
+            if raw[4] != SUITE_0X01 {
+                return Err(Error::AuthFail);
+            }
             let key: Key = *meta_key;
-            let ctx = Aegis256X2::<16>::new(&key, &nonce);
-            let body = ctx
-                .decrypt(ct, &tag, &policy_ad(vault_id, epoch))
-                .map_err(|_| Error::AuthFail)?;
+            let body = if magic == *MAGIC_GPO2 {
+                if raw.len() < GPO2_HEADER_LEN {
+                    return Err(Error::AuthFail);
+                }
+                let nonce: [u8; 32] = raw[5..37].try_into().map_err(|_| Error::AuthFail)?;
+                let tag: [u8; 16] = raw[37..53].try_into().map_err(|_| Error::AuthFail)?;
+                let ct = &raw[53..];
+                let ctx = Aegis256X2::<16>::new(&key, &nonce);
+                ctx.decrypt(ct, &tag, &policy_ad_gpo2(vault_id, epoch, &nonce))
+                    .map_err(|_| Error::AuthFail)?
+            } else if magic == *MAGIC_GPOL {
+                if raw.len() < GPOL_HEADER_LEN {
+                    return Err(Error::AuthFail);
+                }
+                let tag: [u8; 16] = raw[5..21].try_into().map_err(|_| Error::AuthFail)?;
+                let ct = &raw[21..];
+                let nonce = policy_nonce(meta_key);
+                let ctx = Aegis256X2::<16>::new(&key, &nonce);
+                ctx.decrypt(ct, &tag, &policy_ad(vault_id, epoch))
+                    .map_err(|_| Error::AuthFail)?
+            } else {
+                return Err(Error::AuthFail);
+            };
             let policy: Policy = serde_json::from_slice(&body)
                 .map_err(|e| Error::Format(format!("policy parse: {e}")))?;
             Ok(policy)
@@ -481,6 +539,194 @@ mod tests {
         assert!(matches!(r, Err(Error::AuthFail)), "got {r:?}");
     }
 
+    /// Golden containers for both formats: legacy GPOL and current GPO2.
+    #[test]
+    fn policy_vectors_replay() {
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../../../vectors/v1/policy.json")).unwrap();
+        let vid = VaultId(
+            vault::hex_decode(doc["vault_id"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        let epoch = Epoch(u32::try_from(doc["epoch"].as_u64().unwrap()).unwrap());
+        let mk: [u8; 32] = vault::hex_decode(doc["meta_key"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let expected = doc["policy"].clone();
+        let d = tempdir().unwrap();
+        let root = d.path();
+        let gpol = vault::hex_decode(doc["gpol"].as_str().unwrap()).unwrap();
+        std::fs::write(policy_path(root), &gpol).unwrap();
+        assert_eq!(
+            serde_json::to_value(load_policy(root, &mk, vid, epoch).unwrap()).unwrap(),
+            expected
+        );
+        let gpo2 = vault::hex_decode(doc["gpo2"]["container"].as_str().unwrap()).unwrap();
+        let nonce = vault::hex_decode(doc["gpo2"]["nonce"].as_str().unwrap()).unwrap();
+        assert_eq!(&gpo2[..4], MAGIC_GPO2);
+        assert_eq!(gpo2[4], SUITE_0X01);
+        assert_eq!(&gpo2[5..37], nonce.as_slice());
+        std::fs::write(policy_path(root), &gpo2).unwrap();
+        assert_eq!(
+            serde_json::to_value(load_policy(root, &mk, vid, epoch).unwrap()).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn truncated_policy_containers_are_auth_fail() {
+        let d = tempdir().unwrap();
+        let root = d.path();
+        let vid = VaultId([0x01; 16]);
+        let epoch = Epoch(1);
+        seal_policy(
+            root,
+            &default_policy(&vault::hex_encode(&vid.0)),
+            &meta_key(),
+            vid,
+            epoch,
+        )
+        .unwrap();
+        let container = std::fs::read(policy_path(root)).unwrap();
+        for len in [0usize, 4, 5, GPO2_HEADER_LEN - 1, container.len() - 1] {
+            std::fs::write(policy_path(root), &container[..len]).unwrap();
+            let r = load_policy(root, &meta_key(), vid, epoch);
+            assert!(matches!(r, Err(Error::AuthFail)), "GPO2 len {len}: {r:?}");
+        }
+        let mut longer = container.clone();
+        longer.push(0);
+        std::fs::write(policy_path(root), &longer).unwrap();
+        assert!(matches!(
+            load_policy(root, &meta_key(), vid, epoch),
+            Err(Error::AuthFail)
+        ));
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../../../vectors/v1/policy.json")).unwrap();
+        let gpol = vault::hex_decode(doc["gpol"].as_str().unwrap()).unwrap();
+        for len in [0usize, 4, 5, GPOL_HEADER_LEN - 1, gpol.len() - 1] {
+            std::fs::write(policy_path(root), &gpol[..len]).unwrap();
+            let r = load_policy(root, &meta_key(), vid, epoch);
+            assert!(matches!(r, Err(Error::AuthFail)), "GPOL len {len}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn bad_magic_and_suite_are_auth_fail() {
+        let d = tempdir().unwrap();
+        let root = d.path();
+        let vid = VaultId([0x01; 16]);
+        let epoch = Epoch(1);
+        seal_policy(
+            root,
+            &default_policy(&vault::hex_encode(&vid.0)),
+            &meta_key(),
+            vid,
+            epoch,
+        )
+        .unwrap();
+        let good = std::fs::read(policy_path(root)).unwrap();
+        let mut bad_magic = good.clone();
+        bad_magic[0] ^= 0x01;
+        std::fs::write(policy_path(root), &bad_magic).unwrap();
+        assert!(matches!(
+            load_policy(root, &meta_key(), vid, epoch),
+            Err(Error::AuthFail)
+        ));
+        let mut bad_suite = good.clone();
+        bad_suite[4] = 0x02;
+        std::fs::write(policy_path(root), &bad_suite).unwrap();
+        assert!(matches!(
+            load_policy(root, &meta_key(), vid, epoch),
+            Err(Error::AuthFail)
+        ));
+    }
+
+    #[test]
+    fn gpo2_nonce_or_tag_bit_flip_is_auth_fail() {
+        let d = tempdir().unwrap();
+        let root = d.path();
+        let vid = VaultId([0x01; 16]);
+        let epoch = Epoch(1);
+        seal_policy(
+            root,
+            &default_policy(&vault::hex_encode(&vid.0)),
+            &meta_key(),
+            vid,
+            epoch,
+        )
+        .unwrap();
+        let good = std::fs::read(policy_path(root)).unwrap();
+        for index in [5usize, 37] {
+            let mut flipped = good.clone();
+            flipped[index] ^= 0x01;
+            std::fs::write(policy_path(root), &flipped).unwrap();
+            let r = load_policy(root, &meta_key(), vid, epoch);
+            assert!(matches!(r, Err(Error::AuthFail)), "byte {index}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn gpo2_is_bound_to_vault_and_epoch() {
+        let d = tempdir().unwrap();
+        let root = d.path();
+        let vid = VaultId([0x01; 16]);
+        let epoch = Epoch(1);
+        seal_policy(
+            root,
+            &default_policy(&vault::hex_encode(&vid.0)),
+            &meta_key(),
+            vid,
+            epoch,
+        )
+        .unwrap();
+        assert!(matches!(
+            load_policy(root, &meta_key(), vid, Epoch(2)),
+            Err(Error::AuthFail)
+        ));
+        assert!(matches!(
+            load_policy(root, &meta_key(), VaultId([0x02; 16]), epoch),
+            Err(Error::AuthFail)
+        ));
+    }
+
+    #[test]
+    fn gpo2_fresh_nonce_breaks_keystream_reuse() {
+        let d = tempdir().unwrap();
+        let root = d.path();
+        let vid = VaultId([0x01; 16]);
+        let epoch = Epoch(1);
+        let mut p1 = default_policy(&vault::hex_encode(&vid.0));
+        let mut p2 = default_policy(&vault::hex_encode(&vid.0));
+        p1.principals[0].prefixes = vec!["aaaaaaaaaaaaaaaa".into()];
+        p2.principals[0].prefixes = vec!["bbbbbbbbbbbbbbbb".into()];
+        seal_policy(root, &p1, &meta_key(), vid, epoch).unwrap();
+        let c1 = std::fs::read(policy_path(root)).unwrap();
+        let l1 = load_policy(root, &meta_key(), vid, epoch).unwrap();
+        assert_eq!(l1.principals[0].prefixes, p1.principals[0].prefixes);
+        seal_policy(root, &p2, &meta_key(), vid, epoch).unwrap();
+        let c2 = std::fs::read(policy_path(root)).unwrap();
+        let l2 = load_policy(root, &meta_key(), vid, epoch).unwrap();
+        assert_eq!(l2.principals[0].prefixes, p2.principals[0].prefixes);
+        let n1 = &c1[5..37];
+        let n2 = &c2[5..37];
+        assert_ne!(n1, n2, "GPO2 must draw a fresh nonce per seal");
+        let pt1 = canonicalize(&serde_json::to_value(&p1).unwrap()).unwrap();
+        let pt2 = canonicalize(&serde_json::to_value(&p2).unwrap()).unwrap();
+        let ct1 = &c1[GPO2_HEADER_LEN..];
+        let ct2 = &c2[GPO2_HEADER_LEN..];
+        let overlap = pt1.len().min(pt2.len()).min(ct1.len()).min(ct2.len());
+        let first = (0..overlap).find(|&i| pt1[i] != pt2[i]).unwrap();
+        let xor_ct: Vec<u8> = (first..overlap).map(|i| ct1[i] ^ ct2[i]).collect();
+        let xor_pt: Vec<u8> = (first..overlap).map(|i| pt1[i] ^ pt2[i]).collect();
+        assert_ne!(
+            xor_ct, xor_pt,
+            "ciphertext XOR still reveals plaintext XOR after the first difference"
+        );
+    }
+
     #[test]
     fn wrong_meta_key_is_auth_fail() {
         let d = tempdir().unwrap();
@@ -494,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn bad_magic_is_format_error() {
+    fn bad_magic_is_auth_fail() {
         let d = tempdir().unwrap();
         let root = d.path().join("v.geode");
         crate::vault::init_vault_dir(&root, VaultId([0x01; 16]), Epoch(1)).unwrap();
@@ -504,7 +750,7 @@ mod tests {
         )
         .unwrap();
         let r = load_policy(&root, &meta_key(), VaultId([0x01; 16]), Epoch(1));
-        assert!(matches!(r, Err(Error::Format(_))), "got {r:?}");
+        assert!(matches!(r, Err(Error::AuthFail)), "got {r:?}");
     }
 
     // ---- G0c: token narrows policy ----

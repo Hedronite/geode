@@ -112,14 +112,14 @@ fn show(vault: &Path, global: &GlobalArgs, out: OutMode) -> Result<()> {
 /// Validate a policy document before sealing (usage errors, exit 1):
 /// version 1, `vault_id` matches this vault, principal ids valid, ops
 /// non-empty, prefixes carry no `..` / NUL / absolute form.
-fn validate_policy(pol: &Policy, ctx: &cmd::VaultCtx) -> Result<()> {
+fn validate_policy(pol: &Policy, vault_id: kdf::VaultId) -> Result<()> {
     if pol.version != 1 {
         return Err(Error::Format(format!(
             "unsupported policy version {} (want 1)",
             pol.version
         )));
     }
-    let want = cmd::hex(&ctx.vault_id.0);
+    let want = cmd::hex(&vault_id.0);
     if pol.vault_id != want {
         return Err(Error::Format(format!(
             "policy vault_id {} does not match this vault {want}",
@@ -151,6 +151,14 @@ fn validate_policy(pol: &Policy, ctx: &cmd::VaultCtx) -> Result<()> {
                 grant.id.0
             )));
         }
+        if let Some(max_calls) = grant.max_calls_per_10s {
+            if !(1..=10_000).contains(&max_calls) {
+                return Err(Error::Format(format!(
+                    "principal {} max_calls_per_10s must be in 1..=10000",
+                    grant.id.0
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -172,7 +180,7 @@ fn set(
     let pol: Policy =
         serde_json::from_slice(&raw).map_err(|e| Error::Format(format!("policy parse: {e}")))?;
     let (ctx, mk) = meta_ctx(vault, global)?;
-    validate_policy(&pol, &ctx)?;
+    validate_policy(&pol, ctx.vault_id)?;
     let rewrite = policy::policy_path(vault).is_file();
     if rewrite {
         if !(yes && break_glass) {
@@ -239,5 +247,34 @@ fn check(
             Ok(())
         }
         Verdict::Deny => cmd::fail(out, "policy_check", &Error::PolicyDeny),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geode_grotto::kdf::VaultId;
+    use geode_grotto::policy::default_policy;
+
+    fn vid() -> VaultId {
+        VaultId([0x01; 16])
+    }
+
+    fn policy() -> Policy {
+        default_policy(&cmd::hex(&vid().0))
+    }
+
+    #[test]
+    fn max_calls_per_10s_range_is_validated() {
+        let mut p = policy();
+        for bad in [Some(0), Some(10_001)] {
+            p.principals[0].max_calls_per_10s = bad;
+            let r = validate_policy(&p, vid());
+            assert!(matches!(r, Err(Error::Format(_))), "{bad:?}: {r:?}");
+        }
+        for ok in [None, Some(1), Some(128), Some(10_000)] {
+            p.principals[0].max_calls_per_10s = ok;
+            assert!(validate_policy(&p, vid()).is_ok(), "{ok:?} should pass");
+        }
     }
 }
