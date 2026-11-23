@@ -235,7 +235,9 @@ pub struct VaultCtx {
 
 fn read_json(path: &Path) -> Result<serde_json::Value> {
     let text = std::fs::read_to_string(path).map_err(Error::Io)?;
-    serde_json::from_str(&text).map_err(|e| Error::Format(format!("{}: {e}", path.display())))
+    // header.json and manifest.json are authenticated containers: corrupt or
+    // truncated JSON is an integrity failure, not a usage error.
+    serde_json::from_str(&text).map_err(|_| Error::AuthFail)
 }
 
 fn json_str<'a>(value: &'a serde_json::Value, field: &str) -> Result<&'a str> {
@@ -276,11 +278,15 @@ fn verify_json_mac(
 fn load_header(root: &Path, isk: &IdentitySecret) -> Result<(VaultId, Epoch, [u8; 16])> {
     let header = read_json(&root.join("header.json"))?;
     let mut vid = [0u8; 16];
-    unhex(json_str(&header, "vault_id")?, &mut vid)?;
+    unhex(
+        json_str(&header, "vault_id").map_err(|_| Error::AuthFail)?,
+        &mut vid,
+    )
+    .map_err(|_| Error::AuthFail)?;
     let vault_id = VaultId(vid);
     let epoch = Epoch(
-        u32::try_from(json_u64(&header, "epoch")?)
-            .map_err(|_| Error::Format("epoch overflow".into()))?,
+        u32::try_from(json_u64(&header, "epoch").map_err(|_| Error::AuthFail)?)
+            .map_err(|_| Error::AuthFail)?,
     );
     let key_id = kdf::derive_key_id(isk)?;
     Ok((vault_id, epoch, key_id.0))
@@ -294,8 +300,7 @@ fn load_recipients_for(
     key_id: [u8; 16],
 ) -> Result<EpochKey> {
     let rec_text = std::fs::read_to_string(root.join("recipients.json")).map_err(Error::Io)?;
-    let recs: Recipients = serde_json::from_str(&rec_text)
-        .map_err(|e| Error::Format(format!("recipients.json: {e}")))?;
+    let recs: Recipients = serde_json::from_str(&rec_text).map_err(|_| Error::AuthFail)?;
     // Symmetric recipient by key_id, or the X25519 recipient (added with
     // `vault add-recipient --gpub` / `rotate --add-recipient`) whose public
     // is this identity's. Shared with the TUI unlock (geode-grotto).
@@ -324,7 +329,7 @@ pub(crate) fn load_manifest(
     if let Some(o) = body.as_object_mut() {
         o.remove("manifest_mac");
     }
-    serde_json::from_value(body).map_err(|e| Error::Format(format!("manifest.json: {e}")))
+    serde_json::from_value(body).map_err(|_| Error::AuthFail)
 }
 
 /// Load a vault: sentinel, `header.json`, `recipients.json`, manifest — all
@@ -455,6 +460,82 @@ fn map_error(err: &Error) -> (&'static str, i32) {
 mod r_apply_oracle_tests {
     use super::*;
     use geode_grotto::manifest;
+
+    fn exhaustive_error_name(err: &Error) -> &'static str {
+        // No wildcard: adding a geode_grotto::Error variant breaks this
+        // compile until the variant is added to the parity test too.
+        match err {
+            Error::NotImplemented => "NotImplemented",
+            Error::AuthFail => "AuthFail",
+            Error::Io(_) => "Io",
+            Error::Format(_) => "Format",
+            Error::PolicyDeny => "PolicyDeny",
+            Error::TokenInvalid => "TokenInvalid",
+            Error::Locked => "Locked",
+            Error::Crypto(_) => "Crypto",
+        }
+    }
+
+    #[test]
+    fn exit_tables_agree_on_every_error_variant() {
+        let not_found = Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound));
+        let other_io = Error::Io(std::io::Error::other("x"));
+        let samples = [
+            Error::NotImplemented,
+            Error::AuthFail,
+            not_found,
+            other_io,
+            Error::Format("unknown magic".into()),
+            Error::Format("unknown cipher suite 0x02".into()),
+            Error::Format("x".into()),
+            Error::PolicyDeny,
+            Error::TokenInvalid,
+            Error::Locked,
+            Error::Crypto("x".into()),
+        ];
+        for err in &samples {
+            let (_, map_code) = map_error(err);
+            let (_, out_code) = crate::output::exit_family(err);
+            assert_eq!(
+                map_code,
+                out_code,
+                "{} disagrees: map_error={map_code}, exit_family={out_code}",
+                exhaustive_error_name(err)
+            );
+        }
+        assert_eq!(map_error(&Error::AuthFail).1, crate::output::exit::AUTH);
+        assert_eq!(
+            map_error(&Error::Format("unknown magic".into())).1,
+            crate::output::exit::AUTH
+        );
+        assert_eq!(
+            map_error(&Error::Format("unknown cipher suite 0x02".into())).1,
+            crate::output::exit::AUTH
+        );
+    }
+
+    #[test]
+    fn corrupt_authenticated_containers_are_auth_fail() {
+        use geode_grotto::kdf::{Epoch, EpochKey, VaultId};
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::create_dir_all(root.join("epochs/00000001")).unwrap();
+        std::fs::write(root.join("header.json"), b"{ not json").unwrap();
+        let isk = geode_grotto::kdf::IdentitySecret::from_bytes([0x07; 32]);
+        assert!(matches!(load_header(root, &isk), Err(Error::AuthFail)));
+        // Missing trusted field in an otherwise valid header is corruption too.
+        std::fs::write(root.join("header.json"), b"{\"epoch\":1}").unwrap();
+        assert!(matches!(load_header(root, &isk), Err(Error::AuthFail)));
+
+        let manifest = manifest_path(root, Epoch(1));
+        std::fs::write(&manifest, b"{ truncated").unwrap();
+        let ek = EpochKey::from_bytes([0u8; 32]);
+        assert!(matches!(
+            load_manifest(root, &ek, VaultId([0x01; 16]), Epoch(1)),
+            Err(Error::AuthFail)
+        ));
+        assert!(matches!(read_json(&manifest), Err(Error::AuthFail)));
+    }
 
     #[test]
     fn verify_json_mac_rejects_tampered_manifest_mac() {

@@ -6,6 +6,7 @@
 
 use crate::zero::Secret32;
 use crate::Result;
+use zeroize::Zeroizing;
 
 /// Exact domain-string prefixes (02-cryptography 2, 13-implementation-sketch).
 ///
@@ -117,22 +118,22 @@ pub fn derive_epoch_key(
     epoch: Epoch,
     context_label: &str,
 ) -> Result<EpochKey> {
-    let mut km = Vec::with_capacity(32 + 16 + 4 + context_label.len());
+    let mut km = Zeroizing::new(Vec::with_capacity(32 + 16 + 4 + context_label.len()));
     km.extend_from_slice(isk.as_bytes());
     km.extend_from_slice(&vault_id.0);
     km.extend_from_slice(&epoch.0.to_le_bytes());
     km.extend_from_slice(context_label.as_bytes());
-    let ek = blake3::derive_key(domains::EPOCH_FEK, &km);
+    let ek = blake3::derive_key(domains::EPOCH_FEK, &km[..]);
     Ok(EpochKey(Secret32::new_unchecked(ek)))
 }
 
 /// Derive a child key of `EK` under `domain` over `extra` binding data
 /// (02-cryptography 3: `NameKey` / `MetaKey` / `ManifestKey`).
 fn derive_child(ek: &EpochKey, domain: &str, extra: &[u8]) -> [u8; 32] {
-    let mut km = Vec::with_capacity(32 + extra.len());
+    let mut km = Zeroizing::new(Vec::with_capacity(32 + extra.len()));
     km.extend_from_slice(ek.as_bytes());
     km.extend_from_slice(extra);
-    blake3::derive_key(domain, &km)
+    blake3::derive_key(domain, &km[..])
 }
 
 /// `NameKey = BLAKE3-KDF(EK, "geode/v1/name-key", vault_id || le32(epoch))`
