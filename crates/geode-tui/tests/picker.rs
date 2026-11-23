@@ -231,6 +231,77 @@ fn help_documents_cli_verbs_outside_the_tabs() {
     assert!(text.contains("CLI verbs"), "{text}");
     assert!(text.contains("geode seal"), "{text}");
     assert!(text.contains("geode vault init"), "{text}");
+    assert!(
+        text.contains("geode open VAULT DIR   decrypt vault to a directory"),
+        "{text}"
+    );
+    assert!(!text.contains("open a mount"), "{text}");
+}
+
+fn child_default_discovery_assertions() {
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let cwd = std::env::current_dir().expect("cwd");
+    let env_vault = PathBuf::from(std::env::var_os("GEODE_VAULT").expect("GEODE_VAULT"));
+    let reg = home.join("reg.geode");
+    let notes = home.join("notes.geode");
+    let expected = vec![
+        canon(&env_vault),
+        canon(&reg),
+        canon(&cwd.join("a.geode")),
+        canon(&cwd.join("z.geode")),
+        canon(&notes),
+    ];
+    let got = discover_picker_items(None);
+    assert_eq!(ids(&got), expected);
+}
+
+#[test]
+fn default_discovery_uses_geode_vault_and_cwd_in_a_child() {
+    if std::env::var_os("GEODE_PICKER_CHILD").is_some() {
+        child_default_discovery_assertions();
+        return;
+    }
+    let f = Fixture::new();
+    let env_vault = f.vault(&f.home.join("env-vault.geode"));
+    let _ = f.vault(&f.home.join("reg.geode"));
+    let _ = f.vault(&f.cwd.join("z.geode"));
+    let _ = f.vault(&f.cwd.join("a.geode"));
+    let _ = f.vault(&f.home.join("notes.geode"));
+    let registry_dir = f.xdg.join("hedronite/geode");
+    std::fs::create_dir_all(&registry_dir).unwrap();
+    std::fs::write(
+        registry_dir.join("vaults"),
+        "# child registry\n\n~/reg.geode\n",
+    )
+    .unwrap();
+
+    let out = std::process::Command::new(std::env::current_exe().expect("current_exe"))
+        .args([
+            "--exact",
+            "default_discovery_uses_geode_vault_and_cwd_in_a_child",
+            "--test-threads=1",
+        ])
+        .env("GEODE_PICKER_CHILD", "1")
+        .env("GEODE_VAULT", &env_vault)
+        .env("HOME", &f.home)
+        .env("XDG_CONFIG_HOME", &f.xdg)
+        .current_dir(&f.cwd)
+        .output()
+        .expect("spawn picker child");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "child failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("running 1 test"),
+        "child did not run exactly one test: {stdout}"
+    );
+    assert!(
+        stdout.contains("1 passed"),
+        "child did not pass exactly one test: {stdout}"
+    );
 }
 
 #[test]

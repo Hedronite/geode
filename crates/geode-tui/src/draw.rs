@@ -721,7 +721,7 @@ fn help_lines(palette: Palette) -> Vec<Line<'static>> {
             Style::default().fg(palette.muted),
         )),
         Line::from(Span::styled(
-            "  geode open VAULT DIR   open a mount",
+            "  geode open VAULT DIR   decrypt vault to a directory",
             Style::default().fg(palette.muted),
         )),
         Line::from(Span::styled(
