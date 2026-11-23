@@ -579,6 +579,38 @@ fn key_files_inside_a_root_are_always_findings() {
     );
 }
 
+fn planted_aws() -> String {
+    format!("AKIA{}", pick(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 16))
+}
+
+fn planted_ghp() -> String {
+    format!(
+        "ghp_{}",
+        pick(
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            36
+        )
+    )
+}
+
+fn scan_rules(e: &Env, root: &str) -> (i32, Vec<(String, String)>) {
+    let o = e.geode(&["scan", "--hook", "--json", root]);
+    let code = o.status.code().unwrap_or(-1);
+    let found = if code == 2 {
+        rules(&json(&o))
+    } else {
+        assert_eq!(
+            code,
+            0,
+            "{root}: {}{}",
+            String::from_utf8_lossy(&o.stdout),
+            err(&o)
+        );
+        Vec::new()
+    };
+    (code, found)
+}
+
 #[test]
 fn clean_vault_metadata_is_exempt() {
     let e = Env::new();
@@ -682,9 +714,12 @@ fn gkey_bytes_disguised_as_header_json_in_vault_are_caught_first() {
 
     let o = e.geode(&["scan", "--hook", "--json", "v.geode"]);
     assert_eq!(o.status.code(), Some(2), "{}", err(&o));
-    assert_eq!(
-        rules(&json(&o)),
-        [("v.geode/header.json".into(), "geode-key-file".into())]
+    let found = rules(&json(&o));
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == "v.geode/header.json" && r == "geode-key-file"),
+        "{found:?}"
     );
 }
 
@@ -757,6 +792,280 @@ fn standalone_vault_metadata_is_not_exempt() {
             .any(|(p, r)| p == "alone/recipients.json" && r == "github-token"),
         "{found:?}"
     );
+}
+
+#[test]
+fn exempt_paths_require_container_bytes() {
+    let e = Env::new();
+    let root = init_vault(&e);
+    let aws = planted_aws();
+    let object_rel = "epochs/00000001/objects/ab/0123456789abcdef0123456789abcdef.gobj";
+    for (rel, body) in [
+        (object_rel, format!("aws_access_key_id = {aws}\n")),
+        ("policy.json.sealed", format!("aws_access_key_id = {aws}\n")),
+        ("manifest.json", format!("aws_access_key_id = {aws}\n")),
+        (
+            "epochs/00000001/snapshots/s1.json",
+            format!("aws_access_key_id = {aws}\n"),
+        ),
+    ] {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+    }
+
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    for rel in [
+        object_rel,
+        "policy.json.sealed",
+        "manifest.json",
+        "epochs/00000001/snapshots/s1.json",
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|(p, r)| p == &format!("v.geode/{rel}") && r == "aws-access-key"),
+            "{rel} was exempted: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn header_suffix_and_label_are_scanned() {
+    let e = Env::new();
+    let root = init_vault(&e);
+    let ghp = planted_ghp();
+    let header = root.join("header.json");
+    let mut text = std::fs::read_to_string(&header).unwrap();
+    text.push_str(&format!("\n# {ghp}\n"));
+    std::fs::write(&header, &text).unwrap();
+
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == "v.geode/header.json" && r == "github-token"),
+        "{found:?}"
+    );
+
+    // A strictly valid header with the secret in `label` stays exempt as a
+    // structure but its label bytes are scanned.
+    let e = Env::new();
+    let root = init_vault(&e);
+    let header = root.join("header.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&header).unwrap()).unwrap();
+    value["label"] = serde_json::Value::String(ghp);
+    std::fs::write(&header, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == "v.geode/header.json" && r == "github-token"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn forged_vault_metadata_is_scanned() {
+    let e = Env::new();
+    let aws = planted_aws();
+
+    // Valid sentinel but empty recipients: not a vault root.
+    let root = init_vault(&e);
+    std::fs::write(root.join("recipients.json"), b"{}\n").unwrap();
+    std::fs::write(root.join("header.json"), format!("aws = {aws}\n")).unwrap();
+    std::fs::write(root.join("manifest.json"), format!("aws = {aws}\n")).unwrap();
+    std::fs::write(root.join("policy.json.sealed"), format!("aws = {aws}\n")).unwrap();
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    for rel in ["header.json", "manifest.json", "policy.json.sealed"] {
+        assert!(
+            found
+                .iter()
+                .any(|(p, r)| p == &format!("v.geode/{rel}") && r == "aws-access-key"),
+            "{rel}: {found:?}"
+        );
+    }
+
+    // Wrong sentinel: valid header/recipients still do not make a vault.
+    let e = Env::new();
+    let root = init_vault(&e);
+    std::fs::write(root.join("GEODE"), b"GDE1 vaultXX\n").unwrap();
+    std::fs::write(root.join("manifest.json"), format!("aws = {aws}\n")).unwrap();
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == "v.geode/manifest.json" && r == "aws-access-key"),
+        "{found:?}"
+    );
+
+    // Missing recipients.json: no vault root, so metadata is scanned.
+    let e = Env::new();
+    let root = init_vault(&e);
+    std::fs::remove_file(root.join("recipients.json")).unwrap();
+    std::fs::write(root.join("manifest.json"), format!("aws = {aws}\n")).unwrap();
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == "v.geode/manifest.json" && r == "aws-access-key"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn malformed_structure_names_are_scanned() {
+    let e = Env::new();
+    let root = init_vault(&e);
+    let aws = planted_aws();
+    std::fs::write(root.join("ID.GKEY"), random(54)).unwrap();
+    for (rel, token) in [
+        ("epochs/00000001/snapshots/bad name.json", &aws),
+        ("epochs/00000001/objects/ab/nothex.gobj", &aws),
+        ("epochs/badepoch/manifest.json", &aws),
+    ] {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("aws = {token}\n")).unwrap();
+    }
+
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == "v.geode/ID.GKEY" && r == "geode-key-file"),
+        "{found:?}"
+    );
+    for rel in [
+        "epochs/00000001/snapshots/bad name.json",
+        "epochs/00000001/objects/ab/nothex.gobj",
+        "epochs/badepoch/manifest.json",
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|(p, r)| p == &format!("v.geode/{rel}") && r == "aws-access-key"),
+            "{rel}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn vault_root_content_is_required() {
+    // Wrong sentinel: with a correct sentinel this same vault is clean.
+    let e = Env::new();
+    let root = init_vault(&e);
+    std::fs::write(root.join("GEODE"), b"GDE1 vaultXX\n").unwrap();
+    let (code, _found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2);
+
+    // Missing recipients.json: no vault root and no metadata exemption.
+    let e = Env::new();
+    let root = init_vault(&e);
+    std::fs::remove_file(root.join("recipients.json")).unwrap();
+    let (code, _found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2);
+}
+
+#[test]
+fn malformed_paths_with_valid_container_bytes_are_scanned() {
+    let e = Env::new();
+    let root = init_vault(&e);
+    let aws = planted_aws();
+    std::fs::write(e.dir.join("a.txt"), b"hello\n").unwrap();
+    ok(&e, &["--key", "k.gkey", "seal", "a.txt", "v.geode"]);
+    ok(
+        &e,
+        &[
+            "--key", "k.gkey", "snapshot", "create", "v.geode", "--name", "s1",
+        ],
+    );
+
+    // Valid object header at a bad stem: a path-only exemption would hide
+    // the appended plaintext.
+    let epoch = epoch_dir(&root);
+    let object = walkdir::WalkDir::new(epoch.join("objects"))
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .find(|x| x.path().extension().is_some_and(|e| e == "gobj"))
+        .expect("sealed object")
+        .into_path();
+    let mut bytes = std::fs::read(&object).unwrap();
+    bytes.extend_from_slice(format!("\naws = {aws}\n").as_bytes());
+    std::fs::create_dir_all(epoch.join("objects/ab")).unwrap();
+    std::fs::write(epoch.join("objects/ab/nothex.gobj"), &bytes).unwrap();
+
+    // Valid manifest at a bad epoch, with the secret in a known string
+    // field. A path-only exemption would hide it.
+    let manifest = epoch.join("manifest.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    value["generator"] = serde_json::Value::String(format!("geode {aws}"));
+    std::fs::create_dir_all(root.join("epochs/badepoch")).unwrap();
+    std::fs::write(
+        root.join("epochs/badepoch/manifest.json"),
+        serde_json::to_vec_pretty(&value).unwrap(),
+    )
+    .unwrap();
+
+    // Valid snapshot at an invalid name, with the secret in its embedded
+    // manifest.
+    let snapshot = epoch.join("snapshots/s1.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&snapshot).unwrap()).unwrap();
+    value["name"] = serde_json::Value::String("bad name".into());
+    value["manifest"]["generator"] = serde_json::Value::String(format!("geode {aws}"));
+    std::fs::write(
+        epoch.join("snapshots/bad name.json"),
+        serde_json::to_vec_pretty(&value).unwrap(),
+    )
+    .unwrap();
+
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    for rel in [
+        "epochs/00000001/objects/ab/nothex.gobj",
+        "epochs/badepoch/manifest.json",
+        "epochs/00000001/snapshots/bad name.json",
+    ] {
+        assert!(
+            found
+                .iter()
+                .any(|(p, r)| p == &format!("v.geode/{rel}") && r == "aws-access-key"),
+            "{rel}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn large_valid_object_is_exempt_before_max_bytes() {
+    let e = Env::new();
+    init_vault(&e);
+    std::fs::write(e.dir.join("large.bin"), vec![b'A'; 1024 * 1024]).unwrap();
+    ok(&e, &["--key", "k.gkey", "seal", "large.bin", "v.geode"]);
+    let (code, found) = scan_rules_with(&e, &["scan", "--max-bytes", "200000", "v.geode"]);
+    assert_eq!(code, 0, "{found:?}");
+    assert!(found.is_empty(), "{found:?}");
+}
+
+fn scan_rules_with(e: &Env, args: &[&str]) -> (i32, Vec<(String, String)>) {
+    let o = e.geode(args);
+    let code = o.status.code().unwrap_or(-1);
+    let found = if code == 2 {
+        rules(&json(&o))
+    } else {
+        assert_eq!(code, 0, "{}{}", String::from_utf8_lossy(&o.stdout), err(&o));
+        Vec::new()
+    };
+    (code, found)
 }
 
 #[test]
