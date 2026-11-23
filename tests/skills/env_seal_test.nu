@@ -39,6 +39,10 @@ def main [--geode: string = "target/debug/geode"] {
   let work = (^mktemp -d | str trim)
   let key = ($work | path join "k.gkey")
   let vault = ($work | path join "v.geode")
+  let tmp_scope = ($work | path join "tmp-scope")
+  mkdir $tmp_scope
+  $env.TMPDIR = $tmp_scope
+  $env.GEODE_ENV_SEAL_TMP = $tmp_scope
   mut results = []
 
   let kg = (^$geode keygen --insecure-plaintext $key | complete)
@@ -87,6 +91,8 @@ def main [--geode: string = "target/debug/geode"] {
     let name = $"roundtrip: ($k) exact bytes"
     $results = ($results | append (chk (($got.exit_code == 0) and ($got.stdout == $want) and (not ($got.stdout | str ends-with "\n")) and ($got.stderr == "")) $name))
   }
+  let leftover_ok = ((ls $tmp_scope | length) == 0)
+  $results = ($results | append (chk $leftover_ok "import: no temp dirs left on success"))
   let manifest_raw = (open --raw $manifest)
   $results = ($results | append (chk (($manifest_raw | str contains "version") and not ($manifest_raw | str contains "line1") and not ($manifest_raw | str contains "foo#barZ") and not ($manifest_raw | str contains "short5")) "manifest: names only, no values"))
 
@@ -97,11 +103,12 @@ def main [--geode: string = "target/debug/geode"] {
 
   # ---- fail-closed parser cases with exact line ----
   let bad = [
-    { name: "missing equals on line 2", body: "OK=abcdefgh\nNOEQUALS\n" }
-    { name: "bad key", body: "1BAD=value\n" }
-    { name: "unterminated double quote", body: "BAD=\"abc\n" }
-    { name: "unescaped multiline", body: "BAD=\"abc\ndef\"\n" }
-    { name: "trailing after quote", body: "BAD=\"abc\"junk\n" }
+    { name: "missing equals on line 2", body: "OK=abcdefgh\nNOEQUALS\n", line: 2 }
+    { name: "bad key", body: "1BAD=value\n", line: 1 }
+    { name: "unterminated double quote", body: "BAD=\"abc\n", line: 1 }
+    { name: "unescaped multiline", body: "BAD=\"abc\ndef\"\n", line: 1 }
+    { name: "trailing after quote", body: "BAD=\"abc\"junk\n", line: 1 }
+    { name: "unterminated on line 3", body: "A=abcdefgh\nB=abcdefgh\nC=\"x\n", line: 3 }
   ]
   for case in $bad {
     let slug = ($case.name | str replace -a " " "-")
@@ -110,9 +117,20 @@ def main [--geode: string = "target/debug/geode"] {
     let r = (invoke $nu_exe $script ["import" $f $vault "--key" $key "--geode" $geode])
     let doc = $r.doc
     let closed = ($doc != null and (($doc | get -o ok) == false) and (($doc | get -o exit) == 2))
-    let numbered = ($doc != null and (($doc | get -o error) | str contains "line "))
-    $results = ($results | append (chk (($r.stderr == "") and $closed and $numbered and ($doc.ok == false)) $"parser refuses: ($case.name)"))
+    let exact = ($doc != null and (($doc | get -o error) | str contains $"line ($case.line):"))
+    let no_temp = ((ls $tmp_scope | length) == 0)
+    $results = ($results | append (chk (($r.stderr == "") and $closed and $exact and $no_temp) $"parser refuses at exact line: ($case.name)"))
   }
+
+  # ---- a real seal failure must print an envelope, leak nothing, leave no temp ----
+  let fail_env = ($work | path join "fail.env")
+  "FAILSECRET=supersecretvalue\n" | save -f $fail_env
+  let failed_import = (invoke $nu_exe $script ["import" $fail_env ($work | path join "missing.geode") "--key" $key "--geode" $geode])
+  let fd = $failed_import.doc
+  let fail_closed = ($failed_import.proc == 0) and ($failed_import.stderr == "") and ($fd != null) and (($fd | get -o ok) == false) and (($fd | get -o exit) == 2)
+  let fail_text = ($failed_import | to json)
+  let fail_clean = (not ($fail_text | str contains "supersecretvalue")) and ((ls $tmp_scope | length) == 0)
+  $results = ($results | append (chk ($fail_closed and $fail_clean) "import: seal failure envelopes, leaks nothing, cleans temp"))
 
   # ---- classification: min bytes, include, skip, dry-run ----
   let env2 = ($work | path join "class.env")
@@ -145,7 +163,23 @@ def main [--geode: string = "target/debug/geode"] {
   let want_args = ($want_secrets | each {|s| ["--secret" $s] } | flatten)
   $results = ($results | append (chk ($ra_secrets == $want_secrets and $ra_args == $want_args) "run-args: exact --secret list"))
   let ra_text = ($ra | to json)
-  $results = ($results | append (chk (not ($expected | values | any {|v| ($ra_text | str contains $v) })) "run-args: no secret bytes"))
+
+  let ra_leaks = ($expected | values | any {|v| ($ra_text | str contains $v) })
+  $results = ($results | append (chk (not $ra_leaks) "run-args: no secret bytes"))
+
+  for case in [
+    { name: "parent traversal", path: "../x" }
+    { name: "out of prefix", path: "other/OK" }
+    { name: "flag-like injection", path: "a=b --allow-host *" }
+  ] {
+    let ra_slug = ($case.name | str replace -a " " "-")
+    let bad_manifest = ($work | path join $"ra-($ra_slug).json")
+    { version: 1, vault: "v", prefix: "env/keys", keys: [{ key: "OK", path: $case.path, bytes: 4 }] } | to json | save -f $bad_manifest
+    let bad_ra = (invoke $nu_exe $script ["run-args" $bad_manifest])
+    let bd = $bad_ra.doc
+    let refused = ($bd != null) and (($bd | get -o ok) == false) and (($bd | get -o exit) == 2) and ($bad_ra.stderr == "")
+    $results = ($results | append (chk $refused $"run-args refuses unsafe manifest path: ($case.name)"))
+  }
 
   # ---- seal-config scan gate ----
   let clean = ($work | path join "clean.conf")
@@ -173,6 +207,27 @@ def main [--geode: string = "target/debug/geode"] {
   let pin_link = (invoke $nu_exe $script ["pin-check" $link])
   let link_failures = ($pin_link.doc | get -o data | get -o failures | default [])
   $results = ($results | append (chk (($pin_link.doc | get -o exit) == 2 and ($link_failures | any {|f| ($f.reason | str contains "symlink") })) "pin-check: symlink refused"))
+
+  let gw_dir = ($work | path join "gw-dir")
+  mkdir $gw_dir
+  let gw_bin = ($gw_dir | path join "bin")
+  ^cp /usr/bin/env $gw_bin
+  ^chmod 755 $gw_bin
+  ^chmod 775 $gw_dir
+  let gw_canon = (^realpath $gw_dir | str trim)
+  let pin_gw = (invoke $nu_exe $script ["pin-check" $gw_bin])
+  let gw_failures = ($pin_gw.doc | get -o data | get -o failures | default [])
+  let gw_hit = ($gw_failures | any {|f| ($f.path == $gw_canon) and (($f.reason | str contains "writable")) })
+  $results = ($results | append (chk (($pin_gw.doc | get -o exit) == 2 and $gw_hit) "pin-check: group-writable parent refused"))
+
+  let ww_bin = ($work | path join "ww-bin")
+  ^cp /usr/bin/env $ww_bin
+  ^chmod 777 $ww_bin
+  let ww_canon = (^realpath $ww_bin | str trim)
+  let pin_ww = (invoke $nu_exe $script ["pin-check" $ww_bin])
+  let ww_failures = ($pin_ww.doc | get -o data | get -o failures | default [])
+  let ww_hit = ($ww_failures | any {|f| ($f.path == $ww_canon) and (($f.reason | str contains "writable")) })
+  $results = ($results | append (chk (($pin_ww.doc | get -o exit) == 2 and $ww_hit) "pin-check: world-writable file refused"))
 
   let failed = ($results | where {|r| not $r.ok })
   print $"env-seal tests: (($results | length) - ($failed | length)) passed, ($failed | length) failed"

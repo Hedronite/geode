@@ -138,6 +138,17 @@ def bytes-of [s: string] {
   $s | into binary | length
 }
 
+def make-temp-dir [] {
+  let root = ($env.GEODE_ENV_SEAL_TMP? | default "")
+  let r = if $root == "" {
+    (^mktemp -d | complete)
+  } else {
+    (^mktemp -d -p $root | complete)
+  }
+  if $r.exit_code != 0 { error make { msg: "mktemp failed" } }
+  $r.stdout | str trim
+}
+
 def "main import" [
   env_file: string
   vault: string
@@ -164,7 +175,7 @@ def "main import" [
   let parsed = (parse-env $text)
   if $parsed.error != null { fail "import" 2 $parsed.error }
 
-  let tmp = (try { ^mktemp -d | str trim } catch {|e| fail "import" 2 $"mktemp failed: ($e.msg)" })
+  let tmp = (try { make-temp-dir } catch {|e| fail "import" 2 $"mktemp failed: ($e.msg)" })
   let outcome = (try {
     mut sealed = []
     mut skipped = []
@@ -193,7 +204,7 @@ def "main import" [
         if $seal_names { $argv = ($argv | append "--seal-names") }
         let run = (try { ^$g ...$argv | complete } catch {|e| { exit_code: 127, stdout: "", stderr: "" } })
         if $run.exit_code != 0 {
-          $failure = $"geode seal failed for ($entry.key) (exit ($run.exit_code))"
+          $failure = $"geode seal failed for ($entry.key), status ($run.exit_code)"
           break
         }
       }
@@ -242,13 +253,29 @@ def "main run-args" [manifest: string, --geode: string = ""] {
   let prefix = ($doc | get -o prefix | default "")
   if not (valid-prefix $prefix) { fail "run-args" 2 "manifest prefix is invalid" }
   let keys = ($doc | get -o keys | default [])
+  let keys_kind = ($keys | describe)
+  if not (($keys_kind | str starts-with "list") or ($keys_kind | str starts-with "table")) {
+    fail "run-args" 2 "manifest keys must be a list"
+  }
   mut args = []
   mut secrets = []
   for item in $keys {
     let key = ($item | get -o key | default "")
-    if not ($key =~ $KEY_RE) { fail "run-args" 2 "manifest has an invalid key name" }
-    let path = ($item | get -o path | default $"($prefix)/($key)")
-    let spec = $"($key)=($path)"
+    if (($key | describe) != "string") or (not ($key =~ $KEY_RE)) {
+      fail "run-args" 2 "manifest has an invalid key name"
+    }
+    let expected = $"($prefix)/($key)"
+    let provided = ($item | get -o path | default $expected)
+    if (($provided | describe) != "string") or ($provided != $expected) {
+      fail "run-args" 2 "manifest entry path does not match prefix/key"
+    }
+    if ($provided | str contains " ") or ($provided | str contains "\t") {
+      fail "run-args" 2 "manifest entry path contains whitespace"
+    }
+    if ($provided | str starts-with "/") or ($provided | str starts-with "-") or (".." in ($provided | split row "/")) {
+      fail "run-args" 2 "manifest entry path is unsafe"
+    }
+    let spec = $"($key)=($provided)"
     $args = ($args | append ["--secret" $spec])
     $secrets = ($secrets | append $spec)
   }
@@ -274,14 +301,14 @@ def "main seal-config" [
     fail "seal-config" 2 "scan found an inline secret; refusing to seal the config"
   }
   if $scan.exit_code != 0 {
-    fail "seal-config" 2 $"scan failed (exit ($scan.exit_code))"
+    fail "seal-config" 2 $"scan failed, status ($scan.exit_code)"
   }
   mut argv = []
   if $key != "" { $argv = ($argv | append ["--key" $key]) }
   $argv = ($argv | append ["seal" $file $vault "--as" $as])
   if $seal_names { $argv = ($argv | append "--seal-names") }
   let run = (try { ^$g ...$argv | complete } catch {|e| { exit_code: 127, stdout: "", stderr: "" } })
-  if $run.exit_code != 0 { fail "seal-config" 2 $"geode seal failed (exit ($run.exit_code))" }
+  if $run.exit_code != 0 { fail "seal-config" 2 $"geode seal failed, status ($run.exit_code)" }
   emit true "seal-config" 0 { path: $as, sealed: true } null
 }
 
