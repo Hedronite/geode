@@ -19,7 +19,8 @@ use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use geode_grotto::{Error, Result};
+use geode_grotto::snapshot::validate_snapshot_name;
+use geode_grotto::{Error, Result, MAGIC_GKEY};
 use geode_redact::scan::{Finding, Fingerprint, Rule, ScanKey, Scanner, Thresholds};
 
 use crate::{cmd, GlobalArgs, OutMode};
@@ -28,6 +29,8 @@ use crate::{cmd, GlobalArgs, OutMode};
 const EXIT_FINDINGS: i32 = 2;
 /// Default allowlist, relative to the working directory.
 const DEFAULT_ALLOW: &str = ".geode/scan-allow";
+/// Vault sentinel prefix, as accepted by `load_vault`.
+const VAULT_MARKER_PREFIX: &[u8] = b"GDE1 vault";
 
 #[derive(Args, Debug)]
 pub struct ScanArgs {
@@ -146,6 +149,7 @@ fn scan_root(
     let canon_root = root
         .canonicalize()
         .map_err(|e| Error::Format(format!("cannot open {}: {e}", root.display())))?;
+    let mut vault_roots: BTreeSet<PathBuf> = BTreeSet::new();
     for entry in walkdir::WalkDir::new(root)
         .follow_links(false)
         .sort_by_file_name()
@@ -159,6 +163,9 @@ fn scan_root(
         let path = entry.path();
         let ft = entry.file_type();
         if ft.is_dir() {
+            if is_vault_root(path) {
+                vault_roots.insert(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
+            }
             continue;
         }
         if ft.is_symlink() {
@@ -184,12 +191,21 @@ fn scan_root(
         *files += 1;
         let shown = path.display().to_string();
         let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        if protected.contains(&canon) || path.file_name().is_some_and(|n| n == "default.gkey") {
+        // Key material fails closed before any vault exemption: a GKEY file
+        // renamed to `header.json` inside a vault is still a finding.
+        if protected.contains(&canon) || has_gkey_extension(path) || data.starts_with(MAGIC_GKEY) {
             hits.push(Hit {
                 path: shown,
                 finding: scanner.whole_file(Rule::GeodeKeyFile, &data),
             });
             continue;
+        }
+        if let Some(vault) = vault_root_for(&canon, &canon_root, &vault_roots) {
+            if let Ok(rel) = canon.strip_prefix(vault) {
+                if is_vault_structure(rel) {
+                    continue;
+                }
+            }
         }
         hits.extend(scanner.scan(&data).into_iter().map(|finding| Hit {
             path: shown.clone(),
@@ -197,6 +213,108 @@ fn scan_root(
         }));
     }
     Ok(())
+}
+
+fn has_gkey_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gkey"))
+}
+
+/// A vault root is a directory whose `GEODE` sentinel has the expected
+/// prefix and that also carries regular `header.json` and `recipients.json`.
+fn is_vault_root(dir: &Path) -> bool {
+    let is_file = |name: &str| {
+        fs::metadata(dir.join(name))
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+    };
+    if !is_file("GEODE") || !is_file("header.json") || !is_file("recipients.json") {
+        return false;
+    }
+    fs::read(dir.join("GEODE"))
+        .map(|marker| marker.starts_with(VAULT_MARKER_PREFIX))
+        .unwrap_or(false)
+}
+
+/// The nearest detected vault root containing `file`, bounded by the scan
+/// root. A file passed directly as the scan root is never exempted.
+fn vault_root_for<'a>(
+    file: &Path,
+    scan_root: &Path,
+    vault_roots: &'a BTreeSet<PathBuf>,
+) -> Option<&'a Path> {
+    let mut dir = file.parent()?;
+    loop {
+        if let Some(root) = vault_roots.get(dir) {
+            return Some(root.as_path());
+        }
+        if dir == scan_root {
+            return None;
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Only the documented vault metadata and ciphertext layout is exempt.
+/// Anything else dropped inside a vault directory is scanned normally.
+fn is_vault_structure(rel: &Path) -> bool {
+    use std::ffi::OsStr;
+    let parts: Vec<&OsStr> = rel.components().map(|c| c.as_os_str()).collect();
+    let name = |i: usize| parts.get(i).and_then(|p| p.to_str());
+    match parts.as_slice() {
+        [only] => matches!(
+            only.to_str(),
+            Some(
+                "GEODE"
+                    | "header.json"
+                    | "manifest.json"
+                    | "recipients.json"
+                    | "policy.json.sealed"
+            )
+        ),
+        [a, epoch, file] if *a == OsStr::new("epochs") => {
+            valid_epoch(epoch)
+                && matches!(*file, f if f == OsStr::new("manifest.json") || f == OsStr::new("recipients.json"))
+        }
+        [a, epoch, snapshots, file]
+            if *a == OsStr::new("epochs") && *snapshots == OsStr::new("snapshots") =>
+        {
+            valid_epoch(epoch) && name(3).is_some_and(is_snapshot_file)
+        }
+        [a, epoch, objects, shard, object]
+            if *a == OsStr::new("epochs") && *objects == OsStr::new("objects") =>
+        {
+            valid_epoch(epoch)
+                && name(3).is_some_and(is_hex_digits::<2>)
+                && name(4).is_some_and(is_gobj)
+        }
+        _ => false,
+    }
+}
+
+fn valid_epoch(epoch: &std::ffi::OsStr) -> bool {
+    epoch
+        .to_str()
+        .is_some_and(|s| s.len() == 8 && s.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn is_snapshot_file(file: &str) -> bool {
+    file.strip_suffix(".json")
+        .is_some_and(|stem| validate_snapshot_name(stem).is_ok())
+}
+
+fn is_gobj(file: &str) -> bool {
+    file.strip_suffix(".gobj")
+        .is_some_and(|stem| stem.len() == 32 && stem.bytes().all(is_lower_hex))
+}
+
+fn is_hex_digits<const N: usize>(s: &str) -> bool {
+    s.len() == N && s.bytes().all(is_lower_hex)
+}
+
+fn is_lower_hex(b: u8) -> bool {
+    b.is_ascii_digit() || (b'a'..=b'f').contains(&b)
 }
 
 fn read_capped(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {

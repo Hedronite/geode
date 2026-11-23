@@ -174,6 +174,87 @@ fn err(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
+fn ok(e: &Env, args: &[&str]) -> Output {
+    let o = e.geode(args);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{args:?}: {}{}",
+        String::from_utf8_lossy(&o.stdout),
+        err(&o)
+    );
+    o
+}
+
+/// A minimal vault: `k.gkey` outside it, then `vault init`.
+fn init_vault(e: &Env) -> PathBuf {
+    ok(e, &["keygen", "--insecure-plaintext", "k.gkey"]);
+    ok(e, &["--key", "k.gkey", "vault", "init", "v.geode"]);
+    e.dir.join("v.geode")
+}
+
+fn epoch_dir(root: &Path) -> PathBuf {
+    let epochs = root.join("epochs");
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&epochs)
+        .expect("epochs")
+        .map(|d| d.expect("entry").path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    dirs.pop().expect("an epoch directory")
+}
+
+/// A clean vault with sealed entries, a sealed policy, a rotated epoch, a
+/// snapshot, and a real ciphertext object.
+fn rich_clean_vault(e: &Env) -> PathBuf {
+    let root = init_vault(e);
+    std::fs::write(e.dir.join("source.txt"), b"seal me whole\n").unwrap();
+    ok(
+        e,
+        &[
+            "--key",
+            "k.gkey",
+            "seal",
+            "source.txt",
+            "v.geode",
+            "--seal-names",
+        ],
+    );
+    ok(
+        e,
+        &[
+            "--key", "k.gkey", "vault", "rotate", "v.geode", "--yes", "--reseal",
+        ],
+    );
+    ok(
+        e,
+        &[
+            "--key", "k.gkey", "snapshot", "create", "v.geode", "--name", "pre-scan",
+        ],
+    );
+    let shown = json(&e.geode(&[
+        "--key", "k.gkey", "--output", "json", "policy", "show", "v.geode",
+    ]));
+    let vid = shown["policy"]["vault_id"].as_str().unwrap();
+    let policy = format!(
+        r#"{{"version":1,"vault_id":"{vid}","default":"deny","principals":[{{"id":"human:local","ops":["list","read","write","mount","verify","admin"],"prefixes":[""]}}]}}"#
+    );
+    std::fs::write(e.dir.join("policy.json"), policy).unwrap();
+    ok(
+        e,
+        &[
+            "--key",
+            "k.gkey",
+            "policy",
+            "set",
+            "v.geode",
+            "--file",
+            "policy.json",
+        ],
+    );
+    root
+}
+
 #[test]
 fn hook_blocks_all_three_plants_without_printing_them() {
     let e = Env::new();
@@ -494,6 +575,186 @@ fn key_files_inside_a_root_are_always_findings() {
     assert_eq!(
         gkey,
         [&("keys/default.gkey".to_owned(), "geode-key-file".to_owned())],
+        "{found:?}"
+    );
+}
+
+#[test]
+fn clean_vault_metadata_is_exempt() {
+    let e = Env::new();
+    let root = rich_clean_vault(&e);
+    let epoch = epoch_dir(&root);
+    let snapshots = epoch.join("snapshots");
+    let objects = epoch.join("objects");
+    assert!(root.join("GEODE").is_file());
+    assert!(root.join("header.json").is_file());
+    assert!(root.join("recipients.json").is_file());
+    assert!(epoch.join("manifest.json").is_file());
+    assert!(epoch.join("recipients.json").is_file());
+    assert!(root.join("policy.json.sealed").is_file());
+    assert!(snapshots.join("pre-scan.json").is_file());
+    assert!(walkdir::WalkDir::new(&objects)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .any(|x| x.file_type().is_file() && x.path().extension().is_some_and(|e| e == "gobj")));
+
+    let o = e.geode(&["scan", "--hook", "--json", "v.geode"]);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        err(&o)
+    );
+    let doc = json(&o);
+    assert_eq!(
+        (doc["clean"].as_bool(), doc["suppressed"].as_u64()),
+        (Some(true), Some(0))
+    );
+    assert_eq!(doc["findings"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn stray_gkey_inside_vault_is_unsuppressible() {
+    let e = Env::new();
+    let root = init_vault(&e);
+    std::fs::write(root.join("stray.gkey"), random(54)).unwrap();
+
+    let o = e.geode(&["scan", "--hook", "--json", "v.geode"]);
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+    let doc = json(&o);
+    let found = rules(&doc);
+    assert_eq!(
+        found,
+        [("v.geode/stray.gkey".into(), "geode-key-file".into())]
+    );
+    let fp = doc["findings"][0]["fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    std::fs::write(e.dir.join("key.allow"), format!("{fp}\n")).unwrap();
+    let o = e.geode(&[
+        "scan",
+        "--hook",
+        "--json",
+        "--allow",
+        "key.allow",
+        "v.geode",
+    ]);
+    assert_eq!(o.status.code(), Some(2));
+    let doc = json(&o);
+    assert_eq!(doc["suppressed"], 0);
+    assert_eq!(
+        rules(&doc),
+        [("v.geode/stray.gkey".into(), "geode-key-file".into())]
+    );
+}
+
+#[test]
+fn renamed_gkey_magic_is_caught_inside_and_outside_vaults() {
+    let e = Env::new();
+    let root = init_vault(&e);
+    ok(&e, &["keygen", "--insecure-plaintext", "id.gkey"]);
+    let raw = std::fs::read(e.dir.join("id.gkey")).unwrap();
+    assert!(raw.starts_with(b"GKEY"));
+    std::fs::write(root.join("backup.dat"), &raw).unwrap();
+    std::fs::create_dir_all(e.dir.join("loose")).unwrap();
+    std::fs::write(e.dir.join("loose/backup.dat"), &raw).unwrap();
+
+    for scan in ["v.geode", "loose"] {
+        let o = e.geode(&["scan", "--hook", "--json", scan]);
+        assert_eq!(o.status.code(), Some(2), "{scan}: {}", err(&o));
+        let found = rules(&json(&o));
+        assert!(
+            found
+                .iter()
+                .any(|(p, r)| p.ends_with("backup.dat") && r == "geode-key-file"),
+            "{scan}: {found:?}"
+        );
+    }
+}
+
+#[test]
+fn gkey_bytes_disguised_as_header_json_in_vault_are_caught_first() {
+    let e = Env::new();
+    let root = init_vault(&e);
+    std::fs::write(root.join("header.json"), b"GKEY disguised payload\n").unwrap();
+
+    let o = e.geode(&["scan", "--hook", "--json", "v.geode"]);
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+    assert_eq!(
+        rules(&json(&o)),
+        [("v.geode/header.json".into(), "geode-key-file".into())]
+    );
+}
+
+#[test]
+fn stray_plaintext_inside_vault_is_scanned() {
+    let e = Env::new();
+    let root = rich_clean_vault(&e);
+    let aws = format!("AKIA{}", pick(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 16));
+    let ghp = format!(
+        "ghp_{}",
+        pick(
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            36
+        )
+    );
+    std::fs::write(root.join("leaked.txt"), format!("token={aws}\n")).unwrap();
+    std::fs::write(epoch_dir(&root).join("note.txt"), format!("token: {ghp}\n")).unwrap();
+
+    let o = e.geode(&["scan", "--hook", "--json", "v.geode"]);
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+    let found = rules(&json(&o));
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == "v.geode/leaked.txt" && r == "aws-access-key"),
+        "{found:?}"
+    );
+    let note = found
+        .iter()
+        .find(|(p, _)| p.starts_with("v.geode/epochs/") && p.ends_with("/note.txt"))
+        .unwrap_or_else(|| panic!("epoch note not scanned: {found:?}"));
+    assert_eq!(note.1, "github-token");
+}
+
+#[test]
+fn standalone_vault_metadata_is_not_exempt() {
+    let e = Env::new();
+    let aws = format!("AKIA{}", pick(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 16));
+    let ghp = format!(
+        "ghp_{}",
+        pick(
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+            36
+        )
+    );
+    std::fs::create_dir_all(e.dir.join("alone")).unwrap();
+    std::fs::write(
+        e.dir.join("alone/header.json"),
+        format!("{{\"note\":\"{aws}\"}}\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        e.dir.join("alone/recipients.json"),
+        format!("{{\"note\":\"{ghp}\"}}\n"),
+    )
+    .unwrap();
+
+    let o = e.geode(&["scan", "--hook", "--json", "alone"]);
+    assert_eq!(o.status.code(), Some(2), "{}", err(&o));
+    let found = rules(&json(&o));
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == "alone/header.json" && r == "aws-access-key"),
+        "{found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == "alone/recipients.json" && r == "github-token"),
         "{found:?}"
     );
 }
