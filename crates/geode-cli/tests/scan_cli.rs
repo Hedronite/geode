@@ -1046,6 +1046,101 @@ fn malformed_paths_with_valid_container_bytes_are_scanned() {
 }
 
 #[test]
+fn long_non_gde1_gobj_is_scanned() {
+    let e = Env::new();
+    let root = init_vault(&e);
+    let aws = planted_aws();
+    let rel = "epochs/00000001/objects/aa/0123456789abcdef0123456789abcdef.gobj";
+    let path = root.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut body = vec![b'X'; 108];
+    body.extend_from_slice(format!("\naws = {aws}\n").as_bytes());
+    std::fs::write(&path, body).unwrap();
+
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == &format!("v.geode/{rel}") && r == "aws-access-key"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn json_shaped_manifest_is_scanned() {
+    let e = Env::new();
+    let root = init_vault(&e);
+    let ghp = planted_ghp();
+    let rel = "epochs/00000001/manifest.json";
+    std::fs::write(root.join(rel), format!("{{\"secret\":\"{ghp}\"}}\n")).unwrap();
+
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == &format!("v.geode/{rel}") && r == "github-token"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn json_shaped_snapshot_is_scanned() {
+    let e = Env::new();
+    let root = init_vault(&e);
+    let ghp = planted_ghp();
+    let rel = "epochs/00000001/snapshots/s2.json";
+    let path = root.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, format!("{{\"secret\":\"{ghp}\"}}\n")).unwrap();
+
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == &format!("v.geode/{rel}") && r == "github-token"),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn json_shaped_recipients_are_scanned() {
+    // Invalid epoch recipients inside an otherwise valid vault.
+    let e = Env::new();
+    let root = init_vault(&e);
+    let ghp = planted_ghp();
+    let rel = "epochs/00000001/recipients.json";
+    std::fs::write(root.join(rel), format!("{{\"secret\":\"{ghp}\"}}\n")).unwrap();
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == &format!("v.geode/{rel}") && r == "github-token"),
+        "{found:?}"
+    );
+
+    // A vault-looking dir whose root recipients do not validate.
+    let e = Env::new();
+    let root = init_vault(&e);
+    std::fs::write(
+        root.join("recipients.json"),
+        format!("{{\"secret\":\"{ghp}\"}}\n"),
+    )
+    .unwrap();
+    let (code, found) = scan_rules(&e, "v.geode");
+    assert_eq!(code, 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .any(|(p, r)| p == "v.geode/recipients.json" && r == "github-token"),
+        "{found:?}"
+    );
+}
+
+#[test]
 fn large_valid_object_is_exempt_before_max_bytes() {
     let e = Env::new();
     init_vault(&e);
