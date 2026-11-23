@@ -3,7 +3,7 @@ title: Geode changelog
 type: repo-changelog
 status: current
 created: "2026-09-15"
-updated: "2026-11-13"
+updated: "2026-11-23"
 ---
 
 # Changelog
@@ -11,6 +11,40 @@ updated: "2026-11-13"
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: semver against the `geode` CLI surface; the `GDE1` format is frozen at suite `0x01` (compatibility promise). Foundry packs v021/v022 are milestones, not the git tag.
 
 ## [Unreleased]
+
+Hardening release, planned as 3.1.0 (the crate version is not bumped yet). The cipher suite stays `0x01`. `GDE1` objects, manifests, headers, and recipients are unchanged. Only the sealed policy container gains a new format (below).
+
+### Upgrade notes
+
+- **Sealed policy is written as `GPO2`.** `policy set` and `vault rotate --reseal` now write `policy.json.sealed` as `GPO2`, with a fresh random nonce on every seal. 3.1.0 still reads the legacy `GPOL` container, so existing vaults keep working. Once a vault's policy has been written as `GPO2`, geode 3.0.x fails closed (exit 2) on `policy show` and on every verb that loads the policy (`agent token issue`, `run`, custody tools). 3.0.x `verify` still exits 0 on such a vault, because 3.0.x `verify` never reads `policy.json.sealed`. Do not downgrade a vault after 3.1.0 has rewritten its policy.
+- **`--seal-names` vaults already rotated by 3.0.x are not repaired by rotating again.** 3.0.x `vault rotate --reseal` left each sealed path sealed under the previous epoch, so afterwards `list`, `cat`, and `open` fail with exit 2, while `verify` still exits 0. 3.1.0 re-seals names correctly for rotations it performs. On a vault that 3.0.x already rotated, `vault rotate` exits 2 and restores the old epoch. The file contents are intact. The names open only under the previous epoch's name key, which is reachable through that epoch's kept recipients snapshot (`epochs/<previous epoch>/recipients.json`). This release ships no repair command, so keep that snapshot. Vaults without `--seal-names`, and sealed-name vaults never rotated by 3.0.x, are not affected.
+- **Directory fsync errors now fail the write.** `write_atomic` now fsyncs the file, renames it, then fsyncs the destination directory and the parent of each directory it created, and it returns any of those errors. 3.0.x synced the directory before the rename and ignored the result. On a filesystem that refuses fsync on a directory, a vault write that used to succeed now fails (exit 1).
+- **`verify --output json`** adds `manifest`, the verified manifest root, and keeps `content_root` as an alias holding the same value. `files` counts file and symlink entries; directory rows are not counted.
+
+### Security
+
+- The sealed policy no longer reuses its AEAD nonce. Before, every policy sealed in one epoch used the same nonce derived from the epoch key, so two policy versions in one epoch shared keystream. `GPO2` is `GPO2 || 0x01 || nonce(32) || tag(16) || ciphertext`, with associated data binding the magic, suite, vault id, epoch, and nonce.
+- The custody rate limit is daemon-wide: a sliding 10-second window per (token, peer uid) that survives reconnects. A principal's `max_calls_per_10s` (1 to 10000, default 128) is now enforced; before, it was accepted and ignored. Failed authentication has its own bounded budget per peer uid, so it cannot use up a valid token's budget.
+- Custody `geode_run` reloads and MAC-checks `manifest.json` on every call, so a replaced or removed value is never injected from the cached manifest. A vault rotated while custody is unlocked is refused on every tool until custody is relocked.
+- The audit database (`audit.db`, plus its `-wal` and `-shm` files) is created and kept at mode 0600 on Unix, whatever the umask, including when the file already exists with looser permissions.
+- Scratch buffers that hold key material during key derivation, passphrase wrapping, and token-key derivation are zeroized.
+- The sealed-name pad comparison is constant-time.
+- Event output refuses values that start with the `GPO2` magic, as it already did for the other sealed formats.
+
+### Fixed
+
+- `vault rotate --reseal` re-seals `--seal-names` paths under the new epoch and re-binds bound entries to the new path, so `list`, `cat`, `open`, and `verify` keep working across any number of rotations. Resealed entries stay sorted by path.
+- `vault rotate --reseal` no longer fails on a vault that holds a directory row (an empty directory created through a mount). Directory rows are carried forward, with their names re-sealed when needed, and no object is read for them.
+- `geode verify` handles directory rows instead of failing with "not found". It rejects trailing or truncated object bytes in every mode, checks the manifest root against its entries in every mode, and in full mode also recomputes each entry's content root and authenticates the sealed policy when one exists.
+- Reading an object (`cat`, mount reads) rejects trailing or truncated bytes, and mount reads seek to the requested chunks instead of reading the whole object file.
+- `write_atomic` returns the real rename error and removes its temp file, and it accepts relative destinations.
+- A malformed or truncated `header.json`, `manifest.json`, `recipients.json`, or `policy.json.sealed` now exits 2 (authentication/integrity failure) instead of 1, and the error text names the same exit family as the process exit code.
+- `policy set` rejects a `max_calls_per_10s` outside 1 to 10000 (exit 1).
+- The token documentation now says what tokens do: a token stays valid across custody-daemon restarts until it expires, as long as the vault epoch is unchanged. Revoking it requires an epoch rotation.
+
+### Known limitations
+
+- On a Linux system where coreutils is a single multicall binary (Ubuntu 26.04, for example), a pinned program that resolves to that binary is executed from the resolved file. If the multicall binary picks its tool from its own name, the pinned command may not behave as expected. Pin a dedicated binary instead. The test suite no longer depends on `/bin/echo`.
 
 ## [3.0.1] — 2026-11-13
 
