@@ -12,6 +12,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+### Added
+
+- Canonical `geode-env-seal` Nushell skill (`.agents/skills/geode-env-seal/{SKILL.md,env-seal.nu}`, byte-identical harness mirrors in `.claude`, `.grok`, and `.cursor`, and a deterministic test suite at `tests/skills/env_seal_test.nu`) for fail-closed per-object `.env` split-sealing (`import`), names-only manifest `geode run` argument generation (`run-args`), pre-scanned config sealing (`seal-config`), and binary ancestor trust verification (`pin-check`). The existing `.agents/skills/geode/geode.nu` skill remains metadata-only.
+
+### Security
+
+- `geode scan` now flags any `*.gkey` file (case-insensitive) and any file starting with the 4-byte `GKEY` magic anywhere in the scan tree, including inside a vault directory and regardless of filename or `--key`.
+- `geode scan` vault-directory exclusion now validates both path and container structure (exact `GEODE` sentinel, typed `header.json` with `label` scanned, typed `manifest.json`, non-empty `recipients.json`, `snapshots/*.json`, `GPO2`/`GPOL` policy, and a `GDE1` suite `0x01` object header of at least 108 bytes), so forged sentinels, spoofed metadata, or stray plaintext files dropped inside a vault directory still fail closed (exit 2).
+
+### Fixed
+
+- `geode scan --hook` exits 0 on clean Geode vaults (including `--seal-names` vaults, sealed policies, and large valid `.gobj` files under `--max-bytes`) without suppressing stray secrets or key files.
+- `geode vault init` now resolves the deepest existing ancestor physically (following symlinks) and refuses nested initialization inside any existing vault ancestor (exit 1) before loading keys or creating directories.
+- `geode tui` header strip now shows only interactive TUI tabs (`geode`, `list`, `verify`, `cat`), moving CLI-only verbs (`keygen`, `vault init`, `seal`, `open`, `keyring`) to the help overlay with accurate descriptions.
+- `geode tui` vault picker now discovers vaults in priority order (explicit argument, `$GEODE_VAULT`, XDG/HOME `hedronite/geode/vaults` registry, sorted one-level CWD `*.geode`, `~/notes.geode`) with canonical-path deduplication and `GEODE` marker checks.
+- `geode run --help` now explicitly warns that `--secret` binds one whole vault object per variable (never bind a multi-key `.env` whole; split-seal one key per object) and documents `--require-pin` with an unpinned `--allow-cmd` (exit 1 usage error) versus runtime pin/policy denials (exit 3); `geode agent --help` documents out-of-prefix `not found` (exit 1 anti-existence-oracle) versus `geode policy check` (exit 3).
+
 ## [3.1.0] — 2026-11-23
 
 Geode 3.1.0 hardening release. The cipher suite stays `0x01`. `GDE1` objects, manifests, headers, and recipients are unchanged. Only the sealed policy container gains the `GPO2` format (below).

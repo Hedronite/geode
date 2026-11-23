@@ -88,14 +88,32 @@ pub struct RunArgs {
     /// MCP `geode_run` on the custody daemon.
     #[arg(long, value_name = "PATH")]
     pub socket: Option<PathBuf>,
-    /// Bind the vault object at PATH to env NAME (repeatable). NAME matches
-    /// `[A-Z_][A-Z0-9_]{0,63}`; `PATH`, `HOME`, `LANG`, `TERM`, `GEODE_*`,
-    /// `LD_*`, and `DYLD_*` are reserved. The value goes only into the
-    /// child's env and is never printed. A value under 8 bytes is refused.
-    /// Child output is redacted for the v1 encodings only (raw, base64,
-    /// hex, one percent-encoding, canonical JSON string). Shell quoting and
-    /// other transforms are not caught. Redaction does not stop a hostile
-    /// command.
+    /// Bind ONE WHOLE vault object at PATH to env NAME (repeatable).
+    ///
+    /// The bound value is the unit redacted and argv-checked.
+    ///
+    /// Nested keys inside a multi-key file are not matched separately.
+    ///
+    /// Never bind a multi-key `.env` file whole.
+    ///
+    /// Split-seal every key as its own vault object.
+    ///
+    /// Use the value only, with no trailing newline.
+    ///
+    /// NAME matches `[A-Z_][A-Z0-9_]{0,63}`.
+    ///
+    /// `PATH`, `HOME`, `LANG`, `TERM`, `GEODE_*`, `LD_*`, and `DYLD_*` are
+    /// reserved.
+    ///
+    /// The value goes only into the child's env and is never printed.
+    ///
+    /// A value under 8 bytes is refused.
+    ///
+    /// Child output is redacted for the v1 encodings only.
+    ///
+    /// Shell quoting and other transforms are not caught.
+    ///
+    /// Redaction does not stop a hostile command.
     #[arg(long = "secret", value_name = "NAME=PATH")]
     pub secret: Vec<String>,
     /// File binding. Not available in local mode in this build.
@@ -126,9 +144,19 @@ pub struct RunArgs {
     /// re-checks the path against that fd immediately before exec.
     #[arg(long, value_name = "FILE")]
     pub allow_cmds_file: Option<PathBuf>,
-    /// Refuse an allow rule that has no sha256 pin, including a bare
-    /// `--allow-cmd PATH`. `"require_pin": true` in `--allow-cmds-file`
-    /// does the same. Off by default, so a bare path still runs.
+    /// Refuse an allow rule that has no sha256 pin.
+    ///
+    /// This includes a bare `--allow-cmd PATH`.
+    ///
+    /// `"require_pin": true` in `--allow-cmds-file` does the same.
+    ///
+    /// Off by default, so a bare path still runs.
+    ///
+    /// With this flag, an unpinned `--allow-cmd` is a usage error.
+    ///
+    /// That pre-exec check exits 1.
+    ///
+    /// A runtime pin/hash mismatch or a policy denial exits 3.
     #[arg(long)]
     pub require_pin: bool,
     /// Host this run may contact with a bound secret (repeatable). Required

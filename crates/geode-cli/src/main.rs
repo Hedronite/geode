@@ -156,6 +156,12 @@ enum Commands {
     ///
     /// `serve` speaks MCP on stdio or a Unix socket. `read`, `write`, and
     /// `list` require a token. `geode tui` does not accept one.
+    ///
+    /// Out-of-prefix agent calls default to exit 1 with `not found`.
+    ///
+    /// This hides whether a path exists outside the token allow prefix.
+    ///
+    /// Operator `geode policy check` exits 3 for a policy denial.
     Agent(AgentArgs),
     /// Run a command with vault secrets in its environment.
     ///
@@ -164,12 +170,34 @@ enum Commands {
     /// before the child starts. The host check is the custody allowlist, on
     /// macOS and on Linux. Output is redacted. Redaction does not stop a
     /// hostile command.
-    /// Pin the program with `--allow-cmd` JSON or `--allow-cmds-file`
-    /// (`path`, `sha256`, `args_prefix`). A bare `--allow-cmd PATH` does
-    /// not pin. `--require-pin`, or `"require_pin": true` in that file,
-    /// rejects a rule with no sha256. A pin is hashed from the fd that
-    /// exec runs, and the path from the file up to `/` must be root-owned,
-    /// not group- or other-writable, and not a symlink.
+    ///
+    /// Each `--secret` binds ONE WHOLE vault object to one environment
+    /// variable.
+    ///
+    /// Redaction and command-line checks cover only that whole bound value.
+    ///
+    /// Never bind a multi-key `.env` file whole.
+    ///
+    /// Split-seal every key as its own vault object.
+    ///
+    /// Use the value only, with no trailing newline.
+    ///
+    /// Pin with `--allow-cmd` JSON or `--allow-cmds-file`.
+    ///
+    /// Rule keys are `path`, `sha256`, and `args_prefix`.
+    ///
+    /// A bare `--allow-cmd PATH` does not pin.
+    ///
+    /// With `--require-pin`, an unpinned `--allow-cmd` is a usage error.
+    ///
+    /// That pre-exec check exits 1.
+    ///
+    /// A runtime pin/hash mismatch or a policy denial exits 3.
+    ///
+    /// A pin is hashed from the fd that exec runs.
+    ///
+    /// The file and its ancestors must be root-owned, not group- or
+    /// other-writable, and not symlinks.
     Run(cmd::run::RunArgs),
     /// Audit log: verify the append-only hash chain.
     Audit(cmd::audit::AuditArgs),
@@ -321,6 +349,12 @@ pub enum KeyringCmd {
 ///
 /// Token flags belong to `serve`, `read`, `write`, and `list`. They are
 /// not global, so `geode tui` does not accept a token.
+///
+/// Out-of-prefix agent calls default to exit 1 with `not found`.
+///
+/// This hides whether a path exists outside the token allow prefix.
+///
+/// Operator `geode policy check` exits 3 for a policy denial.
 #[derive(Args, Debug)]
 pub struct AgentArgs {
     #[command(subcommand)]
@@ -637,5 +671,58 @@ fn main() {
 
     if let Err(err) = result {
         cmd::fail(out, command.verb(), &err);
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn sub_help(name: &str) -> String {
+        let mut cmd = Cli::command();
+        cmd.find_subcommand_mut(name)
+            .expect("subcommand")
+            .clone()
+            .term_width(80)
+            .render_long_help()
+            .to_string()
+    }
+
+    fn flat(text: &str) -> String {
+        text.replace('`', "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn run_help_documents_whole_object_binding_and_exit_semantics() {
+        let help = flat(&sub_help("run"));
+        assert!(help.contains("ONE WHOLE vault object"), "{help}");
+        assert!(help.contains("multi-key .env file"), "{help}");
+        assert!(help.contains("trailing newline"), "{help}");
+        assert!(help.contains("Redaction and command-line checks"), "{help}");
+        assert!(
+            help.contains("unpinned --allow-cmd is a usage error"),
+            "{help}"
+        );
+        assert!(help.contains("pre-exec check exits 1"), "{help}");
+        assert!(
+            help.contains("pin/hash mismatch or a policy denial exits 3"),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn agent_help_documents_out_of_prefix_and_policy_check_exits() {
+        let help = flat(&sub_help("agent"));
+        assert!(
+            help.contains("Out-of-prefix agent calls default to exit 1"),
+            "{help}"
+        );
+        assert!(help.contains("not found"), "{help}");
+        assert!(help.contains("outside the token allow prefix"), "{help}");
+        assert!(help.contains("policy check exits 3"), "{help}");
     }
 }
