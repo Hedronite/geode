@@ -63,31 +63,85 @@ fn shard_dir(objects_root: &Path, object_id: &ObjectId) -> PathBuf {
     objects_root.join(&hex[..2])
 }
 
-/// Atomic write: temp + fsync(file) + fsync(dir) + rename (03-format 10).
+/// Atomic write: temp + fsync(file) + rename + fsync directories
+/// (03-format 10, revised for G-7).
 ///
-/// The temp file is created in the same directory as dest so the rename is
-/// atomic on the same filesystem. On failure the temp file is removed.
+/// The temp file is created in the same directory as `dest`, so the rename is
+/// atomic on one filesystem. Order is fixed: write, file `sync_all`, rename,
+/// then `sync_all` on the destination directory (and, when the write created
+/// new directories such as a shard `objects/xx/`, on every newly created
+/// directory's parent, bottom-up). All sync errors propagate. A failed rename
+/// removes the temp file and returns the exact rename error.
 pub fn write_atomic(dest: &Path, data: &[u8]) -> Result<()> {
+    write_atomic_with(
+        dest,
+        data,
+        |file| file.sync_all(),
+        |from, to| std::fs::rename(from, to),
+        |dir| std::fs::File::open(dir)?.sync_all(),
+    )
+}
+
+/// The ordering seam behind [`write_atomic`]. Production passes the real
+/// file-sync, rename, and directory-sync operations; tests inject closures
+/// that record the call order and fail individual steps.
+fn write_atomic_with(
+    dest: &Path,
+    data: &[u8],
+    sync_file: impl Fn(&std::fs::File) -> std::io::Result<()>,
+    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+    sync_dir: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<()> {
     let parent = dest
         .parent()
         .ok_or_else(|| Error::Format("dest has no parent".into()))?;
+    // Walk up to the first existing ancestor so a brand-new shard directory
+    // tells us every directory whose entry must be persisted.
+    let mut missing = Vec::new();
+    let mut cursor = parent;
+    while !cursor.exists() {
+        let up = cursor
+            .parent()
+            .ok_or_else(|| Error::Format("dest has no existing ancestor".into()))?;
+        if up.as_os_str().is_empty() {
+            return Err(Error::Format("dest has no existing ancestor".into()));
+        }
+        missing.push(cursor.to_path_buf());
+        cursor = up;
+    }
     std::fs::create_dir_all(parent)?;
     let tmp = parent.join(format!(".gde-tmp-{}", hex_encode(&random_bytes(8)?)));
-    {
+    let written = {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .truncate(true)
             .open(&tmp)?;
-        f.write_all(data)?;
-        f.sync_all()?;
-    }
-    if let Ok(d) = std::fs::File::open(parent) {
-        let _ = d.sync_all();
-    }
-    if std::fs::rename(&tmp, dest).is_err() {
+        f.write_all(data)
+            .map_err(Error::Io)
+            .and_then(|()| sync_file(&f).map_err(Error::Io))
+    };
+    if let Err(err) = written {
         let _ = std::fs::remove_file(&tmp);
-        return Err(Error::Io(std::io::Error::last_os_error()));
+        return Err(err);
+    }
+    if let Err(rename_err) = rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::Io(rename_err));
+    }
+    // Persist the rename, then every directory entry created above it.
+    let mut dirs = Vec::with_capacity(missing.len() + 1);
+    dirs.push(parent.to_path_buf());
+    for dir in &missing {
+        if let Some(up) = dir.parent() {
+            dirs.push(up.to_path_buf());
+        }
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    for dir in dirs {
+        sync_dir(&dir).map_err(Error::Io)?;
     }
     Ok(())
 }
@@ -203,6 +257,185 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"v1");
         write_atomic(&dest, b"v2").unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"v2");
+    }
+
+    use std::cell::RefCell;
+    use std::io;
+
+    fn dir_name(path: &Path) -> String {
+        path.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    fn no_temp_files(dir: &Path) -> bool {
+        std::fs::read_dir(dir).unwrap().all(|e| {
+            !e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".gde-tmp-")
+        })
+    }
+
+    #[test]
+    fn write_atomic_orders_file_rename_parent_sync() {
+        let d = tempdir().unwrap();
+        let dest = d.path().join("f.txt");
+        let log = RefCell::new(Vec::<String>::new());
+        write_atomic_with(
+            &dest,
+            b"ordered",
+            |_| {
+                log.borrow_mut().push("file_sync".into());
+                Ok(())
+            },
+            |tmp, dst| {
+                log.borrow_mut().push("rename".into());
+                std::fs::rename(tmp, dst)
+            },
+            |dir| {
+                log.borrow_mut().push(format!("dir_sync:{}", dir_name(dir)));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "file_sync".to_owned(),
+                "rename".to_owned(),
+                format!("dir_sync:{}", dir_name(d.path())),
+            ]
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), b"ordered");
+    }
+
+    #[test]
+    fn write_atomic_syncs_new_shard_parent_after_rename() {
+        let d = tempdir().unwrap();
+        let objects = d.path().join("objects");
+        std::fs::create_dir(&objects).unwrap();
+        let dest = objects.join("ab").join("x.gobj");
+        let log = RefCell::new(Vec::<String>::new());
+        write_atomic_with(
+            &dest,
+            b"shard",
+            |_| {
+                log.borrow_mut().push("file_sync".into());
+                Ok(())
+            },
+            |tmp, dst| {
+                log.borrow_mut().push("rename".into());
+                std::fs::rename(tmp, dst)
+            },
+            |dir| {
+                log.borrow_mut().push(format!("dir_sync:{}", dir_name(dir)));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "file_sync".to_owned(),
+                "rename".to_owned(),
+                "dir_sync:ab".to_owned(),
+                "dir_sync:objects".to_owned(),
+            ],
+            "new shard dir must sync itself and its parent, after the rename"
+        );
+    }
+
+    #[test]
+    fn write_atomic_rename_error_is_returned_and_temp_removed() {
+        let d = tempdir().unwrap();
+        let dest = d.path().join("f.txt");
+        let log = RefCell::new(Vec::<String>::new());
+        let err = write_atomic_with(
+            &dest,
+            b"x",
+            |_| Ok(()),
+            |_, _| {
+                log.borrow_mut().push("rename".into());
+                Err(io::Error::other("rename-injected"))
+            },
+            |_| {
+                log.borrow_mut().push("dir_sync".into());
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        match err {
+            Error::Io(e) => assert_eq!(e.to_string(), "rename-injected"),
+            other => panic!("want the injected io error, got {other:?}"),
+        }
+        assert_eq!(*log.borrow(), vec!["rename".to_owned()]);
+        assert!(!dest.exists());
+        assert!(no_temp_files(d.path()));
+    }
+
+    #[test]
+    fn write_atomic_sync_errors_propagate() {
+        let d = tempdir().unwrap();
+        let dest = d.path().join("f.txt");
+        let err = write_atomic_with(
+            &dest,
+            b"x",
+            |_| Err(io::Error::other("file-sync")),
+            |tmp, dst| std::fs::rename(tmp, dst),
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Io(ref e) if e.to_string() == "file-sync"));
+        assert!(no_temp_files(d.path()));
+        assert!(!dest.exists());
+
+        let err = write_atomic_with(
+            &dest,
+            b"x",
+            |_| Ok(()),
+            |tmp, dst| std::fs::rename(tmp, dst),
+            |_| Err(io::Error::other("dir-sync")),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Io(ref e) if e.to_string() == "dir-sync"));
+        // The rename completed before the failing directory sync.
+        assert_eq!(std::fs::read(&dest).unwrap(), b"x");
+    }
+
+    #[test]
+    fn write_atomic_grandparent_sync_error_propagates() {
+        let d = tempdir().unwrap();
+        let objects = d.path().join("objects");
+        std::fs::create_dir(&objects).unwrap();
+        let dest = objects.join("cd").join("x.gobj");
+        let err = write_atomic_with(
+            &dest,
+            b"x",
+            |_| Ok(()),
+            |tmp, dst| std::fs::rename(tmp, dst),
+            |dir| {
+                if dir_name(dir) == "objects" {
+                    Err(io::Error::other("grand-sync"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Io(ref e) if e.to_string() == "grand-sync"));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"x");
+    }
+
+    #[test]
+    fn write_atomic_new_shard_roundtrip_leaves_no_temp() {
+        let d = tempdir().unwrap();
+        let objects = d.path().join("objects");
+        std::fs::create_dir(&objects).unwrap();
+        let dest = objects.join("ef").join("deep").join("note.bin");
+        write_atomic(&dest, b"roundtrip").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"roundtrip");
+        assert!(no_temp_files(&objects.join("ef").join("deep")));
+        assert!(no_temp_files(&objects.join("ef")));
+        assert!(no_temp_files(&objects));
     }
 
     #[test]
