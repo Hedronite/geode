@@ -810,16 +810,12 @@ impl Daemon {
         }
     }
 
-    /// The unlocked session must still match the epoch on disk. A rotation
-    /// while unlocked fails closed: never serve the old epoch's secrets.
-    fn require_current_epoch(&self) -> std::result::Result<(), Refusal> {
-        let mut guard = self
-            .session
-            .lock()
-            .map_err(|_| refusal("io", "session poisoned"))?;
-        let s = self.live(&mut guard)?;
+    /// The session context must still match the epoch on disk. Called inside
+    /// the same lock acquisition that reads the state it guards, so a rotation
+    /// cannot slip between the check and the read.
+    fn disk_epoch_matches(&self, ctx: &cmd::VaultCtx) -> std::result::Result<(), Refusal> {
         let (vault_id, epoch) = disk_header_identity(&self.vault)?;
-        if vault_id != cmd::hex(&s.ctx.vault_id.0) || epoch != s.ctx.epoch.0 {
+        if vault_id != cmd::hex(&ctx.vault_id.0) || epoch != ctx.epoch.0 {
             return Err(refusal(
                 "vault_epoch_changed",
                 "vault rotated while custody was unlocked; relock and unlock",
@@ -928,9 +924,6 @@ impl Daemon {
                 return Err(err);
             }
         };
-        // A rotation while the daemon holds old-epoch keys must fail closed,
-        // never serve the old epoch's secrets.
-        self.require_current_epoch()?;
         let limit = self.grant_rate_limit(&claims)?;
         self.rate_token(&claims, conn.peer.uid, limit)?;
         let empty = serde_json::json!({});
@@ -954,6 +947,9 @@ impl Daemon {
             .map_err(|_| refusal("io", "session poisoned"))?;
         let s = self.live(&mut guard)?;
         s.last_used = Instant::now();
+        // A rotation while the daemon holds old-epoch keys must fail closed,
+        // checked under the same lock that hands `s.ctx` to the tool.
+        self.disk_epoch_matches(&s.ctx)?;
         let vault_str = self.vault.to_str().unwrap_or_default();
         let call = AgentCall {
             facet_events: false,
@@ -1019,6 +1015,9 @@ impl Daemon {
             let s = self.live(&mut guard)?;
             s.last_used = Instant::now();
             let ctx = &s.ctx;
+            // Same critical section as the manifest reload below: no rotation
+            // can land between the epoch check and the state read.
+            self.disk_epoch_matches(ctx)?;
             let mk = geode_grotto::kdf::derive_meta_key(&ctx.ek, ctx.vault_id, ctx.epoch);
             let policy =
                 geode_grotto::policy::load_policy(&self.vault, &mk, ctx.vault_id, ctx.epoch)?;
@@ -2025,14 +2024,26 @@ mod tests {
     #[test]
     fn sliding_window_blocks_fixed_window_boundary_burst() {
         let base = Instant::now();
+        let at_start = base;
+        let burst = base + Duration::from_millis(9_900);
+        let boundary = base + Duration::from_millis(10_100);
         let mut rate = RateLimiter::default();
-        for _ in 0..128 {
-            assert!(rate.allow_token([7; 16], 42, 128, base + Duration::from_millis(9_900),));
+        // 128 calls inside [0 s, 9.9 s]: one at the start, 127 at 9.9 s.
+        assert!(rate.allow_token([7; 16], 42, 128, at_start));
+        for _ in 0..127 {
+            assert!(rate.allow_token([7; 16], 42, 128, burst));
         }
-        // A fixed window would have reset at 10 s and allowed this burst.
-        assert!(!rate.allow_token([7; 16], 42, 128, base + Duration::from_millis(10_100)));
-        // Once the first calls fall out of the 10 s window, calls flow again.
-        assert!(rate.allow_token([7; 16], 42, 128, base + Duration::from_millis(19_901)));
+        // At 10.1 s only the t=0 call has left the 10 s window, so exactly one
+        // slot is free. A fixed window anchored at t=0 would clear the whole
+        // queue and allow 128 calls here, which is the regression this guards.
+        assert!(
+            rate.allow_token([7; 16], 42, 128, boundary),
+            "the expired t=0 call did not free exactly one slot"
+        );
+        assert!(
+            !rate.allow_token([7; 16], 42, 128, boundary),
+            "the 9.9 s burst is still inside the 10 s window; a fixed-window reset leaked through"
+        );
     }
 
     #[test]
