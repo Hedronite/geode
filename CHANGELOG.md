@@ -12,6 +12,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ## [Unreleased]
 
+## [3.1.1] — 2026-11-23
+
+Geode 3.1.1 patch release. The cipher suite stays `0x01`; `GDE1` objects, manifests, headers, recipients, and `GPO2` policies are unchanged.
+
 ### Added
 
 - Canonical `geode-env-seal` Nushell skill (`.agents/skills/geode-env-seal/{SKILL.md,env-seal.nu}`, byte-identical harness mirrors in `.claude`, `.grok`, and `.cursor`, and a deterministic test suite at `tests/skills/env_seal_test.nu`) for fail-closed per-object `.env` split-sealing (`import`), names-only manifest `geode run` argument generation (`run-args`), pre-scanned config sealing (`seal-config`), and binary ancestor trust verification (`pin-check`). The existing `.agents/skills/geode/geode.nu` skill remains metadata-only.
@@ -23,7 +27,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: se
 
 ### Fixed
 
-- `geode scan --hook` exits 0 on clean Geode vaults (including `--seal-names` vaults, sealed policies, and large valid `.gobj` files under `--max-bytes`) without suppressing stray secrets or key files.
+- `geode scan --hook` exits 0 on clean Geode vaults (including `--seal-names` vaults, sealed policies, and large valid `.gobj` files over `--max-bytes`) without suppressing stray secrets or key files.
 - `geode vault init` now resolves the deepest existing ancestor physically (following symlinks) and refuses nested initialization inside any existing vault ancestor (exit 1) before loading keys or creating directories.
 - `geode tui` header strip now shows only interactive TUI tabs (`geode`, `list`, `verify`, `cat`), moving CLI-only verbs (`keygen`, `vault init`, `seal`, `open`, `keyring`) to the help overlay with accurate descriptions.
 - `geode tui` vault picker now discovers vaults in priority order (explicit argument, `$GEODE_VAULT`, XDG/HOME `hedronite/geode/vaults` registry, sorted one-level CWD `*.geode`, `~/notes.geode`) with canonical-path deduplication and `GEODE` marker checks.
@@ -369,7 +373,8 @@ First release. Conformance profile **`core`** (§2): format, crypto, vault init,
 - Golden vectors in `vectors/v1/` (`kdf`, `chunk`, `wrap`).
 - CI: `cargo test --workspace --locked` + `clippy -D warnings` on ubuntu-latest. Apache-2.0.
 
-[Unreleased]: https://github.com/Hedronite/geode/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/Hedronite/geode/compare/v3.1.1...HEAD
+[3.1.1]: https://github.com/Hedronite/geode/compare/v3.1.0...v3.1.1
 [3.1.0]: https://github.com/Hedronite/geode/compare/v3.0.1...v3.1.0
 [3.0.1]: https://github.com/Hedronite/geode/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/Hedronite/geode/compare/v2.0.0...v3.0.0
